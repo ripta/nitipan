@@ -80,9 +80,12 @@ body depends on a format that can change.
 
 ### Agents without a wake path
 
-Codex's app-server is experimental. It is unverified whether `codex queue` or opencode's prompt endpoint wakes an idle
-session. An agent without a wake path still needs a tier, such as delivery on its next tool call through a hook or a
-nitipan call.
+Source readings found idle wake paths in both other agents. opencode's local service starts a turn when a prompt is
+posted to an idle session. `codex queue` is documented as stable, and a 10-second poller starts a turn on an idle
+thread. Both await live tests, which the opencode and Codex wake handoffs describe.
+
+A future agent, or a setting that blocks these paths, would still need a fallback tier. One example is delivery on the
+session's next tool call through a hook or a nitipan call.
 
 ### Delivery guarantees
 
@@ -101,8 +104,8 @@ cross-user delivery, is open.
   channels. Then no message reaches an idle session. Mitigation: before design review, check the work environment's
   managed settings and provider. The research lists which settings matter.
 - **The socket body format changes** — likelihood: medium, impact: medium.
-  Only the auth line is documented. Mitigation: the adapter tests delivery against each Claude Code release nitipan
-  supports, and fails loudly on a rejected message.
+  Only the auth line is documented. Accepted by the user on 2026-10-18. The adapter still fails loudly on a rejected
+  message, so a format change is visible.
 - **Injected messages become a prompt-injection path** — likelihood: medium, impact: high.
   Any sender can put text in front of the receiving session. Mitigation: content is data, a settled decision. Sender
   identity depends on NIT-006.
@@ -133,10 +136,16 @@ cross-user delivery, is open.
 - 2026-10-18: Addressing settled on NIT-004's qualified names. Delivery settled on ADR-01's outbound streams. The wake
   questions were rewritten from the session wake path research. That research found a documented inbox socket for idle
   Claude Code sessions, replacing the draft's claim that third-party use of the socket was unknown.
+- 2026-10-18: The user accepted the risk that the socket's undocumented body format changes. The user will test the
+  Enterprise org's wake paths before talking to its admins.
+- 2026-10-18: Source readings of opencode 2.0.32 and Codex 0.163.0 found idle wake paths in both. "Agents without a
+  wake path" was rewritten to match. It had said both were unverified.
 
 ## References
 
 - `spec/reports/2026-10-18-lease-broker-research.md`: "Messaging"
 - `spec/reports/2026-10-18-session-wake-paths.md`: how each agent takes messages, and which settings gate them
+- `spec/reports/2026-10-18-opencode-wake-handoff.md`: opencode source findings and live tests
+- `spec/reports/2026-10-18-codex-wake-handoff.md`: Codex source findings and live tests
 - ADR-01: machines connect out to the broker
 - NIT-004: the broker that holds the mailboxes
