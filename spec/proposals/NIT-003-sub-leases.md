@@ -13,6 +13,7 @@
 - NIT-001 — "Domain keys and overlap", "Claiming", and "Breaking a live lease". A sub-lease is a second lease inside a
   live holder's domain, which NIT-001's overlap rule refuses today
 - NIT-005 — "Token per grant". A sub-lease is a grant, and its token's relation to the parent's is open here
+- NIT-008 — "Revocation" and "Record shape". Recall with a deadline extends this proposal's revocation and its tombstone
 
 ## Summary
 
@@ -34,11 +35,21 @@ These come from the roadmap the user approved on 2026-10-18, recorded in the res
 A sub-lease is granted by the session that holds the parent lease. No other session can carve a sub-lease out of a
 domain it does not hold.
 
+### No nesting
+
+A sub-lessee cannot delegate again. Nobody needs it, and it would make cascading revocation and tombstone fan-out
+required. A sub-lease record that names its parent leaves room for a later proposal to allow nesting.
+
+### Revocation is immediate
+
+When a sub-lease is revoked, it ends at once and its holder gets a tombstone. A gentler recall with a deadline needs a
+timer, and nitipan has no process to run one until NIT-004's broker. NIT-008 adds recall on top of that broker.
+
 ## Design Decisions (Open)
 
 The broker research gives sub-leases one sentence. The prior-art survey found no system that hands a child range to a
-different holder under one shared overlap check. The options below come from analogues. The survey lists them with
-sources.
+different holder under one shared overlap check. The options below come from analogues for behavior only. nitipan
+adopts none of those systems. The survey lists them with sources.
 
 ### Record shape
 
@@ -66,15 +77,6 @@ Either way, whether the parent may still work in the delegated part is open. NFS
 - The sub-lease ends with the parent, as in etcd and SPIFFE. Simple and safe. It cuts off in-flight work.
 - The sub-lease survives and becomes an ordinary lease, as with orphan reparenting and Consul's `release` behavior. Work
   continues. The parent's remaining keys become claimable around it, and the change needs a re-check under the lock.
-- The parent chooses per grant, as Consul's `behavior` field does. More surface.
-
-### Revocation
-
-- Immediate, with a tombstone, as NIT-001's `break` does.
-- Recall with a deadline, then force, as NFS does. Gentler. NIT-001 has no timer, so the deadline would be checked on
-  later calls.
-
-A revoked sub-lessee needs a signal either way.
 
 ### Breaks across the tree
 
@@ -87,12 +89,6 @@ A revoked sub-lessee needs a signal either way.
 - Whether the parent may release while sub-leases exist. ZooKeeper refuses to delete a node with children. The other
   choices are to cascade or to orphan.
 - Whether a sub-lessee's early release returns its keys to the parent's record, or leaves them unclaimed.
-
-### Nesting
-
-- Forbidden, as ZooKeeper forbids children of ephemeral nodes.
-- Allowed, with each level narrower than the last, as in UCAN. Cascading revocation and tombstone fan-out become
-  required.
 
 ### Invocation and consent
 
@@ -133,7 +129,9 @@ How NIT-005's fencing tokens relate between a parent and its sub-leases is open.
 
 **Status:** NOT STARTED
 
-- The parent holder's death, release, and any revocation follow the settled rules, and the sub-lessee is told
+- The parent holder's death and release follow the settled rules, and the sub-lessee is told
+- Revoking a sub-lease ends it at once and leaves a tombstone for its holder
+- A sub-lessee's attempt to grant a sub-lease is refused
 - Breaks across the tree follow the settled rules
 
 ## Decision Log
@@ -141,6 +139,10 @@ How NIT-005's fencing tokens relate between a parent and its sub-leases is open.
 - 2026-10-18: Drafted from the lease broker research. Settled decisions are limited to the roadmap the user approved
   that day.
 - 2026-10-18: Added options and open questions from the sub-lease prior-art survey.
+- 2026-10-18: The user ruled that systems like etcd, Consul, and ZooKeeper are far too complex for nitipan. Three
+  options were removed. A per-grant choice of parent-death behavior was dropped, since review picks one rule. Nesting
+  is forbidden, since nobody needs it, and a later proposal can allow it. Recall with a deadline moved to NIT-008,
+  since it needs NIT-004's broker. The user preferred a separate proposal over a deferral with a revisit hook.
 
 ## References
 
