@@ -113,8 +113,11 @@ session ID, session name, and description.
 `break` against a dead holder needs no flag. The lease could be claimed anyway.
 
 `break` against a live holder refuses unless `--force` is given. With `--force`, it removes the lease and writes a
-tombstone in its place. The tombstone names who broke the lease and when. The old holder sees the tombstone on its next
-nitipan call. This is the only signal a broken holder gets until fencing exists.
+tombstone. The tombstone names the broken lease, who broke it, and when. `break` runs under the same lock as `acquire`.
+
+Tombstones are keyed by the broken holder's identity, not by the domain. `acquire` never reads or removes them, so the
+breaker can claim the domain at once. Every nitipan call reads the tombstones addressed to its caller, reports them,
+and then removes them. This is the only signal a broken holder gets until fencing exists.
 
 ### Lease record fields
 
@@ -142,8 +145,10 @@ V1 has no daemon either way. The question is whether the one binary also runs as
   allowance. The holder is found through the adapters above.
 - CLI plus a stdio MCP mode, such as `nitipan mcp`. Each agent session spawns its own MCP server process. It is not a
   shared daemon. All three supported agents speak MCP. The server's parent process is the agent session itself, so
-  holder identity needs no environment variables or process-tree walk. MCP servers run outside the sandbox, so no
-  write allowance is needed. Humans and scripts still use the CLI. It costs a second surface over the same operations.
+  holder identity needs no environment variables or process-tree walk. That would make most of "Holder identity" and
+  milestone 4 unnecessary. Claude Code runs MCP servers outside its sandbox, so no write allowance is needed there.
+  That is unverified for Codex and opencode. Humans and scripts still use the CLI. It costs a second surface over the
+  same operations.
 - MCP only. It leaves humans without a way to inspect or break leases.
 
 ### Record encoding and file naming
@@ -206,8 +211,9 @@ record is never ambiguous about what its name means.
 - **The state directory is on a network filesystem** — likelihood: low, impact: high.
   `flock` and `O_EXCL` are unreliable on some network filesystems. Two claims could both succeed. Accepted: the
   directory is under the user's home on a local disk by default. The README says so.
-- **A stale tombstone hides a fresh lease** — likelihood: low, impact: low.
-  Mitigation: a new `acquire` replaces a tombstone like a dead lease. The tombstone exists only to tell the old holder.
+- **Tombstones pile up for holders that never return** — likelihood: medium, impact: low.
+  A broken holder that dies before its next call never reads its tombstone. Mitigation: `list` removes tombstones
+  whose holder is dead, after reporting them once.
 
 ## Milestones
 
@@ -240,9 +246,9 @@ record is never ambiguous about what its name means.
 
 - `break` removes a dead holder's lease without `--force`
 - `break` refuses a live holder's lease without `--force`, and names the holder
-- `break --force` leaves a tombstone naming the breaker and the time
-- A broken holder's next nitipan call reports that its lease was broken, and by whom
-- A new `acquire` replaces a tombstone
+- `break --force` leaves a tombstone keyed by the broken holder, naming the lease, the breaker, and the time
+- The breaker can `acquire` the domain immediately after `break --force`
+- A broken holder's next nitipan call reports that its lease was broken, and by whom, then removes the tombstone
 
 ### M4: Codex and opencode adapters
 
