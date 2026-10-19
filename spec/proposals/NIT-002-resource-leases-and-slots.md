@@ -1,6 +1,6 @@
 # NIT-002: Resource Leases and Counted Slots
 
-**Status:** designing
+**Status:** accepted
 **Created:** 2026-10-18
 **Updated:** 2026-10-18
 
@@ -240,8 +240,8 @@ None.
   before either proposal is accepted, while an unknown type still counts as `all`. Milestone 1 tests that a resource
   lease never overlaps a path lease.
 - **NIT-002 rests on NIT-001's envelope, which is still in design** — likelihood: low, impact: medium.
-  A change to the envelope, the minor-version rule, or the re-acquire rule would change this design. Mitigation: NIT-002
-  is accepted only after NIT-001, and is reviewed again if NIT-001 changes those sections.
+  A change to the envelope, the minor-version rule, or the re-acquire rule would change this design. Mitigation: NIT-002's
+  queue rows depend on NIT-001, so none is built first. NIT-002 is amended if NIT-001 changes those sections.
 - **The name grammar, the resource body, and the config syntax are one-way doors** — likelihood: medium, impact:
   medium. Names end up in shared agent instructions and stored records. Mitigation: the grammar starts strict, and
   loosening it later breaks no stored name. The config carries a `version`, and an unknown one fails closed to N = 1. A
@@ -376,6 +376,9 @@ None.
   NIT-001 reaching `accepted`.
 - 2026-10-18: Review gate: no judge rulings, provisional decisions, or standing dissent. Nothing reopened. The user kept
   the proposal `designing`, since the Risks mitigation requires NIT-001 to be accepted first.
+- 2026-10-18: Accepted. The two NIT-001 rules NIT-002 relies on, cross-type overlap and `list --json` schema
+  evolution, have no plausible outcome that changes a NIT-002 decision. Amended the NIT-001 dependency risk. Its
+  mitigation said NIT-002 is accepted only after NIT-001. Now NIT-002's queue rows depend on NIT-001 instead.
 
 ## References
 
