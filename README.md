@@ -9,20 +9,27 @@ It supports Claude Code, Codex, and opencode.
 ## Status
 
 Design only. No code yet. The first version is
-[NIT-001](spec/proposals/NIT-001-local-lease-cli.md), currently a draft.
+[NIT-001](spec/proposals/NIT-001-local-lease-cli.md), which is accepted.
 
 ## First version
 
-The first version runs on one machine, with no daemon. It has four commands:
+The first version runs on one machine, with no daemon. It has six commands:
 
 - `acquire` claims a domain
 - `release` gives it up
 - `list` shows every lease and whether its holder is alive
 - `break` removes another holder's lease, and needs `--force` when that holder is alive
+- `advertise` updates the caller's name, permission mode, or a lease's description
+- `setup` prints the sandbox allowance, hooks, and plugins an agent needs
 
-A domain is keyed by absolute path, with optional path scopes. A holder's liveness is its PID plus its process start
-time, which guards against PID reuse. A claim against a dead holder succeeds. An overlapping claim against a live holder
-is refused, and the refusal names the holder.
+A seventh command, `hook`, is called only by those agent hooks and plugins.
+
+A domain is keyed by absolute path, with optional path scopes. A claim against a dead holder succeeds. An overlapping
+claim against a live holder is refused, and the refusal names the holder.
+
+A Claude Code holder is alive while its process runs. nitipan checks the PID and the process start time, which guards
+against PID reuse. Codex and opencode run every session under one long-lived host process. Their holders are judged by
+session instead, through the hooks and plugins that `setup` prints.
 
 Leases live under `~/.local/state/nitipan/`. That directory must be on a local disk. A sandboxed agent needs a write
 allowance for it.
