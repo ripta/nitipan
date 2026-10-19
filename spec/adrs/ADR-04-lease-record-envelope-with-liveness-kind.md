@@ -1,6 +1,6 @@
 # ADR-04: Lease Record Envelope with a Liveness Kind
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-19
 
 ## Context

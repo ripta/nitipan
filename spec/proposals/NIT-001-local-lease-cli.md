@@ -1,6 +1,6 @@
 # NIT-001: Local Lease CLI
 
-**Status:** designing
+**Status:** accepted
 **Created:** 2026-10-18
 **Updated:** 2026-10-19
 
@@ -1326,12 +1326,14 @@ None.
 - 2026-10-19: A Codex review of the working tree found that the cleanup sweep deleted session files it could not
   read, turning an unknown session dead. The sweep now keeps any session file that does not decode or has a higher
   version.
+- 2026-10-19: Accepted again, on the user's choice at the review gate. ADR-04 became accepted and ADR-02 superseded in
+  the same change.
 
 ## References
 
-- ADR-02: lease record envelope and evolution rules
+- ADR-02 (superseded by ADR-04): lease record envelope and evolution rules
 - ADR-03: lease key canonicalization and the overlap rule
-- ADR-04 (proposed): lease record envelope with a liveness kind, superseding ADR-02
+- ADR-04: lease record envelope with a liveness kind, superseding ADR-02
 - `spec/reports/2026-10-18-shared-host-session-liveness.md`, `2026-10-18-codex-session-end-options.md`, and
   `2026-10-18-opencode-session-end-plugin.md`: session liveness research
 - `spec/reports/2026-10-18-lease-broker-research.md`: broker, fencing, auth, and messaging research

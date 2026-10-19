@@ -1,6 +1,6 @@
 # ADR-02: Lease Record Envelope and Evolution
 
-**Status:** accepted
+**Status:** superseded by [ADR-04](ADR-04-lease-record-envelope-with-liveness-kind.md)
 **Date:** 2026-10-18
 
 ## Context
