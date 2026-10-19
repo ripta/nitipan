@@ -21,7 +21,9 @@ Records and tombstones share one envelope, versioned `major.minor`. Every versio
 process start's platform shapes are frozen.
 
 The footprint says what the record blocks: typed entries, `none`, or `all`. An absent footprint, or an entry type a
-reader does not know, counts as `all`. `none` is never inferred from a record's kind.
+reader does not know, counts as `all`. `none` is never inferred from a record's kind. Entries compare by type: path
+entries use the path rule, and name entries use exact match. A path entry and a name entry never overlap. A later entry
+type defines how it pairs with every older type when it is introduced.
 
 Readers:
 

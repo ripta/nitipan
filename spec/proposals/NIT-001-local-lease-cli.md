@@ -560,9 +560,10 @@ a dead holder's record as a live claim. The candidates were files only, `list --
 
 Decision (autonomous): `list --json` is the supported read interface. The record files are nitipan's own format.
 
-- The output schema evolves like the record envelope. A minor bump only adds fields, and consumers ignore fields they
-  do not know. A major bump breaks compatibility. NIT-003's `parent`, `delegated`, ownership marks, and `requests` are
-  a minor bump
+- The output schema evolves like the record envelope. A minor bump adds fields or new `domain.kind` values. Consumers
+  ignore fields they do not know, and treat a lease of a kind they do not know as opaque, judged only by its liveness
+  and footprint. A major bump breaks compatibility. NIT-003's `parent`, `delegated`, ownership marks, and `requests`,
+  and NIT-002's `resource` kind, are minor bumps. Amended 2026-10-18; see Decision Log
 - The output has its own versioned schema, separate from the record format. Each lease carries its computed liveness:
   `alive`, `dead`, or `unknown`. The schema says `unknown` means treat as alive. Unusable records appear as unknown
   entries
@@ -645,8 +646,10 @@ The envelope is the part every version keeps readable:
 - `version`, `id`, `machine`, and the holder's agent, PID, and process start. The process start's platform shapes are
   frozen. A platform tag a reader does not know makes liveness unknown
 - `footprint`: typed entries, `none`, or `all`. Path entries carry each key's volume sensitivity and use the path rule,
-  "Nested checkouts" included. Name entries use exact match. An entry type a reader does not know counts as `all`. An
-  absent footprint counts as `all`. `none` is never inferred from the kind
+  "Nested checkouts" included. Name entries use exact match. A path entry and a name entry never overlap. A later
+  entry type defines how it pairs with every older type when it is introduced. An entry type a reader does not know
+  counts as `all`. An absent footprint counts as `all`. `none` is never inferred from the kind. Amended 2026-10-18;
+  see Decision Log
 - `clear_when_dead`: default true. A writer sets it false when a holder's death carries duties an old reader cannot
   perform, such as a record shared by several holders, which must outlive any one of them
 
@@ -787,6 +790,8 @@ None.
 - A record of a higher minor is read with its unknown fields ignored, judged by its footprint, cleared only when its
   holder is dead and `clear_when_dead` is true, and never rewritten by an older binary
 - An unknown footprint entry type, an absent footprint, and an unknown process-start platform each fail safe
+- A path footprint entry never overlaps a name footprint entry
+- `list --json` emits a lease of an unknown kind with its liveness and footprint
 - A `format` marker above the binary's version refuses every write and still allows `list`
 - A record from another machine has unknown liveness
 - Overlap and coverage treat a nested worktree or nested repo as separate and a submodule as part of the parent, with
@@ -1017,6 +1022,14 @@ None.
 - 2026-10-18: ADR candidate (cuts across the system): the derived holder handle, which NIT-007 may key mailboxes on.
   Waits on NIT-007 settling how mailboxes are addressed.
 - 2026-10-18: Accepted, on the user's choice at the review gate.
+- 2026-10-18: Amended "Record evolution and unknown records", on the user's choice after acceptance, for a gap the
+  NIT-002 author found. It did not say how a path footprint entry compares with a name entry. A V1 binary that guessed
+  "overlap" would refuse every path claim while a NIT-002 resource lease lives. Now a path entry and a name entry never
+  overlap, and each later type defines its pairing with older types. ADR-02 took this as a minor edit: its name entries
+  already use exact match, which never matches a path.
+- 2026-10-18: Amended "A supported read path for guardians", on the user's choice. It said a minor schema bump "only
+  adds fields". A minor bump may now also add `domain.kind` values, and consumers treat an unknown kind as opaque.
+  NIT-002's `resource` kind is a minor bump.
 
 ## References
 
