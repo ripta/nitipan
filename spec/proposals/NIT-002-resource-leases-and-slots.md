@@ -6,8 +6,8 @@
 
 ## Dependencies
 
-- NIT-001. Its "Record evolution and unknown records" must also say that footprint entries of different known types
-  never overlap, and how the `list --json` schema's minor versions evolve. See "Risks"
+- NIT-001. Its "Record evolution and unknown records" states that a path entry and a name entry never overlap. Its "A
+  supported read path for guardians" lets a minor `list --json` version add a `domain.kind` value. See "Risks"
 
 ## Impacts
 
@@ -233,15 +233,15 @@ None.
 - **Advisory leases on resources are ignored** — likelihood: high, impact: low.
   Nothing stops a process that never calls nitipan from using every core. Accepted: resource leases coordinate
   coöperating sessions only. The README says so.
-- **NIT-001 does not yet say how a `name` entry compares with a `path` entry** — likelihood: medium, impact: high.
-  Its envelope says path entries use the path rule and name entries use exact match, and nothing about a mixed pair.
+- **A V1 binary compares a `name` entry with a `path` entry wrongly** — likelihood: low, impact: high.
   Every V1 binary applies the envelope forever. One that treats a mixed pair as overlapping would refuse every path
-  claim while a resource is held. Mitigation: NIT-001 states that entries of different known types never overlap
-  before either proposal is accepted, while an unknown type still counts as `all`. Milestone 1 tests that a resource
-  lease never overlaps a path lease.
-- **NIT-002 rests on NIT-001's envelope, which is still in design** — likelihood: low, impact: medium.
-  A change to the envelope, the minor-version rule, or the re-acquire rule would change this design. Mitigation: NIT-002's
-  queue rows depend on NIT-001, so none is built first. NIT-002 is amended if NIT-001 changes those sections.
+  claim while a resource is held. Mitigation: NIT-001 and ADR-02 state that a path entry and a name entry never
+  overlap, while an unknown type still counts as `all`. NIT-001's milestone 1 and this proposal's milestone 1 both test
+  that a resource lease never overlaps a path lease. Amended 2026-10-18; see Decision Log.
+- **NIT-002 rests on NIT-001's envelope** — likelihood: low, impact: medium.
+  A change to the envelope, the minor-version rule, or the re-acquire rule would change this design. NIT-001 is
+  accepted, and ADR-02 records the envelope, so such a change now needs a superseding ADR. Mitigation: NIT-002's queue
+  rows depend on NIT-001, so none is built first. NIT-002 is amended if NIT-001 changes those sections.
 - **The name grammar, the resource body, and the config syntax are one-way doors** — likelihood: medium, impact:
   medium. Names end up in shared agent instructions and stored records. Mitigation: the grammar starts strict, and
   loosening it later breaks no stored name. The config carries a `version`, and an unknown one fails closed to N = 1. A
@@ -379,8 +379,16 @@ None.
 - 2026-10-18: Accepted. The two NIT-001 rules NIT-002 relies on, cross-type overlap and `list --json` schema
   evolution, have no plausible outcome that changes a NIT-002 decision. Amended the NIT-001 dependency risk. Its
   mitigation said NIT-002 is accepted only after NIT-001. Now NIT-002's queue rows depend on NIT-001 instead.
+- 2026-10-18: Amended Dependencies and Risks after NIT-001 was accepted and amended in a27cd26. The Dependencies entry
+  said NIT-001 "must also say" that different known types never overlap. NIT-001 now states the pairwise rule: a path
+  entry and a name entry never overlap, and each later type defines its pairing. It also lets a minor `list --json`
+  version add kind `resource`. The cross-type risk said the rule was undefined, and the envelope risk called NIT-001
+  "still in design". The hooks on the three ADR candidates above have fired, since NIT-001 is accepted with the
+  cross-type rule. Their outcomes are left for the user to choose.
 
 ## References
 
 - `spec/reports/2026-10-18-lease-broker-research.md`: "Roadmap" and "Reach"
 - NIT-001: the claim, liveness, and break rules this proposal reuses
+- ADR-02: the record envelope and evolution rules resource records follow
+- ADR-03: the key and overlap rule, which a resource name never meets
