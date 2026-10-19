@@ -12,6 +12,8 @@
 
 - NIT-001 — "Breaking a live lease". Tombstones are a broken holder's only signal until fencing exists. This proposal
   is that fencing
+- NIT-003 — "Fencing" there fixes the outcomes this proposal's "Token scope" and "Local fencing for NIT-001" must keep
+  for sub-leases. A single high-water mark per name or per repo cannot keep them
 
 ## Summary
 

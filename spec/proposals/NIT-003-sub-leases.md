@@ -526,6 +526,11 @@ None.
 - 2026-10-18: Review gate: kept all. The user chose to mitigate the NIT-001 amendments risk by sending the eight
   amendments to the nitipan guardian session. They were sent the same day.
 - 2026-10-18: Accepted by the user. Not scheduled. Milestone 1 waits on NIT-001 carrying the amendments.
+- 2026-10-18: The nitipan guardian took all eight NIT-001 amendments into NIT-001's working text. They are not
+  committed yet. Two changed in wording. A V1 `release` of a caller's own higher-minor record removes it, as NIT-003
+  needs. The rule on release-time duties was narrowed at this proposal's request: only a skipped duty that would make
+  an old reader more permissive needs a new major, and a skipped notice to a parent does not. So `parent` stays a minor
+  addition. The user kept all eight amendments at NIT-001's review gate.
 
 ## References
 
