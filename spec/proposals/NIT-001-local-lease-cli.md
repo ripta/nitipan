@@ -2,7 +2,7 @@
 
 **Status:** designing
 **Created:** 2026-10-18
-**Updated:** 2026-10-18
+**Updated:** 2026-10-19
 
 ## Dependencies
 
@@ -14,6 +14,8 @@ None.
   surface". Resource names are not paths, and a counted slot lets several live holders share one name
 - NIT-003 — "Domain keys and overlap", "Claiming", and "Breaking a live lease". A sub-lease sits inside a live holder's
   domain, which the overlap rule refuses today
+- NIT-003 — "Session liveness on shared hosts". A parent's liveness can now be unknown after a Codex host restart, and
+  NIT-003's "Liveness and the parent's death" inherits that
 - NIT-004 — "Lease record fields", "Liveness", and "Wider-reach lease names". NIT-004 settles the deferred name syntax
 - NIT-005 — "Breaking a live lease" and "Lease record fields". Tombstones are the only signal a broken holder gets
   until fencing exists, and a fencing token joins the record
@@ -33,10 +35,11 @@ for guardians".
 ## Summary
 
 A `nitipan` CLI lets a coding agent session claim a domain on one machine. A domain is a checkout, optionally narrowed
-to path scopes. The CLI has six commands: `acquire`, `release`, `list`, `break`, `advertise`, and `setup`. There is
-no daemon. State is a directory of lease records, one per lease, under `~/.local/state/nitipan/`. A claim against a
-dead holder succeeds. An overlapping claim against a live holder is refused, and the refusal names the holder. Each
-record also advertises the session: what it does, where it runs, and how to reach it.
+to path scopes. The CLI has six user commands: `acquire`, `release`, `list`, `break`, `advertise`, and `setup`. A
+seventh, `hook`, is called by agent hooks and plugins. There is no daemon. State is a directory of lease records, one
+per lease, under `~/.local/state/nitipan/`. A claim against a dead holder succeeds. An overlapping claim against a
+live holder is refused, and the refusal names the holder. Each record also advertises the session: what it does, where
+it runs, and how to reach it.
 
 ## Motivation
 
@@ -66,7 +69,7 @@ sandbox allowance".
 
 ### Commands
 
-Amended 2026-10-18; see Decision Log.
+Amended 2026-10-19; see Decision Log.
 
 - `acquire` claims a domain. It fails when a live holder owns an overlapping domain.
 - `release` gives up a lease the caller holds.
@@ -75,6 +78,8 @@ Amended 2026-10-18; see Decision Log.
 - `advertise` updates the caller's name, permission mode, or a lease's description. See "Session name and permission
   mode".
 - `setup` prints the sandbox allowance entries for an agent. See "Granting the sandbox allowance".
+- `hook` is called only by the agent hooks and plugins that `setup` prints. Its subcommands are `session-start`,
+  `session-end`, `presence`, and `execution`. See "Session liveness on shared hosts".
 
 ### Domain keys and overlap
 
@@ -97,14 +102,29 @@ child commands. The record names the agent, so the same session ID cannot collid
 - Claude Code exports `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID` to every command. Both were observed in a session on
   2026-10-18.
 - opencode 2.0.32's bash tool exports `OPENCODE_SESSION_ID`, `OPENCODE=1`, and `AGENT=1`, by a source reading of
-  `packages/core/src/tool/plugin/shell.ts` at commit 501b15a. It exposes no PID variable that was found. Amended
-  2026-10-18; see Decision Log.
+  `packages/core/src/tool/plugin/shell.ts` at commit 501b15a. It exposes no PID variable that was found.
 - Codex 0.163.0 exports `CODEX_THREAD_ID`, `CODEX_SESSION_ID` for the root session, and `CODEX_VERSION` to shell
   commands, by a source reading of `codex-rs/protocol/src/shell_environment.rs` and `codex-rs/core/src/exec_env.rs` at
   tag rust-v0.163.0. `CODEX_THREAD_ID` survives `include_only` environment policies. It exposes no PID variable that
   was found.
 
-Both are source readings, not live tests. Milestone 4 verifies them from inside each tool.
+Both began as source readings. Live tests on 2026-10-18 confirmed them. Amended 2026-10-19; see Decision Log.
+
+- Codex: `CODEX_THREAD_ID` equals `CODEX_SESSION_ID` in a root thread. A subagent gets its own thread ID and keeps the
+  root's session ID. Both survive an `include_only` environment policy
+- opencode also exports `AI_AGENT=opencode` and `OPENCODE_TERMINAL=1`. A subagent is a child session with its own
+  `OPENCODE_SESSION_ID`
+- Neither exports a PID variable. The process that runs shell commands is a host process, not the TUI. Under Codex it
+  is `codex app-server ... --managed-daemon`, or the TUI itself in embedded mode. Under opencode it is
+  `opencode serve --service`, or `opencode serve --stdio --port 0` under `--standalone`
+- The adapter recognizes the host by its full argument list, read with `kern.procargs2` on macOS and
+  `/proc/<pid>/cmdline` on Linux. The command name is truncated, so it is not enough. Both reads work inside the Codex
+  sandbox, where `ps` is blocked
+- The opencode TUI is an `opencode` process whose arguments do not start with `serve`. Its plugin's subprocesses have
+  the TUI as their nearest agent ancestor, so a presence write ties to the TUI. Under `--standalone`, the serve child
+  is the TUI's child, not its ancestor
+- opencode runs shell commands with no OS sandbox. Codex's workspace-write sandbox blocks the state directory until the
+  user adds it to `sandbox_workspace_write.writable_roots`
 
 The Codex adapter keys its session ID on `CODEX_SESSION_ID`, the root session, so Codex subagent threads are one holder.
 That matches Claude Code, whose subagents share their parent's holder. Where an environment policy strips that variable
@@ -122,7 +142,11 @@ standard for any of this. `AGENT` and `AI_AGENT` are proposed conventions that n
 A holder is alive when a process with its PID exists and that process's start time equals the recorded one. The start
 time guards against PID reuse. No heartbeat is needed, and an idle session cannot heartbeat anyway.
 
-Amended 2026-10-18; see Decision Log.
+Amended 2026-10-19; see Decision Log.
+
+That rule is the `process` liveness kind, which Claude Code uses. Codex and opencode run many sessions under one host
+process, so they use the `session` kind. Its rules are in "Session liveness on shared hosts". Host process checks there
+use the same start-time comparison.
 
 A record from another machine has unknown liveness, which counts as alive. A synced home directory or a broker mirror
 can put another machine's record in the local state directory. A local PID check would read that live holder as dead.
@@ -167,7 +191,8 @@ Amended 2026-10-18; see Decision Log.
 Tombstones are keyed by the broken holder's identity, not by the domain. A tombstone never blocks a claim, so the
 breaker can claim the domain at once, unless another live lease overlaps it. A broken NIT-003 sub-lease's keys return
 to its live parent, for example. Every nitipan call, `acquire` included, reads the tombstones addressed to its
-caller, reports them, and then removes them. A broken holder that re-acquires learns its lease was broken. This is the
+caller, reports them, and then removes them. A `hook` call is the one exception. See "Session liveness on shared
+hosts". A broken holder that re-acquires learns its lease was broken. This is the
 only signal a broken holder gets until fencing exists. `list` also reports a tombstone whose holder is dead once, then
 removes it.
 
@@ -179,7 +204,7 @@ shows it as unknown, and `break --force` removes it by its ID.
 
 ### Lease record fields
 
-Amended 2026-10-18; see Decision Log.
+Amended 2026-10-19; see Decision Log.
 
 Every record carries these fields from the first version. A field a later version adds defines its absent value as the
 behavior from before the field existed. See "Record evolution and unknown records".
@@ -189,6 +214,8 @@ behavior from before the field existed. See "Record evolution and unknown record
 - `footprint`: what the record blocks, as typed entries, or `none`, or `all`. A V1 path record lists its canonical
   keys
 - `clear_when_dead`: whether any reader may clear the record once its holder is dead. V1 writes true
+- `liveness`: the liveness kind, `process` or `session`. See "Session liveness on shared hosts". For kind `session`,
+  the holder's PID and process start name its host process
 - `reach`: how far the name is meaningful. One of `session`, `machine`, `user`, or `shared`. V1 writes only `machine`
 - `domain`: a `kind`, then the fields that kind defines. V1 writes only kind `path`: the checkout and its scopes, as
   given, and the canonical keys derived from them. See "Wider-reach lease names"
@@ -217,11 +244,36 @@ Decision (autonomous): one JSON file per lease, named by a generated lease ID, a
   written record
 - An update in place writes a temp file the same way and publishes it with `rename(2)`, since `link(2)` refuses an
   existing name
-- Every scan and every reader skips names that start with `.tmp-`. Every write happens under the lock. So a temp file
-  seen by a lock holder belongs to a writer that crashed, and the lock holder removes it
+- Every scan and every reader skips names that start with `.tmp-`. Every write happens under the lock, except the
+  Codex end marks below, which use no temp file. So a temp file seen by a lock holder belongs to a writer that
+  crashed, and the lock holder removes it
 - `release` and `break` can address a lease by its ID
 - Tombstones use the same scheme in `tombstones/<id>.json`. The broken holder's identity is inside the record. A
   caller finds its own tombstones by scanning that directory
+
+Amended 2026-10-19; see Decision Log.
+
+Session liveness adds four directories under `sessions/`. See "Session liveness on shared hosts".
+
+- `registered/`, `presence/`, and `executing/` hold JSON files written under the lock with the same temp-file scheme.
+  Each is named `<agent>.<session>.<pid>.<start>.json`, where the PID and start name the process it is tied to. The
+  name alone says which session a file vouches for and when it can be swept, even when its body cannot be read. Each
+  carries a `version`
+- The name grammar is fixed. `<agent>` is a known adapter name. `<session>` must match `[A-Za-z0-9_-]{1,128}`, and a
+  hook input outside that set is refused, since any shell command in the session can supply it. `<pid>` is decimal.
+  `<start>` uses only digits, lowercase hex, and `-`: `<seconds>-<microseconds>` on macOS, and
+  `<boot-id-hex>-<ticks>-<pidns-inode>` on Linux. A reader parses the fields from the right. End marks use the same
+  fields with no `.json` suffix
+- `ended/` holds Codex end marks. They are the one write that takes no lock. The SessionEnd hook has at most 3
+  seconds, and the lock can be busy longer. A mark is an empty file created atomically with `O_EXCL`, with no temp
+  file. Its name carries everything: `codex.<session>.<host-pid>.<host-start>`. The name format is fixed. A change
+  takes a new directory under the `format` marker
+- A lock holder removes any of these files whose tied process is dead, with three exceptions. An execution mark stays
+  until opencode's `time_suspended` for its session reads clear. An ended registration stays while any lease names
+  its session. A file the lock holder cannot fully read, one that does not decode or has a higher major or minor
+  version, stays until an upgrade or `break --force`. Removing a file is a write, and an old binary never acts on what
+  it does not understand. The lease scan never reads these directories
+- A session file follows the version rules in "Record evolution and unknown records"
 
 The fsync is there because `rename(2)` and `link(2)` can reach the disk before the file's data does. A power loss could
 then leave a published record that does not decode. Under "Record evolution and unknown records", such a record blocks
@@ -341,13 +393,15 @@ SendMessage uses. That makes it the most useful field in the advertisement. The 
 `--permission-mode` flags on `acquire`, and the same flags with `--name` required. A third candidate came later:
 optional `--name`, with nitipan generating a random name when it is absent.
 
-Amended 2026-10-18; see Decision Log.
+Amended 2026-10-19; see Decision Log.
 
 Decision (autonomous): the holder carries two name fields. They do different jobs.
 
 - `holder.handle` is assigned by nitipan. It is four words derived from a hash of the holder's identity under "Holder
   match rule" plus the machine ID. It is the same on every call by that holder, so it survives `/clear`, idleness, and
   releasing every lease. A new process gets a new handle. A dead holder's handle comes back only on a hash collision.
+  For liveness kind `session`, the identity is the agent and the session ID, so the handle survives a host restart and
+  each session on a shared host gets its own handle
   `acquire` and `list` print it. It is the stable address a person can learn from `list`, and the one NIT-007 can key
   on
 - The handle is four words from a 2048-word list, about 44 bits per machine, so a collision is negligible. A collision
@@ -398,21 +452,21 @@ in one process.
 - When process identity matches but the session ID does not, the error says the lease is held by another session in
   this same process. It names that session's handle, and says to coordinate with it or ask the user
 
-Amended 2026-10-18; see Decision Log.
+Amended 2026-10-19; see Decision Log.
 
 Claude Code is declared single-session. Its subagents already share the parent's `CLAUDE_PID` and
-`CLAUDE_CODE_SESSION_ID`, and `/clear` appears to rotate the session ID inside a running process. Codex and opencode
-are declared in milestone 4, from what their checks find, when their adapters are built. Both export a session ID by
-source reading, so a strict declaration still works for them. If a live test finds no session ID for an agent that
-hosts several sessions per process, that agent's `acquire` fails closed. Whether V1 then ships without it is the
-user's call.
+`CLAUDE_CODE_SESSION_ID`, and `/clear` appears to rotate the session ID inside a running process. Live tests found
+that Codex and opencode both host several sessions per process, so both are declared multi-session.
+
+For a holder of liveness kind `session`, the host process is not part of the match. The agent and the session ID decide
+it. A host restart gives the same session a new host PID, and a matching call rewrites the host PID and start in every
+record it holds. See "Session liveness on shared hosts".
 
 No error names `break --force` as the fix. An agent follows the command its error names. Errors name the holder and
 say to coordinate with it or ask the user.
 
-Two limits hold under every candidate. Parallel subagents of one Claude Code session are one holder, so `acquire` does
-not keep them apart. Liveness is per process, so on a multi-session host a session that ended inside a live process
-leaves a lease that reads as alive until `break --force`.
+One limit holds under every candidate. Parallel subagents of one Claude Code or Codex session are one holder, so
+`acquire` does not keep them apart. An opencode subagent is its own session, so it is its own holder.
 
 Process identity alone was rejected. It is the one-holder-per-process flaw that "Invocation surface" rejected MCP for.
 Requiring the session ID everywhere was rejected. A rotated ID would leave a live session unable to release its own
@@ -435,6 +489,18 @@ detected agent, says the sandbox likely blocked the state directory, and prints 
 - `setup` prints every entry an agent needs. That includes a command-approval rule where the agent has one, not only the
   write path
 - The message says "likely", because a plain file-mode failure gives the same errno
+
+Amended 2026-10-19; see Decision Log.
+
+`setup` also prints what session liveness needs. See "Session liveness on shared hosts".
+
+- Codex: the state directory as a `sandbox_workspace_write.writable_roots` entry, a SessionStart and a SessionEnd hook
+  that run `nitipan hook` by absolute path with `timeout: 3`, and `thread_unload_delay_secs = 60`. The text says that a
+  thread's background terminals and MCP servers stop 60 seconds after the user switches away from it, and that the
+  delay applies after a Codex restart
+- opencode: install steps for nitipan's TUI plugin and server plugin. When the user has tightened opencode's
+  permissions, it also prints a `shell` allow rule for `nitipan *` and an `external_directory` allow rule for the state
+  directory
 
 Writing settings with `--apply` was rejected for reasons beyond effort. Claude Code's sandbox denies writes to its own
 settings file, so `--apply` would fail from inside a session. Codex's config is TOML and opencode's is JSONC. A
@@ -636,7 +702,7 @@ every such record blocked every V1 claim until someone ran `break --force`, even
 were keeping that rule, a stable envelope, the envelope with `major.minor` versioning, the envelope with exposed path
 keys, and a single integer version whose readers ignore unknown fields.
 
-Amended 2026-10-18; see Decision Log.
+Amended 2026-10-19; see Decision Log.
 
 Decision (autonomous): records and tombstones share one envelope, versioned `major.minor`, with rules for old readers
 and old writers. Every part of it ships in V1, because a V1 binary can never learn a forward-compatibility check later.
@@ -648,10 +714,18 @@ The envelope is the part every version keeps readable:
 - `footprint`: typed entries, `none`, or `all`. Path entries carry each key's volume sensitivity and use the path rule,
   "Nested checkouts" included. Name entries use exact match. A path entry and a name entry never overlap. A later
   entry type defines how it pairs with every older type when it is introduced. An entry type a reader does not know
-  counts as `all`. An absent footprint counts as `all`. `none` is never inferred from the kind. Amended 2026-10-18;
-  see Decision Log
+  counts as `all`. An absent footprint counts as `all`. `none` is never inferred from the kind
 - `clear_when_dead`: default true. A writer sets it false when a holder's death carries duties an old reader cannot
   perform, such as a record shared by several holders, which must outlive any one of them
+- `liveness`: the liveness kind. `process` judges the holder by its PID and process start. `session` judges it by its
+  agent's session rule. A reader that does not know the kind, finds it absent, or has no session rule for the record's
+  agent, reads the holder's liveness as unknown. A later kind or agent therefore never lets an old reader clear a lease
+  that outlives its process. See "Session liveness on shared hosts"
+
+Session files under `sessions/` carry `major.minor` versions under the same reader rules. A session file a reader
+cannot use, or one of a higher major, makes the session it names unknown, never dead. An old binary never rewrites a
+session file of a higher minor. The end-mark name format is fixed in V1. A change to it takes a new directory, under
+the `format` marker.
 
 Readers follow these rules:
 
@@ -731,38 +805,128 @@ with each key was rejected. A stored root goes stale when a worktree is removed.
 so C succeeds and covers B's directory. The chosen rule finds no boundary there and refuses C. Comparing only within
 one checkout misses a scope that crosses into a nested checkout.
 
-## Design Decisions (Open)
-
 ### Session liveness on shared hosts
 
-Codex and opencode each run every session's shell commands under one long-lived shared process. Under Codex, that is
-the managed app-server daemon, which outlives every Codex window. Under opencode, it is the shared `opencode serve
---service` process, and under `--standalone` a private `opencode serve --stdio` child of the TUI. Live tests on
-2026-10-18 found four Codex sessions and three opencode sessions each sharing one process. See
-`spec/reports/2026-10-18-codex-adapter-handoff.md` and `spec/reports/2026-10-18-opencode-adapter-handoff.md`.
+Codex and opencode each run every session's shell commands under one long-lived host process. Under Codex, that is the
+managed app-server daemon, which outlives every Codex window. Under opencode, it is the shared `opencode serve
+--service` process, or under `--standalone` a private `opencode serve --stdio` child of the TUI. Live tests on
+2026-10-18 found four Codex sessions and three opencode sessions each sharing one process. Per-process liveness let a
+lease from an ended session read alive for as long as the host ran, which can be days. Neither host exposes whether a
+client still has a session open. See the reports under `spec/reports/` dated 2026-10-18: the Codex and opencode
+adapter handoffs, `shared-host-session-liveness.md`, `codex-session-end-options.md`, and
+`opencode-session-end-plugin.md`.
 
-"Liveness" is per process. On these hosts, a lease from a session that has ended reads as alive for as long as the
-shared process runs, which can be days. "Holder match rule" accepted this limit when multi-session hosts looked rare.
-Both are the default configuration.
+Decision, on the user's choice: liveness for Codex and opencode comes from the session, through hooks and plugins the
+user installs. Claude Code keeps per-process liveness. nitipan never requires a launch flag. Codex's daemon mode and
+opencode's shared service are the defaults, and they must work.
 
-The candidates so far:
+Each record carries a liveness kind in its envelope. `process` means the holder is alive while its process is.
+`session` means the agent's rule below decides. An unknown kind reads as unknown liveness. See "Record evolution and
+unknown records".
 
-- Keep per-process liveness, and accept that such a lease stays until `break --force`
-- Ask the host whether the session still exists: opencode's service API, or Codex's app-server over its control
-  socket. Codex's sandbox blocks that socket from inside a Codex session
-- Read the host's own session store on disk, such as Codex's state database or opencode's session storage
-- Release on session end through each agent's hooks or plugins, with per-process liveness as the fallback after a
-  crash
-- Give leases from multi-session hosts an expiry that each nitipan call renews. "Liveness" rejected heartbeats because
-  an idle session cannot renew
+Codex, kind `session`:
 
+- `setup` prints a SessionStart hook and a SessionEnd hook, both running `nitipan hook`. It also prints
+  `thread_unload_delay_secs = 60`. Codex fires SessionEnd only when it unloads a thread, which happens that many
+  seconds after the last client leaves. The default is 1800
+- The SessionStart hook registers the session under its host process, by PID and start time. It records the host's
+  mode and `CODEX_HOME`, which locates the writer-lock directory. The mode is embedded only when the argument list
+  positively matches the Codex TUI. Any other host, such as an app-server an IDE extension started, is recorded as a
+  daemon, whose death reads unknown. The hook waits for the lock for at most 2 seconds, inside its 3-second limit
+- A new registration removes every ended registration of that session, under any host, and clears its end marks under
+  any host, under the lock. The notice for that is stored as a tombstone addressed to the session, and its next nitipan
+  call delivers it
+- The first registration under a host records two checks of the config in force. One is the unload delay. The other is
+  whether a SessionEnd entry runs `nitipan hook`. It trusts the config file only when the file is older than the host's
+  start, since a change needs a restart. Otherwise both checks record unknown. Later registrations under that host reuse
+  them
+- `acquire` from a Codex session needs a registration under a live host, a recorded delay of 60 seconds or less, a
+  recorded SessionEnd entry, and the session's own writer-lock file. The lock file proves the veto below works for this
+  Codex version. An `acquire` runs mid-turn, when the writer is certainly live. Without all four, `acquire` fails
+  closed. The error prints the `setup` entries. When a recorded check is unknown or fails, it names the host by PID and
+  mode, the daemon or the embedded TUI, and says the setting applies only after that host restarts. With no
+  registration, it also says the SessionStart hook may have timed out. With no lock file, it says this Codex version is
+  not supported
+- The SessionEnd hook writes an end mark naming the session and its host. It takes no lock. An end mark that already
+  exists counts as success. See "Record encoding and file naming"
+- A session is judged by its newest registration whose host is alive. It is dead when an end mark names it under that
+  host and Codex's writer-lock file for the session is absent. Only `ENOENT` counts as absent. Any other error reads
+  unknown. While the file exists, the session is alive. The file guards against a late SessionEnd that lands after a
+  resume
+- Every lock holder, before its sweep, checks each end mark under a live host. When the session's writer-lock file is
+  absent, it marks that session's registration ended. An ended registration outlives its host, and stays while any
+  lease names the session. A session whose newest registration is ended is dead, with one exception. When that
+  registration's host is alive and the session's writer-lock file exists, the session is alive. A crashed embedded TUI
+  can leave its lock file behind, so the exception never applies under a dead host
+- A registration under a dead embedded host counts as ended. An embedded host is its own TUI, so nothing can reconnect
+  to it
+- With no ended registration and no registration under a live host, the session is unknown. When the host restarts, it
+  fires SessionEnd for every thread. Those end marks name a dead host, so they never count. A session that resumes
+  registers under the new host, and its next nitipan call moves its leases there. That move needs the session's own
+  writer-lock file, the same as `acquire`. Without it, the leases stay on the old host and read unknown, and the call
+  says why. A session that never resumes holds its leases until `break --force`
+- `CODEX_SESSION_ID` must be set. An environment policy that strips it leaves only `CODEX_THREAD_ID`, and SessionEnd
+  fires for root threads only, so `acquire` fails closed
+
+Several Codex flags select embedded mode silently. There the walk ends at the TUI process. The rules above apply
+while it lives, so `/new` inside it ends the old session after the unload delay.
+
+opencode, kind `session`:
+
+- `setup` prints install steps for two plugins that nitipan ships. Both call `nitipan hook`
+- The TUI plugin marks each session it has open: one in the shared tab list, the TUI's current route, or running in
+  that TUI. Child sessions from the subagent tool follow their root. The plugin removes the mark when the session leaves
+  all three. Its cleanup never removes marks, since cleanup also runs on a hot reload. It republishes them on load. A
+  presence mark names the TUI process, which the walk from the plugin's subprocess finds by its signature
+- The server plugin marks a session while it holds an execution claim
+- `acquire` from an opencode session needs a presence mark from a live TUI. An execution mark alone never admits a
+  claim. It only extends a lease. A session with no TUI, such as one from `opencode run`, the desktop app, or the API,
+  cannot `acquire`. Its error says the session needs a TUI with nitipan's plugin loaded
+- A session is alive while a presence mark names it from a live TUI, or an execution mark names it under a live host
+- An execution mark under a dead host reads `time_suspended` from opencode's database, read-only. Set means unknown,
+  since the next service boot resumes that turn. Clear means the turn ended. A failed read means unknown
+- Otherwise the session is dead
+
+Shared rules:
+
+- Holder matching keys on the agent and the session ID for kind `session`. A matching call rewrites the host PID and
+  start in its records. See "Holder match rule"
+- A `hook` subcommand takes the session ID from its hook or plugin input, never from its environment. It runs the
+  normal adapter walk for its host or TUI. When the walk finds no matching agent, it fails closed and writes nothing
+- A `hook` call never delivers or removes tombstones or notices. Nobody reads its output
+- `hook` is never named in an error message
+- A session file nitipan cannot use, or one of a higher major version, makes the session it names unknown. See
+  "Record evolution and unknown records"
+- Clearing a session's end mark, or moving its leases to a new host, is reported to that session like a tombstone. It
+  names the time, and any lease another session claimed meanwhile
+- `list` flags a Codex session as "likely ended" when it holds a lease, has a live registration, and has no writer-lock
+  file. It never clears the lease on that hint. It also names an opencode database it could not read
+
+**Revisit:** when Codex ships subscriber presence or a `thread/unload` method (issues #35676 and #21889), to drop the
+short unload delay.
+
+Rejected:
+
+- Per-process liveness for every agent. It keeps the days-long lag
+- Launch modes with one TUI per host process, such as `codex --no-daemon` and `opencode --standalone`. The design
+  judge preferred this. It needs no envelope field. The user ruled it out: nitipan cannot assume how a tool is launched
+- Codex's writer-lock file as the only signal. A missing file reads as ended, which fails open
+- Signals where set up, with per-process liveness elsewhere. Anyone who skipped `setup` keeps the days-long lag
+- A Codex host restart read as dead. A window that reconnects and keeps editing would share a checkout with another
+  session
+- A plugin link to the TUI process alone. opencode keeps running a turn after its TUI dies
+
+## Design Decisions (Open)
+
+None.
 
 ## Risks
 
 - **The record envelope and evolution rules are a one-way door** — likelihood: high, impact: medium.
-  Every V1 binary in the field applies the envelope, footprint, minor-version, and `format` marker rules forever, and
-  cannot learn new ones. Mitigation: "Record evolution and unknown records" fails safe on every unknown: an unknown
-  major, footprint entry type, or platform tag. A later breaking change raises the `format` marker, which locks old
+  Every V1 binary in the field applies the envelope, footprint, liveness-kind, minor-version, and `format` marker rules
+  forever, and cannot learn new ones. The `sessions/` layout and the end-mark name are part of that door. Mitigation:
+  "Record evolution and unknown records" fails safe on every unknown: an unknown major, footprint entry type, platform
+  tag, liveness kind, or session file. A later breaking change raises the `format` marker, which locks old
   writers out while they still read. Guardians read through the versioned `list --json` schema, not the files.
 - **A broken holder keeps working until its next nitipan call** — likelihood: medium, impact: high.
   `break --force` removes the lease, but nothing stops the old holder from committing in the meantime. Accepted
@@ -773,13 +937,39 @@ The candidates so far:
   alive, and dead holders are never reclaimed without `break`. Mitigation: milestone 1 checks liveness inside the
   Claude Code sandbox on Linux, and milestone 4 inside the Codex and opencode sandboxes. The failure is safe: claims are
   refused, never stolen.
-- **opencode and Codex support rests on source readings, not live tests** — likelihood: low, impact: medium.
-  Both export a session ID by source reading. If a live test disagrees, and the agent hosts several sessions per
-  process, its `acquire` fails closed. Mitigation: milestone 4 verifies the variables from inside each tool. Whether V1
-  then ships without that agent's support is the user's call.
-- **A session that ends inside a live multi-session process leaves a lease that reads as alive** — likelihood: medium,
-  impact: medium. Liveness is per process. Accepted (autonomous): the lease is visible in `list` with its handle, and a
-  human can `break --force` it. No per-session liveness signal exists to do better.
+- **opencode and Codex session liveness rests on plugin and hook behavior not yet run** — likelihood: medium, impact:
+  medium. Live tests confirmed the session variables and the host processes. The plugins' reactive reads, execution
+  events on resume, and hook trust are source readings. Mitigation: milestone 4 checks each one. Every failure found so
+  far reads unknown or fails `acquire` closed. Whether V1 ships without an agent whose check fails is the user's call.
+- **A Codex host restart leaves never-resumed sessions holding their leases** — likelihood: medium, impact: medium.
+  A restart, such as an auto-update, makes every Codex session's liveness unknown until it resumes. Accepted, on the
+  user's choice: reading them dead would let a reconnecting window share a checkout with another session. `list` shows
+  the lease with its handle, and a human can `break --force` it.
+- **A lost SessionEnd keeps a Codex lease alive until the host exits, then unknown** — likelihood: low, impact:
+  medium. The hook has 3 seconds. A slow login shell or user-database lookup can exceed that. The lease then holds
+  until `break --force`. Mitigation: the end mark needs no lock, and `list` flags a registered session with no
+  writer-lock file as "likely ended".
+- **A session that ended just before a host restart comes back as unknown** — likelihood: low, impact: medium. Its end
+  mark becomes durable only when a locked call sees it under the live host. With no nitipan call between the unload and
+  the restart, the mark names a dead host and never counts. Accepted: nitipan has no daemon to make that call, and the
+  lease still yields to `break --force`.
+- **Codex's writer-lock layout is internal** — likelihood: medium, impact: medium. If it changes, every lock file reads
+  absent and the late-SessionEnd veto disappears. Mitigation: `acquire`, and a move of leases to a new host, both run
+  mid-turn and fail closed when the session's own lock file is missing. A changed layout stops new leases and leaves
+  moved ones unknown instead of weakening them.
+- **opencode sessions with no TUI cannot hold leases** — likelihood: medium, impact: low. `opencode run`, the desktop
+  app, ACP, and API sessions write no presence mark. Accepted: no other signal for their end exists. The error says why.
+- **A late SessionEnd marks a resumed Codex session ended** — likelihood: low, impact: high. Codex issue #51360 shows
+  SessionEnd firing for a replaced runtime. Mitigation: an end mark counts only while Codex's writer-lock file for the
+  session is absent. Milestone 4 tests the order of the lock file and the hook.
+- **Hook or plugin setup is missing or not in force** — likelihood: medium, impact: medium. A missing SessionEnd brings
+  back the days-long lag. Mitigation: `acquire` needs a registration or a presence mark, a recorded unload delay of 60
+  seconds or less, and a recorded SessionEnd entry, so it fails closed and prints the `setup` entries. Layered or
+  profile Codex config can still defeat the snapshot, and trust of SessionEnd cannot be read. Milestone 4 checks both.
+- **opencode's internal schema changes** — likelihood: medium, impact: low. A failed `time_suspended` read reads
+  unknown, which fails safe. `list` names the schema mismatch, so the user knows why a lease will not clear.
+- **An opencode plugin disabled mid-run keeps its presence marks** — likelihood: low, impact: low. The marks hold until
+  their TUI exits. Accepted: the lease still ends with the TUI.
 - **An unsupported agent between a supported one and nitipan is misattributed** — likelihood: low, impact: medium.
   The nearest recognized ancestor wins, so a lease from an unsupported agent follows its supported parent's liveness.
   Accepted (autonomous): nitipan cannot recognize an agent it has no adapter for, and the lease fails safe by outliving
@@ -815,6 +1005,8 @@ The candidates so far:
 - `list --json` emits a lease of an unknown kind with its liveness and footprint
 - A `format` marker above the binary's version refuses every write and still allows `list`
 - A record from another machine has unknown liveness
+- A record whose liveness kind is unknown or absent, or whose kind is `session` for an agent with no session rule, has
+  unknown liveness, and is never cleared as dead
 - Overlap and coverage treat a nested worktree or nested repo as separate and a submodule as part of the parent, with
   the boundary found at check time
 - Path canonicalization resolves symlinks, and the overlap check passes table tests for equal, ancestor, sibling, and
@@ -858,7 +1050,8 @@ The candidates so far:
 - A flag left out keeps its stored value
 - `advertise`, or a name or mode given to `acquire`, rewrites that field in every live lease the caller holds
 - `advertise` with no live lease refuses, and says to pass `--name` to `acquire`
-- A holder's handle is the same across calls, re-acquires, and a full release, and differs for a new process
+- A holder's handle is the same across calls, re-acquires, and a full release. For liveness kind `process` it differs
+  for a new process. For kind `session` it survives a host restart
 - A handle collision with a different live holder fails the call, in a test that forces the collision
 - A dead holder's record with `clear_when_dead` false refuses the claim, names the needed version, and needs
   `break --force`
@@ -910,7 +1103,49 @@ The candidates so far:
 - The Codex and opencode adapters' session declarations match what those checks found
 - With the entries `nitipan setup` prints, `acquire` succeeds inside each agent. Without them, the sandbox error appears
 - The Codex and opencode adapters each define their list of `permission_mode` values
+- nitipan ships the opencode TUI and server plugins, and `setup` prints their install steps and the Codex hook entries
 - With no matching adapter, `acquire` fails and names the agents nitipan recognizes
+- Each adapter recognizes its host process by its argument list, in daemon, embedded, shared-service, and standalone
+  modes. Whether the shell's ancestry reaches the TUI under `codex --no-daemon` is recorded in the As built block
+- `acquire` from a Codex session fails closed without a registration, and with an unknown or too-high unload delay
+- A Codex session reads dead within the unload delay plus a few seconds of its window closing, and of `/new`
+- A Codex daemon restart leaves its live sessions unknown, and a resumed session's next call moves its leases to the
+  new host and reports it, including tombstones addressed to it. A session already marked ended stays dead
+- An embedded Codex session reads dead when its TUI exits
+- A second SessionEnd for the same session and host succeeds. A registration clears that session's end marks and
+  ended registrations, and the next call reports it
+- A writer-lock check that fails with anything but `ENOENT` reads unknown. `acquire` fails closed when the session's
+  own lock file is missing. The As built block records whether SessionStart runs before the lock file exists
+- A session found dead, then resumed, reads unknown after a later host restart, including when its ended registration
+  sat under another host
+- A session whose newest registration is ended reads alive while its host lives and its lock file exists
+- Moving leases to a new host fails, leaving them unknown, when the session's own lock file is missing
+- A host whose argument list does not match the Codex TUI is recorded as a daemon
+- A session-file write with a session ID outside the allowed set is refused, and names parse from the right
+- A dead embedded host's sessions read dead, and their registrations survive the sweep while a lease names them
+- Every lock holder turns end marks under a live host into ended registrations before it sweeps
+- The `acquire` error for an unknown or failed config check names the daemon's PID
+- `acquire` from a Codex session fails closed when the recorded config has no SessionEnd entry. With no registration,
+  the error says the SessionStart hook may have timed out
+- A late SessionEnd after a resume does not mark the live session ended while its writer-lock file exists. The order of
+  the lock file and the hook is recorded in the As built block
+- The SessionStart hook sees the host's `CODEX_HOME`. Whether trusting one hook trusts the other is recorded
+- The opencode TUI plugin's marks follow the tab list, the current route, and running state, and survive a hot reload.
+  The As built block records whether the plugin can read the tab list and route as they change
+- The opencode server plugin sees execution events, including for a turn resumed after a service restart
+- An opencode session whose TUI died mid-turn reads alive until the turn ends. After a service restart, a set
+  `time_suspended` reads unknown, and an unreadable database reads unknown
+- `hook` takes the session ID only from its input, fails closed when the walk finds no matching agent, never delivers
+  or removes tombstones, and appears in no error message
+- A presence write from the opencode TUI plugin ties to the TUI process in shared-service and standalone modes. The
+  TUI signature also matches `opencode run` and `opencode acp`, which is safe only because nothing but the TUI plugin
+  writes presence
+- `acquire` from an opencode session with no TUI fails, and says it needs a TUI with nitipan's plugin loaded
+- A lock holder keeps an execution mark whose `time_suspended` is set or unreadable, keeps an ended registration while
+  a lease names its session, keeps a session file it cannot fully read, and removes other session files whose process
+  is dead
+- A session file of a higher major, or one nitipan cannot decode, makes its session unknown
+- `list` shows the "likely ended" hint and names an unreadable opencode database
 
 ## Decision Log
 
@@ -1056,10 +1291,48 @@ The candidates so far:
   one long-lived shared process by default. "Holder match rule" and the multi-session risk had assumed such hosts were
   rare. Evidence: `spec/reports/2026-10-18-codex-adapter-handoff.md` and
   `spec/reports/2026-10-18-opencode-adapter-handoff.md`.
+- 2026-10-19: Settled "Session liveness on shared hosts", on the user's choice. The open question listed five
+  candidates: per-process liveness, asking the host, reading the host's session store, release through hooks or
+  plugins, and a renewed expiry. Research found no host signal for a closed client, and a 30-minute lag on every Codex
+  signal by default. Three critic passes did not converge. Each moved to a refinement: host end signals, then positive
+  setup evidence, then markers that follow open sessions, then a writer-lock veto and holder matching by session. The
+  design judge ruled for launch modes with one TUI per host process, which needs no envelope field. The user rejected
+  that: nitipan cannot assume how a tool is launched. The user chose the session-based design, with a Codex host
+  restart read as unknown. Dissent left standing: the judge found no rule for a host restart that is both fail-safe and
+  free of a lingering lease, and preferred the launch-mode design for that reason.
+- 2026-10-19: Amended "Commands", "Holder identity", "Liveness", "Holder match rule", "Session name and permission
+  mode", "Granting the sandbox allowance", "Record encoding and file naming", "Lease record fields", and "Record
+  evolution and unknown records" for that decision. Before, liveness was per process for every agent, every write
+  happened under the lock, the envelope had no liveness kind, holder matching for a multi-session agent required the
+  PID, and the risk of an ended session on a live multi-session host was accepted. "Holder identity" also took the
+  live findings from the two adapter handoffs. Codex and opencode are now declared multi-session.
+- 2026-10-19: ADR candidate (hard to reverse): the liveness kind in the V1 envelope, where an unknown kind reads as
+  unknown liveness. Written as ADR-04, proposed. It supersedes ADR-02. At re-acceptance, ADR-04 becomes accepted and
+  ADR-02 becomes superseded, in the same change.
+- 2026-10-19: Whole-proposal review fixes to "Session liveness on shared hosts". An embedded Codex host's death now
+  ends its sessions, through a recorded host mode. Every lock holder makes Codex end marks durable by marking
+  registrations ended before it sweeps. A registration records the host mode and `CODEX_HOME`, checks for a SessionEnd
+  entry, and clears the session's end marks and ended registrations. `acquire` requires the session's own writer-lock
+  file, since it runs mid-turn. Only `ENOENT` counts as an absent lock file. Session files are named by agent, session,
+  and tied process, so an unreadable one still vouches for its session. `hook` calls never deliver tombstones.
+  Unusable or newer session files, and a `session` kind for an agent with no rule, read unknown. The cleanup sweep
+  keeps execution marks while `time_suspended` is set and ended registrations while a lease names them. The opencode
+  TUI's signature is defined for presence writes. Added the matching milestone checks and four risks, and restated
+  ADR-02's envelope in ADR-04.
+- 2026-10-19: Final-pass fixes, not re-checked because the proposal loop's three-pass budget was spent. A new
+  registration removes ended registrations under any host. Moving leases to a new host needs the lock file. A present
+  lock file under a live host overrides an ended registration. The session-file name grammar is fixed. A host is
+  embedded only on a positive TUI match. The config error names the host's mode.
+- 2026-10-19: A Codex review of the working tree found that the cleanup sweep deleted session files it could not
+  read, turning an unknown session dead. The sweep now keeps any session file that does not decode or has a higher
+  version.
 
 ## References
 
 - ADR-02: lease record envelope and evolution rules
 - ADR-03: lease key canonicalization and the overlap rule
+- ADR-04 (proposed): lease record envelope with a liveness kind, superseding ADR-02
+- `spec/reports/2026-10-18-shared-host-session-liveness.md`, `2026-10-18-codex-session-end-options.md`, and
+  `2026-10-18-opencode-session-end-plugin.md`: session liveness research
 - `spec/reports/2026-10-18-lease-broker-research.md`: broker, fencing, auth, and messaging research
 - coding_agent_standards `claude/project-management/guardian.md`: the guardian protocol this tool serves
