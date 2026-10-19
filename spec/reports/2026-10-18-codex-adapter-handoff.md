@@ -466,3 +466,27 @@ rc 0 errno 0 bytes 648 start (1792103390, 449120)
 reused PID. Its executable, command line, and TUI-versus-daemon role remain unverified because `ps` was blocked.
 Thus the narrower observed result supports step 11's claim, but does not independently establish the same-TUI
 `/new` mechanism or identify PID 3067 as Codex. Step 12's results are recorded in the session C section above.
+
+### Step 13: sysctl process walk
+
+Date: 2026-10-18. macOS arm64; the observed Codex executable path identifies release 0.163.0.
+Ran only the exact step 13 Python script, with no arguments, through the shell tool in the workspace sandbox
+without escalation. Exit status was 0, with no stderr. Full stdout:
+
+```text
+3067 ppid 63172 start (1792103390, 449120) comm codex args /Users/ripta/.codex/packages/app-server-daemon/releases/0.163.0-aarch64-apple-darwin/bin/codex app-server --listen unix:// --analytics-default-enabled --managed-daemon
+63172 ppid 1 start (1791738792, 28767) comm codex args /Users/ripta/.codex/packages/app-server-daemon/releases/0.163.0-aarch64-apple-darwin/bin/codex app-server daemon pid-update-loop
+1 ppid 0 start (1788921052, 352675) comm launchd args kern.procargs2: Invalid argument
+```
+
+**Confirmed:** `kern.proc.pid` permits the ancestry walk through PID 1 inside this sandbox, returning command names,
+parent PIDs, and start times for all three processes. PID **3067** is the native Codex managed app-server daemon;
+PID **63172** is the Codex `app-server daemon pid-update-loop` parent, and PID **1** is `launchd`.
+PID 3067's start time matches the earlier observations. This corroborates the outside-sandbox process identification
+and confirms that the daemon can be recognized here without `ps`; it does not test the embedded TUI case.
+
+`kern.procargs2` succeeded for both Codex processes. For PID 1 it returned `Invalid argument`, so launchd's arguments
+were unavailable; this is not an explicit permission-denied error and does not establish sandbox blocking.
+The script limits displayed arguments to 300 characters; neither successful argument string reached that limit.
+No other experiment was run, no configuration was changed, and no process was started or stopped beyond the shell
+probe itself. Daemon process liveness alone still does not establish whether an individual session remains alive.
