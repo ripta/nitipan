@@ -1,6 +1,6 @@
 # NIT-001: Local Lease CLI
 
-**Status:** accepted
+**Status:** designing
 **Created:** 2026-10-18
 **Updated:** 2026-10-18
 
@@ -733,7 +733,28 @@ one checkout misses a scope that crosses into a nested checkout.
 
 ## Design Decisions (Open)
 
-None.
+### Session liveness on shared hosts
+
+Codex and opencode each run every session's shell commands under one long-lived shared process. Under Codex, that is
+the managed app-server daemon, which outlives every Codex window. Under opencode, it is the shared `opencode serve
+--service` process, and under `--standalone` a private `opencode serve --stdio` child of the TUI. Live tests on
+2026-10-18 found four Codex sessions and three opencode sessions each sharing one process. See
+`spec/reports/2026-10-18-codex-adapter-handoff.md` and `spec/reports/2026-10-18-opencode-adapter-handoff.md`.
+
+"Liveness" is per process. On these hosts, a lease from a session that has ended reads as alive for as long as the
+shared process runs, which can be days. "Holder match rule" accepted this limit when multi-session hosts looked rare.
+Both are the default configuration.
+
+The candidates so far:
+
+- Keep per-process liveness, and accept that such a lease stays until `break --force`
+- Ask the host whether the session still exists: opencode's service API, or Codex's app-server over its control
+  socket. Codex's sandbox blocks that socket from inside a Codex session
+- Read the host's own session store on disk, such as Codex's state database or opencode's session storage
+- Release on session end through each agent's hooks or plugins, with per-process liveness as the fallback after a
+  crash
+- Give leases from multi-session hosts an expiry that each nitipan call renews. "Liveness" rejected heartbeats because
+  an idle session cannot renew
 
 
 ## Risks
@@ -1030,6 +1051,11 @@ None.
 - 2026-10-18: Amended "A supported read path for guardians", on the user's choice. It said a minor schema bump "only
   adds fields". A minor bump may now also add `domain.kind` values, and consumers treat an unknown kind as opaque.
   NIT-002's `resource` kind is a minor bump.
+- 2026-10-18: Reopened for "Session liveness on shared hosts", on the user's choice to settle it before scheduling.
+  Status moved from `accepted` to `designing`. Live tests found that Codex and opencode both run every session under
+  one long-lived shared process by default. "Holder match rule" and the multi-session risk had assumed such hosts were
+  rare. Evidence: `spec/reports/2026-10-18-codex-adapter-handoff.md` and
+  `spec/reports/2026-10-18-opencode-adapter-handoff.md`.
 
 ## References
 
