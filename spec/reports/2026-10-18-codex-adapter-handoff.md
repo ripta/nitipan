@@ -108,6 +108,49 @@ The next two need sessions the user starts. The user points each one at this fil
     `codex -c 'shell_environment_policy.include_only=["PATH","HOME"]'`. That flag changes only session C, not the
     config file. In C, repeat step 1. Record which Codex variables survive.
 
+Step 13 was added after the first run found `ps` blocked by the sandbox.
+
+13. Walk the process tree without `ps`, the way nitipan will. Run this script with no arguments. It starts at the
+    shell's parent and reads each process's parent PID, command name, start time, and arguments through sysctl. Record
+    its full output, and mark which process is Codex. Record whether the arguments sysctl, `kern.procargs2`, is blocked
+    for any process.
+
+    ```sh
+    python3 - <<'EOF'
+    import ctypes, ctypes.util, os, struct
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+
+    def sysctl(mib, size):
+        m = (ctypes.c_int * len(mib))(*mib)
+        buf = ctypes.create_string_buffer(size)
+        n = ctypes.c_size_t(size)
+        if libc.sysctl(m, len(mib), buf, ctypes.byref(n), None, ctypes.c_size_t(0)) != 0:
+            return None, os.strerror(ctypes.get_errno())
+        return buf.raw[:n.value], None
+
+    pid = os.getppid()
+    while pid:
+        raw, err = sysctl([1, 14, 1, pid], 1024)
+        if err or not raw:
+            print(pid, "kern.proc.pid:", err or "zero bytes")
+            break
+        start = struct.unpack_from("<qi", raw, 0)
+        comm = raw[243:260].split(b"\0", 1)[0].decode(errors="replace")
+        ppid = struct.unpack_from("<i", raw, 560)[0]
+        args, err = sysctl([1, 49, pid], 262144)
+        if args:
+            argc = struct.unpack_from("<i", args, 0)[0]
+            parts = [p for p in args[4:].split(b"\0") if p]
+            argv = " ".join(p.decode(errors="replace") for p in parts[1:1 + argc])[:300]
+        else:
+            argv = "kern.procargs2: " + str(err)
+        print(pid, "ppid", ppid, "start", start, "comm", comm, "args", argv)
+        if pid == 1:
+            break
+        pid = ppid
+    EOF
+    ```
+
 ## Findings from a live session
 
 Record the Codex version, the OS, and the date. For each experiment, give its number, what you ran, what happened, and
@@ -466,6 +509,39 @@ rc 0 errno 0 bytes 648 start (1792103390, 449120)
 reused PID. Its executable, command line, and TUI-versus-daemon role remain unverified because `ps` was blocked.
 Thus the narrower observed result supports step 11's claim, but does not independently establish the same-TUI
 `/new` mechanism or identify PID 3067 as Codex. Step 12's results are recorded in the session C section above.
+
+### 2026-10-18: Steps 2 and 7 from outside the sandbox
+
+The user ran these from a plain terminal, outside any agent, after the Codex sessions had closed. PID 3067 was still
+alive with the start time the earlier runs recorded, `(1792103390, 449120)`.
+
+`ps -o pid,ppid,lstart,comm,args -p <pid>`, walked up from 3067:
+
+```text
+  PID  PPID STARTED                      COMM             ARGS
+ 3067 63172 Thu Oct 15 15:29:50 2026     /Users/ripta/.co /Users/ripta/.codex/packages/app-server-daemon/releases/0.163.0-aarch64-apple-darwin/bin/codex app-server --listen unix:// --analytics-default-enabled --managed-daemon
+63172     1 Sun Oct 11 10:13:12 2026     /Users/ripta/.co /Users/ripta/.codex/packages/app-server-daemon/releases/0.163.0-aarch64-apple-darwin/bin/codex app-server daemon pid-update-loop
+    1     0 Tue Sep  8 19:30:52 2026     /sbin/launchd /sbin/launchd
+```
+
+`ls -la ~/.codex/app-server-control/`:
+
+```text
+drwx------   4 ripta  staff   128 Oct 15 15:29 .
+lrwxr-xr-x   1 ripta  staff    94 Oct 15 15:29 app-server-control.sock -> /private/tmp/codex-daemon-501/46d8fc39698add01ce7aed23c38d8c9b30463016201a4ee3f7c59ba666c507a8
+-rw-r--r--   1 ripta  staff     0 Oct 11 10:13 app-server-startup.lock
+```
+
+`codex app-server daemon version` (exit 0):
+
+```text
+{"status":"running","backend":"pid","managedCodexPath":"/Users/ripta/.codex/packages/app-server-daemon/current/bin/codex","managedCodexVersion":"0.163.0","socketPath":"/Users/ripta/.codex/app-server-control/app-server-control.sock","cliVersion":"0.163.0","appServerVersion":"0.163.0"}
+```
+
+A managed app-server daemon is running. PID 3067 is that daemon. Every Codex session in the earlier runs, including
+the one after `/new`, ran its shell commands as children of this one shared process. That confirms the claim that
+shell commands are children of the daemon when one runs. The daemon has outlived every Codex window. Its parent is a
+`pid-update-loop` process under launchd. The embedded case, with no daemon, was not tested.
 
 ### Step 13: sysctl process walk
 
