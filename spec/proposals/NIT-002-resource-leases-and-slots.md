@@ -374,8 +374,8 @@ None.
   `name` footprint. Waits on NIT-001 reaching `accepted`, since it extends NIT-001's own record-format candidate.
 - 2026-10-18: ADR candidate (hard to reverse): the `slots.json` config and its minimum admission rule. Waits on
   NIT-001 reaching `accepted`.
-- 2026-10-18: Review gate: no judge rulings, provisional decisions, or standing dissent. Nothing reopened. `accepted`
-  was not offered, because the Risks mitigation requires NIT-001 to be accepted first.
+- 2026-10-18: Review gate: no judge rulings, provisional decisions, or standing dissent. Nothing reopened. The user kept
+  the proposal `designing`, since the Risks mitigation requires NIT-001 to be accepted first.
 
 ## References
 
