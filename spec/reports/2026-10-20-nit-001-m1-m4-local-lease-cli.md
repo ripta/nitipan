@@ -7,8 +7,8 @@ sandboxed Bash in `/Users/ripta/projects/nitipan`.
 
 ## TL;DR
 
-The run builds M1 through M3. M4 (the Codex and opencode adapters) is held because it needs live interactive TUI
-sessions. In progress.
+The run built and committed M1 through M3, plus one commit of final review fixes. `make ci` passes. M4 (the Codex
+and opencode adapters) is held because it needs live interactive TUI sessions. NIT-001 stays `accepted`.
 
 ## Run state
 
@@ -267,5 +267,20 @@ Findings and dispositions:
 
 ## Status
 
-M1 (`90d5349`), M2 (`0c204bd`), and M3 (`1a7e940`) are done. The final review fixes are committed after `1a7e940`.
-M4 is held. NIT-001 stays `accepted`, and its row stays unfinished in `queue.md`.
+The run is finished. Commits in this repo, in order:
+
+1. `90d5349` nitipan: add lease record format, key overlap, and liveness
+2. `0c204bd` nitipan: add acquire, release, list, advertise, and setup
+3. `1a7e940` nitipan: add break and tombstones
+4. `2b1f280` nitipan: deliver tombstones before request validation. These are the final review fixes
+5. This report's last amendment, committed on its own
+
+M4 is held. NIT-001 stays `accepted`, and row `NIT-001 M1-M4` stays unfinished in `queue.md`. No stashes were
+made. Still open for the user:
+
+- Run `go mod verify` outside the sandbox. `go.sum` was never checked against sum.golang.org.
+- Decide on the `clear_when_dead` default for an absent field (final review finding 6).
+- Review the moved checks and the best guesses above, especially the domain flags, `--replace` dropping keys, the
+  BIP-39 list written from memory, and stray non-ID files being removable only by hand.
+- Settle the two Undecided ADR candidates: the state directory layout, and the exit-status table.
+- Run M4 when an interactive Codex and opencode session is available.
