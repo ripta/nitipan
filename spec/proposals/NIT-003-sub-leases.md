@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-18
+**Updated:** 2026-10-20
 
 ## Dependencies
 
@@ -531,6 +531,7 @@ None.
   needs. The rule on release-time duties was narrowed at this proposal's request: only a skipped duty that would make
   an old reader more permissive needs a new major, and a skipped notice to a parent does not. So `parent` stays a minor
   addition. The user kept all eight amendments at NIT-001's review gate.
+- 2026-10-20: Scheduled as NIT-003 M1-M3 in queue.md.
 
 ## References
 

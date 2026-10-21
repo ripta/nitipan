@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-19
+**Updated:** 2026-10-20
 
 ## Dependencies
 
@@ -1328,6 +1328,7 @@ None.
   version.
 - 2026-10-19: Accepted again, on the user's choice at the review gate. ADR-04 became accepted and ADR-02 superseded in
   the same change.
+- 2026-10-20: Scheduled as NIT-001 M1-M4 in queue.md.
 
 ## References
 

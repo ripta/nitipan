@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-18
+**Updated:** 2026-10-20
 
 ## Dependencies
 
@@ -385,6 +385,7 @@ None.
   version add kind `resource`. The cross-type risk said the rule was undefined, and the envelope risk called NIT-001
   "still in design". The hooks on the three ADR candidates above have fired, since NIT-001 is accepted with the
   cross-type rule. Their outcomes are left for the user to choose.
+- 2026-10-20: Scheduled as NIT-002 M1-M3 in queue.md.
 
 ## References
 
