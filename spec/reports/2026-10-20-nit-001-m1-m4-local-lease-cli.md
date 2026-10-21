@@ -19,7 +19,7 @@ sessions. In progress.
 |-----------|------------|--------|
 | NIT-001 M1 | DONE | `90d5349` |
 | NIT-001 M2 | DONE | `0c204bd` |
-| NIT-001 M3 | DONE | see final review section |
+| NIT-001 M3 | DONE | `1a7e940` |
 | NIT-001 M4 | HELD | |
 
 The user held M4 at plan time. Its checks need interactive Codex and opencode sessions: closing a window, `/new`, a
@@ -238,8 +238,34 @@ ADR candidates:
 
 ## Final review
 
-Pending.
+M3's commit: `1a7e940` nitipan: add break and tombstones. It was first committed as `cbdd7ec`, then reworded
+without changing its tree. The first body said that records nitipan cannot read "never block on their own". In fact
+an unusable lease record refuses every claim, and only an unusable tombstone never blocks.
+
+The final review covered `4cde8a9..1a7e940`, with all three commits as the specs commits. It served as both the row
+review and the ADR review. `make ci` passed, and `proposals.py freeze` and `proposals.py check` returned `[]`. The
+range adds and edits no ADR. The code honors ADR-03 and ADR-04, and the three ADR candidates the run logged are
+well-formed.
+
+Findings and dispositions:
+
+1. Fixed. M2's As built said `release` does not deliver tombstones, which M3 changed. The proposal corrects it in
+   place and logs a correction of fact.
+2. Fixed. Two Decision Log entries ran past 120 columns.
+3. Documented, no code change (PLAUSIBLE). `leases/` and `tombstones/` ignore names that do not end in `.json`, so
+   such a file never blocks a claim and never shows in `list`. The proposal names records `<id>.json`. Treating a
+   foreign file such as `.DS_Store` as an unusable record would block every claim. M3's As built now states the rule.
+4. Fixed (PLAUSIBLE). A call that failed validation delivered no tombstone. Delivery now runs before validation of the
+   permission mode, the domain, and `release` targets, and a test covers it. A missing session ID, or an agent with no
+   session rule, still fails before delivery, since the holder cannot be identified. A side effect: those validation
+   errors now need the lock and a writable format marker.
+5. Fixed. Two stale comments, and an exported error used only by the `hook` stub, which is now unexported.
+6. Left for the user (adr-impact PLAUSIBLE, ADR-04). A record that omits `clear_when_dead` decodes as clearable, while
+   every other absent safety field fails toward blocking. NIT-001 says "`clear_when_dead`: default true", and ADR-04
+   states no default. Reading absent as false is safer, but it would change a written decision. It may also want a
+   wording clarification in ADR-04.
 
 ## Status
 
-M1 (`90d5349`) and M2 (`0c204bd`) are done. M3 is done, and its commit is named in the final review section.
+M1 (`90d5349`), M2 (`0c204bd`), and M3 (`1a7e940`) are done. The final review fixes are committed after `1a7e940`.
+M4 is held. NIT-001 stays `accepted`, and its row stays unfinished in `queue.md`.

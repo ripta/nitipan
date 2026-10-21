@@ -29,15 +29,15 @@ type AdvertiseResult struct {
 func (e *Engine) Advertise(req AdvertiseRequest) (*AdvertiseResult, error) {
 	h := req.Holder
 
-	if err := validMode(h.Adapter, req.Mode); err != nil {
-		return nil, err
-	}
-
 	c, err := e.begin(&h)
 	if err != nil {
 		return nil, err
 	}
 	defer c.close()
+
+	if err := validMode(h.Adapter, req.Mode); err != nil {
+		return nil, err
+	}
 
 	if len(c.mine) == 0 {
 		return nil, failf(exitcode.ErrNoSuchLease, "no lease to advertise on; pass --name to acquire")

@@ -1131,8 +1131,8 @@ Amended 2026-10-20; see Decision Log.
   a blocked write prints. `list` also resolves its caller, as M3's tombstone delivery will, and warns when it cannot.
   The `tombstones` array is always emitted, and `name_shared` marks a name that more than one
   live holder reports. Both joined schema 1.0, since nothing had released it.
-- `release` already reports "broken" for an ID with a tombstone addressed to the caller. It does not deliver or remove
-  that tombstone. Delivery and removal belong to M3 with `break`.
+- `release` reports "broken" for an ID with a tombstone addressed to the caller. M3 made `release` deliver and remove
+  that tombstone first, through the shared locked path. Corrected 2026-10-20; see Decision Log.
 - A file in `leases/` whose name is not a lease ID, or whose body names a different ID, is an unusable record. It blocks
   `acquire` and shows in `list`. It cannot be addressed by ID. M3's `break --force` must say how a person removes it.
 - Housekeeping rewrites, which refresh a rotated session ID and bring the name and mode of a holder's records back in
@@ -1208,6 +1208,15 @@ Amended 2026-10-20; see Decision Log.
   coverage check, and ownership alone decides. A test pins that another holder's record of a higher minor reports "not
   yours".
 - No new exit status. The existing broken, no-such-lease, unusable, and refused statuses cover every result.
+- Delivery happens when the call takes the lock, before it validates the request. A call that fails on a bad
+  permission mode, a bad domain, a bad scope, or an unresolvable release target still delivers and removes the
+  caller's tombstones. Delivery is impossible when the holder cannot be identified. A missing session ID, and an agent
+  with no supported session-liveness rule, fail before the lock and deliver nothing. A caller with no adapter holds
+  nothing and has no tombstones to receive.
+- Only files named `<something>.json` count as records in `leases/` and `tombstones/`. A `.tmp-` file and any other
+  name, such as `.DS_Store` or `foo.txt`, are ignored. They never block a claim and never show in `list`. A
+  `<something>.json` file whose name is not an ID is an unusable record. Treating every foreign file as unusable would
+  let one stray file block every claim.
 
 ### M4: Codex and opencode adapters
 
@@ -1453,9 +1462,9 @@ Amended 2026-10-20; see Decision Log.
   Claude Code sandbox on macOS and on Linux, and the Linux result is recorded in the As built block", and "reports
   alive, dead, and PID-reused correctly on macOS and on Linux". The risk's mitigation said milestone 1 checks liveness
   inside the Claude Code sandbox on Linux. The user does not run Linux and did not allow a Linux dependency, so the
-  runtime Linux check is skipped. The macOS sandbox check is met by running the tests in Claude Code's sandbox. The Linux
-  code paths are verified only by fixture tests over a `/proc` tree and by cross-compilation with `go vet`. The risk is
-  now accepted, with the first real Linux run as its check.
+  runtime Linux check is skipped. The macOS sandbox check is met by running the tests in Claude Code's sandbox. The
+  Linux code paths are verified only by fixture tests over a `/proc` tree and by cross-compilation with `go vet`. The
+  risk is now accepted, with the first real Linux run as its check.
 - 2026-10-20: ADR candidate (hard to reverse): the state directory's location and layout. The home directory comes
   from the user database, never `HOME` or `XDG_STATE_HOME`. Under it sit `leases/`, `tombstones/`, `lock`, and
   `format`. Every binary on a machine must agree, or two sessions scan different directories. Undecided. Found in
@@ -1463,10 +1472,11 @@ Amended 2026-10-20; see Decision Log.
 - 2026-10-20: ADR candidate (hard to reverse): the CLI's exit-status table. Scripts and agents test the numbers, so
   changing a value breaks them. Undecided. Found in NIT-001 M1.
 - 2026-10-20: Amended M2 and M3 checks, because the original M2 checks depended on `break` and tombstones, which M3
-  builds. That was a plan inconsistency. M2 said "`list --json` ... includes the tombstones it delivered or reaped" and "A caller with no adapter can run `list`
-  and `break`, is recorded as an anonymous process, and cannot `release`". M2 now requires the `tombstones` array, empty
-  until M3, and the anonymous identity without `break`. M3 gains the two matching checks: `list --json` includes the
-  tombstones it delivered or reaped, and an anonymous `break` caller is recorded in the tombstone.
+  builds. That was a plan inconsistency. M2 said "`list --json` ... includes the tombstones it delivered or reaped" and
+  "A caller with no adapter can run `list` and `break`, is recorded as an anonymous process, and cannot `release`". M2
+  now requires the `tombstones` array, empty until M3, and the anonymous identity without `break`. M3 gains the two
+  matching checks: `list --json` includes the tombstones it delivered or reaped, and an anonymous `break` caller is
+  recorded in the tombstone.
 - 2026-10-20: Amended "Breaking a live lease", "A supported read path for guardians", and "Releasing" while building M3.
   The tombstone text said it names the lease, the breaker, and the time. It now also lists the lease's paths, so the
   broken holder can recognize a lease it may not remember by ID. The read-path bullet said delivered and reaped
@@ -1485,6 +1495,12 @@ Amended 2026-10-20; see Decision Log.
   removes the tombstones addressed to its caller. `break --force` publishes the tombstone before it removes the lease,
   so a crash repeats a notice and never loses one. Waits on NIT-001 M4, which settles the `hook` exception and the
   notices for sessions that move to a new host. Found in NIT-001 M3.
+- 2026-10-20: Correction of fact in the M2 As built block. It said `release` "does not deliver or remove that
+  tombstone. Delivery and removal belong to M3 with `break`." M3 shipped delivery and removal in the shared locked
+  path, so `release` delivers and removes first and then reports "broken". The bullet now says so.
+- 2026-10-20: Final-review fixes to M3. Delivery now runs before request validation wherever the holder is known, so a
+  call that fails on a bad permission mode, a bad domain, or a release target still delivers. Where the holder cannot
+  be identified, delivery is impossible. Recorded in the M3 As built block.
 
 ## References
 

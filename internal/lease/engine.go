@@ -1,5 +1,5 @@
 // Package lease implements the commands that read and change lease records: acquire, release,
-// advertise, and the read side of list.
+// advertise, break, and the read side of list.
 //
 // Every operation runs under the state lock. The command layer builds an Engine from injected
 // dependencies, so tests drive the same code with a fake process table.

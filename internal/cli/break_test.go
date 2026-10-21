@@ -309,6 +309,40 @@ func TestEveryCommandDeliversTheTombstonesAddressedToItsCaller(t *testing.T) {
 	}
 }
 
+type failedValidationTest struct {
+	Name string
+	Args []string
+	Want string
+}
+
+var failedValidationTests = []failedValidationTest{
+	{Name: "bad permission mode", Args: []string{"--permission-mode", "yolo"}, Want: `"yolo"`},
+	{Name: "bad scope", Args: []string{"--scope", "../escape"}, Want: ".."},
+}
+
+func TestAnAcquireThatFailsValidationStillDeliversTheTombstones(t *testing.T) {
+	for _, test := range failedValidationTests {
+		t.Run(test.Name, func(t *testing.T) {
+			w := newWorld(t)
+			holder := w.claude(200, "s1")
+			breaker := w.claude(300, "s2")
+
+			id := w.acquireOK(holder, "--checkout", w.dir("repo"))
+			wantStatus(t, w.run(breaker, "break", "--force", id), exitcode.OK)
+
+			args := append([]string{"acquire", "--checkout", w.dir("elsewhere")}, test.Args...)
+
+			res := w.run(holder, args...)
+			wantStatus(t, res, exitcode.Usage)
+			wantContains(t, "stderr", res.Stderr, test.Want, "nitipan: notice: lease "+id, "was broken by", "pid 300")
+
+			if tombs := w.tombIDs(); len(tombs) != 0 {
+				t.Errorf("tombstones after delivery = %v, want none", tombs)
+			}
+		})
+	}
+}
+
 func TestATombstoneForAnotherHolderIsLeftAlone(t *testing.T) {
 	w := newWorld(t)
 	w.liveHolder()

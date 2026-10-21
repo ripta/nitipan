@@ -32,6 +32,14 @@ type ReleaseResult struct {
 // Targets are resolved first, and nothing is removed unless every one of them resolves. A lease of a
 // newer minor version is removed like any other, because removing is not a rewrite.
 func (e *Engine) Release(req ReleaseRequest) (*ReleaseResult, error) {
+	h := req.Holder
+
+	c, err := e.begin(&h)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+
 	var claimed keys.Domain
 
 	if req.Domain != nil {
@@ -42,14 +50,6 @@ func (e *Engine) Release(req ReleaseRequest) (*ReleaseResult, error) {
 
 		claimed = d
 	}
-
-	h := req.Holder
-
-	c, err := e.begin(&h)
-	if err != nil {
-		return nil, err
-	}
-	defer c.close()
 
 	var targets []*entry
 

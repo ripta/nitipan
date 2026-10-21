@@ -82,6 +82,14 @@ func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
 		return nil, fmt.Errorf("session liveness for %s is not supported yet", h.Adapter.Name)
 	}
 
+	c, err := e.begin(&h)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+
+	// Validation runs after begin so that a request that fails here still delivers the caller's
+	// tombstones. A broken holder gets no other signal.
 	if err := validMode(h.Adapter, req.Mode); err != nil {
 		return nil, err
 	}
@@ -90,12 +98,6 @@ func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", exitcode.ErrUsage, err)
 	}
-
-	c, err := e.begin(&h)
-	if err != nil {
-		return nil, err
-	}
-	defer c.close()
 
 	if err := c.firstUnusable(); err != nil {
 		return nil, err

@@ -23,8 +23,9 @@ type Output struct {
 	SchemaVersion string  `json:"schema_version"`
 	Leases        []Lease `json:"leases"`
 
-	// Tombstones are the tombstones this call delivered or reaped. It is always an array, empty when
-	// there were none, so a consumer never has to test for absence.
+	// Tombstones are the tombstones this call delivered or reaped, plus any it found unusable and left
+	// in place, marked unknown. It is always an array, empty when there were none, so a consumer never
+	// has to test for absence.
 	Tombstones []Tombstone `json:"tombstones"`
 }
 

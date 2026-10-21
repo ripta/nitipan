@@ -26,8 +26,8 @@ import (
 	"github.com/space-armada/nitipan/internal/version"
 )
 
-// ErrNotImplemented marks a command whose behavior has not landed yet.
-var ErrNotImplemented = errors.New("not implemented yet")
+// errNotImplemented marks a command whose behavior has not landed yet.
+var errNotImplemented = errors.New("not implemented yet")
 
 // Deps are the dependencies the commands share. A nil optional field takes its production default.
 type Deps struct {
@@ -160,7 +160,7 @@ func hookStub() *cobra.Command {
 		Short:  "Called by agent hooks and plugins",
 		Hidden: true,
 		RunE: func(*cobra.Command, []string) error {
-			return fmt.Errorf("this command is %w", ErrNotImplemented)
+			return fmt.Errorf("this command is %w", errNotImplemented)
 		},
 	}
 }
