@@ -17,8 +17,8 @@ sessions. In progress.
 
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
-| NIT-001 M1 | DONE | see M2 section |
-| NIT-001 M2 | IN PROGRESS | |
+| NIT-001 M1 | DONE | `90d5349` |
+| NIT-001 M2 | DONE | see M3 section |
 | NIT-001 M3 | QUEUED | |
 | NIT-001 M4 | HELD | |
 
@@ -121,6 +121,73 @@ not a decision of its own.
 
 Deviations: the Linux amendment the user chose. Nothing else is open.
 
+### NIT-001 M2
+
+Commits so far: `90d5349` nitipan: add lease record format, key overlap, and liveness. That is M1's commit.
+
+The first M2 implementer was restarted on 2026-10-21 at about 04:58 UTC. It had stalled for about 8 minutes on two
+`mdfind` calls, which waited on a permission prompt because `mdfind` is not on the repo's cg allow list. It had
+changed no code. The stopped agent's result read "Use find via Bash". The fresh agent's brief says to use `find`
+through Bash for file searches.
+
+Checks: `make fmt-check lint vet-linux test build` passed. Lint reported 0 issues. `go test -race` passed, including a
+race of 8 processes over 6 rounds. `proposals.py check` and `proposals.py freeze --row-commit 90d5349` returned
+`[]`. The implementer also ran `acquire`, `list`, and `release` once inside this sandbox, against the real state
+directory, and released the lease.
+
+Best guesses the implementer made:
+
+- Domain arguments are `--checkout` plus a repeatable `--scope`. The checkout defaults to the working directory for
+  `acquire` and `list`. `release` takes IDs as positional arguments, and the flags as a domain. The proposal does not
+  spell these flags, and scripts will depend on them.
+- An explicit `--replace` may drop keys. Only the self-overlap refusal stops suggesting it when it would drop keys.
+  After review, a replace that drops keys prints the keys it released. The reviewer found the proposal's wording
+  allows the flag to drop keys, but that is not settled. If `--replace` must refuse to drop keys, it needs a change.
+- `list` takes the lock so it can finish crashed merges. When the lock is busy or blocked by the sandbox, `list` reads
+  without the lock, warns, and exits 0.
+- The Claude Code permission modes are `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, and
+  `bypassPermissions`. Nobody verified the list. A stale list refuses a valid new mode.
+- The Claude Code `setup` text adds a `Bash(nitipan *)` allow rule, which `setup_permissions.py` does not manage. The
+  proposal says `setup` prints a command-approval rule where the agent has one. That rule also pre-approves
+  `break --force`.
+- The BIP-39 English list was written from memory, because no local copy was found. The reviewer generated the
+  official test-vector mnemonics at 128, 192, and 256 bits, and all 12 matched. That covers about 25 words plus the
+  ordering, but it is not a full comparison. A correction later changes every handle.
+- A handle collision, a missing session ID, and an unsupported agent exit with status 1. A claim that overlaps the
+  caller's own leases exits with status 3, and the table's description of status 3 was widened to say so.
+- Codex and opencode `setup` print a "cannot claim leases yet" notice and the mkdir command.
+
+Deviations:
+
+- Two M2 checks moved to M3, and M3 gained the matching checks. One is "`list --json` includes the tombstones it
+  delivered or reaped". The other is "an anonymous `break` caller is recorded". Both depend on `break` and
+  tombstones, which M3 builds. The proposal carries one amendment marker per milestone and a Decision Log entry. This
+  moved planned checks between milestones without asking, as the run's ambiguity rule allows. Review it.
+- `list --json` schema 1.0 gained `tombstones` and `name_shared` without a version bump, since no schema had shipped.
+
+Review findings and dispositions:
+
+1. Fixed. M3's amendment marker sat in the middle of its check list.
+2. Fixed. The M2/M3 amendment's log entry now gives the real reason, which is the plan inconsistency above.
+3. Fixed. `list` now resolves its caller through the path that M3's tombstone delivery will use. A command-level test
+   shows that a caller with no agent variables, or with stray ones, resolves as an anonymous process.
+4. Fixed. Command-level tests now cover `list` reading without the lock, for a busy lock and for a sandbox-blocked
+   lock.
+5. Fixed (PLAUSIBLE). A `--replace` that drops keys now names the keys it released.
+6. Fixed (CONFIRMED). The suggested `acquire` command in the uncovered-claim error now shell-quotes its paths.
+   `release --all` with no leases now says so.
+7. Fixed. The duplicate `plural` helper was merged.
+8. Fixed. A duplicate ADR candidate for the handle derivation was removed. The 2026-10-18 entry already covers it.
+9. Dismissed. adr-impact asked whether `absorbs` passes the minor-version rule. `absorbs` is a field the first
+   version already defines, so the rule does not apply.
+
+ADR candidates: none new. The handle candidate is already in the Decision Log, dated 2026-10-18. The `list --json`
+schema's evolution falls under the 2026-10-18 candidate for `list --json`.
+
+### NIT-001 M3
+
+Commits so far: the M2 commit is named here once M3's first amendment lands.
+
 ## Status
 
-M1 is done and committed. M2 is next.
+M1 and M2 are done. M3 is next.

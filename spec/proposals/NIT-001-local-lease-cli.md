@@ -1065,7 +1065,7 @@ Amended 2026-10-20; see Decision Log.
 
 ### M2: Acquire, release, and list
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `acquire` claims a domain under the lock, and publishes its record through a temp file and `link(2)`
 - A reader never sees a partly written record, and a lock holder removes temp files left by a crashed writer
@@ -1080,11 +1080,11 @@ Amended 2026-10-20; see Decision Log.
 - The self-overlap refusal names `--replace` only when the replace drops no keys
 - `release` takes IDs or domain arguments, refuses with no argument, refuses a partial match and names the candidates,
   releases a deleted worktree's lease by its stored keys, and gives distinct results for an ID that is not found
-- `list --json` emits its versioned schema with liveness per lease, filters by domain arguments, and includes the
-  tombstones it delivered or reaped
+- `list --json` emits its versioned schema with liveness per lease, filters by domain arguments, and carries a
+  `tombstones` array that stays empty until M3 writes tombstones
 - The state directory comes from the user database, ignores `HOME` and `XDG_STATE_HOME`, fails closed when the lookup
   fails, and is created with mode 0700
-- A caller with no adapter can run `list` and `break`, is recorded as an anonymous process, and cannot `release`
+- A caller with no adapter can run `list`, is identified as an anonymous process, and cannot `release`
 - A flag left out keeps its stored value
 - `advertise`, or a name or mode given to `acquire`, rewrites that field in every live lease the caller holds
 - `advertise` with no live lease refuses, and says to pass `--name` to `acquire`
@@ -1109,6 +1109,51 @@ Amended 2026-10-20; see Decision Log.
 - A multi-session or unknown adapter matches only when the session ID matches too, and fails `acquire` without one
 - A write blocked with `EPERM` or `EACCES` prints the detected agent's entries, the same text `nitipan setup` prints
 
+Amended 2026-10-20; see Decision Log.
+
+**As built:**
+
+- The proposal does not spell the domain arguments. `acquire`, `list`, and `release` take `--checkout` and a repeatable
+  `--scope`. `acquire` and `list` default the checkout to the working directory when neither flag is given. `release`
+  takes lease IDs as positional arguments and reads the same flags as a domain, so an ID and a path can never be
+  confused. A bare `release` has no default checkout, because it must never act on an unnamed target.
+- An explicit `--replace` may release keys the new claim does not contain. Only the refusal withholds the suggestion in
+  that case, and it lists the keys and the claim that adds only what the caller lacks. The proposal does not say whether
+  the flag itself refuses. A replace that releases keys prints them, so a holder never loses keys silently.
+- `list` takes the lock so a locked call can finish a crashed merge. When the lock is busy, or the sandbox blocks the
+  lock file, it reads without the lock and prints a warning, and exits 0. The blocked case prints the same sandbox text
+  a blocked write prints. `list` also resolves its caller, as M3's tombstone delivery will, and warns when it cannot.
+  The `tombstones` array is always emitted, and `name_shared` marks a name that more than one
+  live holder reports. Both joined schema 1.0, since nothing had released it.
+- `release` already reports "broken" for an ID with a tombstone addressed to the caller. It does not deliver or remove
+  that tombstone. Delivery and removal belong to M3 with `break`.
+- A file in `leases/` whose name is not a lease ID, or whose body names a different ID, is an unusable record. It blocks
+  `acquire` and shows in `list`. It cannot be addressed by ID. M3's `break --force` must say how a person removes it.
+- Housekeeping rewrites, which refresh a rotated session ID and bring the name and mode of a holder's records back in
+  line after a crash, are skipped on a record of a newer minor. A requested name or mode change refuses the whole call
+  before the first rename. After a crash mid-rewrite the first record by lease ID wins, because rewrites go in that
+  order.
+- The kill-mid-replace check injects the crash between the rename and the removal of the merged leases, which is the
+  only window that leaves two records. A crash before the rename leaves the old record and a temp file, which the next
+  locked call sweeps. No process was killed at that point.
+- The concurrency check re-executes the test binary as eight separate processes per round, over six rounds, with
+  overlapping claims. Exactly one succeeds each round. Each child's fake process table holds every child's agent as
+  alive.
+- No shipped adapter is a multi-session agent judged by process, so the same-process refusal is tested with a test-only
+  adapter. Codex and opencode are kind `session`, and their `acquire` fails with "session liveness for <agent> is not
+  supported yet" before anything is read. Their `setup` text says only that they cannot claim leases yet and how to
+  create the directory. Both belong to M4.
+- The Claude Code permission modes are a guess: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, and
+  `bypassPermissions`. The agent reports the value, so it is advisory.
+- `setup` for Claude Code prints the `Edit` allow rule and the sandbox write path that `setup_permissions.py` manages,
+  the `mkdir` command, and a `Bash(nitipan *)` allow rule that the script does not manage.
+- The BIP-39 word list was written from memory. Tests check it is 2048 words, unique, lowercase ASCII, and sorted. It
+  was not compared with a reference copy, so a later correction would change every handle.
+- A manual run in Claude Code's sandbox on macOS acquired, listed, and released a lease against the real state
+  directory, with the real process table.
+- No new exit status. A handle collision, a missing session ID, and an unsupported agent exit with the generic status.
+  The refused status now also covers a claim that overlaps the caller's own leases.
+
 ### M3: Break and tombstones
 
 **Status:** NOT STARTED
@@ -1120,12 +1165,16 @@ Amended 2026-10-20; see Decision Log.
 - `release` removes the caller's own record of a higher minor, and the other-holder check runs before the coverage
   check
 - A broken holder's next nitipan call reports that its lease was broken, and by whom, then removes the tombstone
-- `list` reports a tombstone whose holder is dead once, then removes it
+- `list` reports a tombstone whose holder is dead once, then removes it, and `list --json` includes every tombstone it
+  delivered or reaped
+- A caller with no adapter can run `break`, and a tombstone it writes records it as an anonymous process
 - A broken holder that calls `acquire` next is told its lease was broken
 - `break --force` removes a record nitipan cannot use, writes no tombstone, and says so
 - `list` shows a record nitipan cannot use as unknown, and `release <id>` on one reports an unusable record
 - An unusable tombstone never blocks a claim, shows as unknown in `list`, and is removable with `break --force`
 - No error message names `break --force` as its fix
+
+Amended 2026-10-20; see Decision Log.
 
 ### M4: Codex and opencode adapters
 
@@ -1380,6 +1429,11 @@ Amended 2026-10-20; see Decision Log.
   NIT-001 M1.
 - 2026-10-20: ADR candidate (hard to reverse): the CLI's exit-status table. Scripts and agents test the numbers, so
   changing a value breaks them. Undecided. Found in NIT-001 M1.
+- 2026-10-20: Amended M2 and M3 checks, because the original M2 checks depended on `break` and tombstones, which M3
+  builds. That was a plan inconsistency. M2 said "`list --json` ... includes the tombstones it delivered or reaped" and "A caller with no adapter can run `list`
+  and `break`, is recorded as an anonymous process, and cannot `release`". M2 now requires the `tombstones` array, empty
+  until M3, and the anonymous identity without `break`. M3 gains the two matching checks: `list --json` includes the
+  tombstones it delivered or reaped, and an anonymous `break` caller is recorded in the tombstone.
 
 ## References
 

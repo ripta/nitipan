@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -14,10 +15,11 @@ func testDeps() (deps Deps, stdout, stderr *bytes.Buffer) {
 	stdout, stderr = &bytes.Buffer{}, &bytes.Buffer{}
 
 	deps = Deps{
-		Stdout: stdout,
-		Stderr: stderr,
-		Getenv: func(string) string { return "" },
-		Procs:  proctest.New(record.PlatformDarwin, 1),
+		Stdout:   stdout,
+		Stderr:   stderr,
+		Getenv:   func(string) string { return "" },
+		Procs:    proctest.New(record.PlatformDarwin, 1),
+		StateDir: func() (string, error) { return "", errors.New("test has no state directory") },
 	}
 
 	return deps, stdout, stderr
@@ -34,7 +36,7 @@ var executeTests = []executeTest{
 	{Name: "version", Args: []string{"--version"}, WantStatus: exitcode.OK},
 	{Name: "help", Args: []string{"--help"}, WantStatus: exitcode.OK},
 	{Name: "unknown flag", Args: []string{"list", "--nope"}, WantStatus: exitcode.Usage, WantErr: "unknown flag"},
-	{Name: "unimplemented command", Args: []string{"list"}, WantStatus: exitcode.Error, WantErr: "not implemented"},
+	{Name: "unimplemented command", Args: []string{"break"}, WantStatus: exitcode.Error, WantErr: "not implemented"},
 }
 
 func TestExecute(t *testing.T) {

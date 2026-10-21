@@ -37,7 +37,7 @@ var Table = []Entry{
 	{OK, "ok", "the command did what was asked"},
 	{Error, "error", "any failure with no status of its own"},
 	{Usage, "usage", "the command line was wrong"},
-	{Refused, "refused", "an overlapping lease is held by a live or unknown holder"},
+	{Refused, "refused", "an overlapping lease blocks the claim: another holder's live, unknown, or unclearable lease, or one of the caller's own that the claim would change"},
 	{LockBusy, "lock busy", "the state lock stayed busy past the retry budget"},
 	{AlreadyCovered, "already covered", "the claim is already covered by the caller's own leases, and nothing changed"},
 	{NotYours, "not yours", "the lease belongs to another holder"},

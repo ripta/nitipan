@@ -22,6 +22,30 @@ const SchemaVersion = "1.0"
 type Output struct {
 	SchemaVersion string  `json:"schema_version"`
 	Leases        []Lease `json:"leases"`
+
+	// Tombstones are the tombstones this call delivered or reaped. It is always an array, empty when
+	// there were none, so a consumer never has to test for absence.
+	Tombstones []Tombstone `json:"tombstones"`
+}
+
+// Tombstone actions.
+const (
+	TombstoneDelivered = "delivered"
+	TombstoneReaped    = "reaped"
+	TombstoneUnknown   = "unknown"
+)
+
+// Tombstone is one tombstone list reported. Delivered means it was addressed to the caller. Reaped
+// means its holder is dead. Unknown means nitipan cannot use the file.
+type Tombstone struct {
+	ID        string         `json:"id,omitempty"`
+	File      string         `json:"file,omitempty"`
+	Action    string         `json:"action"`
+	Lease     string         `json:"lease,omitempty"`
+	Holder    *record.Holder `json:"holder,omitempty"`
+	BrokenBy  *record.Holder `json:"broken_by,omitempty"`
+	Anonymous bool           `json:"anonymous,omitempty"`
+	BrokenAt  *time.Time     `json:"broken_at,omitempty"`
 }
 
 // Liveness is a lease's computed liveness. A consumer treats "unknown" as alive.
@@ -52,6 +76,7 @@ type Lease struct {
 	Description   string                     `json:"description,omitempty"`
 	AcquiredAt    *time.Time                 `json:"acquired_at,omitempty"`
 	Absorbs       []string                   `json:"absorbs,omitempty"`
+	NameShared    bool                       `json:"name_shared,omitempty"`
 	UnusableWhy   string                     `json:"unusable_reason,omitempty"`
 	RawFields     map[string]json.RawMessage `json:"raw_fields,omitempty"`
 }
@@ -116,6 +141,10 @@ func Encode(w io.Writer, out Output) error {
 
 	if out.Leases == nil {
 		out.Leases = []Lease{}
+	}
+
+	if out.Tombstones == nil {
+		out.Tombstones = []Tombstone{}
 	}
 
 	enc := json.NewEncoder(w)

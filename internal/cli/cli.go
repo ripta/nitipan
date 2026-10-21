@@ -1,25 +1,35 @@
 // Package cli builds the nitipan command tree.
 //
 // The command layer receives every dependency from main, so tests inject the process table, the
-// environment, and the state directory.
+// environment, the user lookup, and the state directory.
 package cli
 
 import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/user"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/exitcode"
+	"github.com/space-armada/nitipan/internal/keys"
+	"github.com/space-armada/nitipan/internal/lease"
+	"github.com/space-armada/nitipan/internal/machine"
 	"github.com/space-armada/nitipan/internal/proc"
+	"github.com/space-armada/nitipan/internal/record"
+	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/version"
 )
 
 // ErrNotImplemented marks a command whose behavior has not landed yet.
 var ErrNotImplemented = errors.New("not implemented yet")
 
-// Deps are the dependencies the commands share.
+// Deps are the dependencies the commands share. A nil optional field takes its production default.
 type Deps struct {
 	Stdout io.Writer
 	Stderr io.Writer
@@ -32,10 +42,72 @@ type Deps struct {
 
 	// StateDir resolves the state directory path. It runs only for commands that need the directory.
 	StateDir func() (string, error)
+
+	// Machine names this machine. Default: the host name and machine ID.
+	Machine func() (record.Machine, error)
+
+	// User returns the OS user running the process. Default: the user database entry.
+	User func() (string, error)
+
+	// Cwd returns the working directory, the default checkout. Default: os.Getwd.
+	Cwd func() (string, error)
+
+	// Now returns the current time. Default: time.Now.
+	Now func() time.Time
+
+	// Finder finds checkout boundaries. Default: asks git.
+	Finder keys.BoundaryFinder
+
+	// StateOptions tunes the state directory, such as the lock retry budget in tests.
+	StateOptions state.Options
+
+	// OnCaller, when set, sees the caller each `list` resolved. Tests use it to check who a command
+	// acts as.
+	OnCaller func(adapter.Caller)
+
+	// Hooks stop an operation between two writes. Only tests set them.
+	Hooks lease.Hooks
+}
+
+func (d Deps) withDefaults() Deps {
+	if d.Machine == nil {
+		d.Machine = machine.Local
+	}
+
+	if d.User == nil {
+		d.User = currentUser
+	}
+
+	if d.Cwd == nil {
+		d.Cwd = os.Getwd
+	}
+
+	if d.Now == nil {
+		d.Now = time.Now
+	}
+
+	if d.Finder == nil {
+		d.Finder = keys.NewGitBoundaries(keys.ExecGit)
+	}
+
+	return d
+}
+
+func currentUser() (string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("reading the current user: %w", err)
+	}
+
+	return u.Username, nil
 }
 
 // NewRoot builds the root command with every subcommand registered.
 func NewRoot(deps Deps) *cobra.Command {
+	return newRoot(&app{deps: deps.withDefaults()})
+}
+
+func newRoot(a *app) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "nitipan",
 		Short:         "Claim a domain on this machine and see who holds what",
@@ -44,8 +116,8 @@ func NewRoot(deps Deps) *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	root.SetOut(deps.Stdout)
-	root.SetErr(deps.Stderr)
+	root.SetOut(a.deps.Stdout)
+	root.SetErr(a.deps.Stderr)
 
 	// A flag mistake and a missing argument both exit with the usage status.
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
@@ -53,12 +125,12 @@ func NewRoot(deps Deps) *cobra.Command {
 	})
 
 	root.AddCommand(
-		stub("acquire", "Claim a domain"),
-		stub("release", "Give up a lease you hold"),
-		stub("list", "Print every lease with its holder's liveness"),
+		a.acquireCmd(),
+		a.releaseCmd(),
+		a.listCmd(),
 		stub("break", "Remove another holder's lease"),
-		stub("advertise", "Update your session name, permission mode, or a lease's description"),
-		stub("setup", "Print the sandbox allowance entries for an agent"),
+		a.advertiseCmd(),
+		a.setupCmd(),
 		hookStub(),
 	)
 
@@ -67,7 +139,9 @@ func NewRoot(deps Deps) *cobra.Command {
 
 // Execute runs the command tree and returns the process exit status. Errors go to stderr.
 func Execute(deps Deps, args []string) int {
-	root := NewRoot(deps)
+	a := &app{deps: deps.withDefaults(), command: "nitipan " + strings.Join(args, " ")}
+
+	root := newRoot(a)
 	root.SetArgs(args)
 
 	err := root.Execute()
