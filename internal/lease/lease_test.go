@@ -79,6 +79,14 @@ func (f *fixture) acquire(h adapter.Holder, scope string) (*AcquireResult, error
 	return f.engine.Acquire(AcquireRequest{Holder: h, Domain: Domain{Checkout: f.root, Scopes: []string{scope}}})
 }
 
+func TestListWithNoEmitFunctionFailsInsteadOfPanicking(t *testing.T) {
+	f := newFixture(t)
+
+	if _, err := f.engine.List(ListRequest{}); err == nil || !strings.Contains(err.Error(), "Emit") {
+		t.Errorf("List = %v, want an error that names Emit", err)
+	}
+}
+
 func TestAMultiSessionAgentNeedsASessionIDToAcquire(t *testing.T) {
 	f := newFixture(t)
 

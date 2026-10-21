@@ -13,6 +13,7 @@ import (
 	"github.com/space-armada/nitipan/internal/exitcode"
 	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/liveness"
+	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/setup"
 	"github.com/space-armada/nitipan/internal/state"
 )
@@ -75,8 +76,20 @@ func (a *app) engine() (*lease.Engine, error) {
 	e := lease.NewEngine(dir, checker, local, a.deps.Finder)
 	e.Now = a.deps.Now
 	e.Hooks = a.deps.Hooks
+	e.Notify = lease.Notify{Delivered: a.deliverNotice, Warn: a.warn}
 
 	return e, nil
+}
+
+// deliverNotice tells the broken holder what happened to its lease. It goes to stderr, because a
+// command's stdout is its result.
+func (a *app) deliverNotice(t *record.Tombstone) {
+	fmt.Fprintf(a.deps.Stderr, "nitipan: notice: %s. The lease no longer exists.\n", lease.DescribeBroken(t))
+}
+
+// warn reports a failure that did not fail the call. A permission failure carries the sandbox text.
+func (a *app) warn(err error) {
+	fmt.Fprintf(a.deps.Stderr, "nitipan: warning: %v\n", a.wrapErr(err))
 }
 
 // domain turns the checkout and scope flags into a lease domain. A relative checkout is joined to the

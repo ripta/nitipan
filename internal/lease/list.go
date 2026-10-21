@@ -20,13 +20,17 @@ type ListRequest struct {
 	Domain *Domain
 
 	// Caller is who runs the command: the holder when an agent matched, an anonymous process
-	// otherwise. Tombstones are delivered to it.
+	// otherwise. Tombstones are delivered to it. A caller with no adapter holds nothing, so it has
+	// none to receive.
 	Caller adapter.Caller
+
+	// Emit writes the output. List calls it before it removes any tombstone it reported, so a
+	// failed removal never costs the reader its output.
+	Emit func(listing.Output) error
 }
 
 // ListResult is the output with the warnings that go to stderr.
 type ListResult struct {
-	Output   listing.Output
 	Warnings []string
 
 	// LockErr is a permission failure on the lock file. The command layer turns it into a warning
@@ -36,8 +40,10 @@ type ListResult struct {
 
 // List reads every lease with its holder's liveness.
 //
-// It takes the lock so it can finish a crashed merge. When the lock is busy, or the sandbox blocks
-// it, list reads without it and warns, because records are published atomically.
+// It takes the lock so it can finish a crashed merge and remove the tombstones it reports. When the
+// lock is busy, or the sandbox blocks it, list reads without it and warns, because records are
+// published atomically. It then still shows the tombstones it cannot use. It neither delivers nor
+// reaps any, since it could not remove them.
 func (e *Engine) List(req ListRequest) (*ListResult, error) {
 	res := &ListResult{}
 
@@ -47,13 +53,13 @@ func (e *Engine) List(req ListRequest) (*ListResult, error) {
 			return nil, usagef("%v", err)
 		}
 
-		return e.list(res, &d)
+		return e.list(req, res, &d)
 	}
 
-	return e.list(res, nil)
+	return e.list(req, res, nil)
 }
 
-func (e *Engine) list(res *ListResult, filter *keys.Domain) (*ListResult, error) {
+func (e *Engine) list(req ListRequest, res *ListResult, filter *keys.Domain) (*ListResult, error) {
 	l, err := e.Dir.Lock()
 
 	var c *call
@@ -64,14 +70,15 @@ func (e *Engine) list(res *ListResult, filter *keys.Domain) (*ListResult, error)
 		defer c.close()
 
 		if ferr := l.FormatErr(); ferr != nil {
-			res.Warnings = append(res.Warnings, ferr.Error())
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%v; tombstones are not delivered", ferr))
 		}
 
 		if err := c.load(); err != nil {
 			return nil, err
 		}
 	case errors.Is(err, state.ErrLockBusy):
-		res.Warnings = append(res.Warnings, fmt.Sprintf("%v; listing without the lock", err))
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%v; listing without the lock, so tombstones are not "+
+			"delivered", err))
 	case errors.Is(err, fs.ErrPermission):
 		res.LockErr = err
 	default:
@@ -87,7 +94,28 @@ func (e *Engine) list(res *ListResult, filter *keys.Domain) (*ListResult, error)
 		c = &call{e: e, entries: entries}
 	}
 
-	res.Output = c.output(filter)
+	if req.Emit == nil {
+		return nil, errors.New("listing needs an Emit function to write its output")
+	}
+
+	out := c.output(filter)
+
+	canWrite := c.l != nil && c.l.FormatErr() == nil
+
+	var remove []*tombEntry
+
+	out.Tombstones, remove, err = c.tombstoneReport(req.Caller, canWrite)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := req.Emit(out); err != nil {
+		return nil, err
+	}
+
+	for _, te := range remove {
+		c.removeTombstone(te)
+	}
 
 	return res, nil
 }

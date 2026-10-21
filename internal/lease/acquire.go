@@ -91,7 +91,7 @@ func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
 		return nil, fmt.Errorf("%w: %w", exitcode.ErrUsage, err)
 	}
 
-	c, err := e.begin(&h, true)
+	c, err := e.begin(&h)
 	if err != nil {
 		return nil, err
 	}

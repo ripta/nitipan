@@ -128,7 +128,7 @@ func newRoot(a *app) *cobra.Command {
 		a.acquireCmd(),
 		a.releaseCmd(),
 		a.listCmd(),
-		stub("break", "Remove another holder's lease"),
+		a.breakCmd(),
 		a.advertiseCmd(),
 		a.setupCmd(),
 		hookStub(),
@@ -150,16 +150,6 @@ func Execute(deps Deps, args []string) int {
 	}
 
 	return exitcode.For(err)
-}
-
-func stub(name, short string) *cobra.Command {
-	return &cobra.Command{
-		Use:   name,
-		Short: short,
-		RunE: func(*cobra.Command, []string) error {
-			return fmt.Errorf("%s: %w", name, ErrNotImplemented)
-		},
-	}
 }
 
 // hookStub registers the command that agent hooks and plugins call. It stays out of help and

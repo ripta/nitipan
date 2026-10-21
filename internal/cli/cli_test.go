@@ -36,7 +36,6 @@ var executeTests = []executeTest{
 	{Name: "version", Args: []string{"--version"}, WantStatus: exitcode.OK},
 	{Name: "help", Args: []string{"--help"}, WantStatus: exitcode.OK},
 	{Name: "unknown flag", Args: []string{"list", "--nope"}, WantStatus: exitcode.Usage, WantErr: "unknown flag"},
-	{Name: "unimplemented command", Args: []string{"break"}, WantStatus: exitcode.Error, WantErr: "not implemented"},
 }
 
 func TestExecute(t *testing.T) {

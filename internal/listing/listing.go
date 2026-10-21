@@ -46,6 +46,10 @@ type Tombstone struct {
 	BrokenBy  *record.Holder `json:"broken_by,omitempty"`
 	Anonymous bool           `json:"anonymous,omitempty"`
 	BrokenAt  *time.Time     `json:"broken_at,omitempty"`
+
+	// Summary is the sentence `list` also writes to stderr, so a consumer that discards the array
+	// can still show a person what happened.
+	Summary string `json:"summary,omitempty"`
 }
 
 // Liveness is a lease's computed liveness. A consumer treats "unknown" as alive.

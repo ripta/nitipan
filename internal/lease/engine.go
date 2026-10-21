@@ -44,6 +44,9 @@ type Engine struct {
 	// through it.
 	HandleOf func(adapter.Holder) string
 
+	// Notify receives the tombstones a call delivers and the failures that do not fail it.
+	Notify Notify
+
 	Hooks Hooks
 }
 
@@ -154,15 +157,19 @@ type call struct {
 	mine        []*entry
 	others      []*entry
 	sameProcess map[*entry]bool
+
+	// delivered holds the tombstones this call reported to the caller and removed.
+	delivered []*record.Tombstone
 }
 
 func (c *call) close() {
 	_ = c.l.Unlock()
 }
 
-// begin takes the lock and reads the leases. A write refuses at once when the format marker forbids
-// it. With a holder, the records are split into the caller's and everyone else's.
-func (e *Engine) begin(h *adapter.Holder, write bool) (*call, error) {
+// begin takes the lock and reads the leases. It refuses at once when the format marker forbids
+// writes, because every caller changes something. With a holder, the records are split into the
+// caller's and everyone else's, and the tombstones addressed to it are delivered.
+func (e *Engine) begin(h *adapter.Holder) (*call, error) {
 	l, err := e.Dir.Lock()
 	if err != nil {
 		return nil, err
@@ -170,12 +177,10 @@ func (e *Engine) begin(h *adapter.Holder, write bool) (*call, error) {
 
 	c := &call{e: e, l: l, sameProcess: map[*entry]bool{}}
 
-	if write {
-		if err := l.FormatErr(); err != nil {
-			c.close()
+	if err := l.FormatErr(); err != nil {
+		c.close()
 
-			return nil, err
-		}
+		return nil, err
 	}
 
 	if err := c.load(); err != nil {
@@ -186,6 +191,12 @@ func (e *Engine) begin(h *adapter.Holder, write bool) (*call, error) {
 
 	if h != nil {
 		c.classify(*h)
+
+		if err := c.deliver(*h); err != nil {
+			c.close()
+
+			return nil, err
+		}
 	}
 
 	return c, nil

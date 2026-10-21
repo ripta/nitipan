@@ -33,7 +33,7 @@ func (e *Engine) Advertise(req AdvertiseRequest) (*AdvertiseResult, error) {
 		return nil, err
 	}
 
-	c, err := e.begin(&h, true)
+	c, err := e.begin(&h)
 	if err != nil {
 		return nil, err
 	}

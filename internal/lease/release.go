@@ -45,7 +45,7 @@ func (e *Engine) Release(req ReleaseRequest) (*ReleaseResult, error) {
 
 	h := req.Holder
 
-	c, err := e.begin(&h, true)
+	c, err := e.begin(&h)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func (e *Engine) Release(req ReleaseRequest) (*ReleaseResult, error) {
 	case req.Domain != nil:
 		targets, err = c.resolveDomain(claimed)
 	case len(req.IDs) > 0:
-		targets, err = c.resolveIDs(h, req.IDs)
+		targets, err = c.resolveIDs(req.IDs)
 	default:
 		err = usagef("release needs a lease ID, a domain, or --all; %s", c.leaseList())
 	}
@@ -83,7 +83,7 @@ func (e *Engine) Release(req ReleaseRequest) (*ReleaseResult, error) {
 
 // resolveIDs maps lease IDs to the caller's leases. Each failure keeps its own status, and all of
 // them are reported together.
-func (c *call) resolveIDs(h adapter.Holder, ids []string) ([]*entry, error) {
+func (c *call) resolveIDs(ids []string) ([]*entry, error) {
 	var (
 		targets []*entry
 		errs    []error
@@ -96,7 +96,7 @@ func (c *call) resolveIDs(h adapter.Holder, ids []string) ([]*entry, error) {
 			continue
 		}
 
-		en, err := c.resolveID(h, id)
+		en, err := c.resolveID(id)
 		if err != nil {
 			errs = append(errs, err)
 
@@ -119,12 +119,12 @@ func (c *call) resolveIDs(h adapter.Holder, ids []string) ([]*entry, error) {
 	return targets, nil
 }
 
-func (c *call) resolveID(h adapter.Holder, id string) (*entry, error) {
+func (c *call) resolveID(id string) (*entry, error) {
 	en := c.entryByID(id)
 
 	switch {
 	case en == nil:
-		return nil, c.notFound(h, id)
+		return nil, c.notFound(id)
 	case en.Rec == nil:
 		return nil, failf(record.ErrUnusable, "%s is an unusable record (%s); upgrade nitipan or ask the user", id,
 			en.Bad.Reason)
@@ -139,46 +139,15 @@ func (c *call) resolveID(h adapter.Holder, id string) (*entry, error) {
 	}
 }
 
-// notFound explains an ID with no record. A broken lease leaves a tombstone for its holder. Any
-// other ID leaves no trace, so nitipan cannot tell a released lease from a mistyped one and never
-// claims "already released".
-func (c *call) notFound(h adapter.Holder, id string) error {
-	t, err := c.brokenTombstone(h, id)
-	if err != nil {
-		return err
-	}
-
-	if t != nil {
-		by := describeHolder(t.BrokenBy)
-		if t.Anonymous {
-			by = "a person at a terminal"
-		}
-
-		return failf(exitcode.ErrBroken, "lease %s was broken by %s at %s", id, by, t.BrokenAt.Format("2006-01-02 15:04:05 MST"))
+// notFound explains an ID with no record. A broken lease leaves a tombstone for its holder, which
+// this call delivered a moment ago. Any other ID leaves no trace, so nitipan cannot tell a released
+// lease from a mistyped one and never claims "already released".
+func (c *call) notFound(id string) error {
+	if t := c.deliveredFor(id); t != nil {
+		return failf(exitcode.ErrBroken, "%s", DescribeBroken(t))
 	}
 
 	return failf(exitcode.ErrNoSuchLease, "no such lease %s; %s", id, c.leaseList())
-}
-
-// brokenTombstone finds an undelivered tombstone for the caller that names the lease.
-func (c *call) brokenTombstone(h adapter.Holder, id string) (*record.Tombstone, error) {
-	files, err := c.e.Dir.Scan(state.TombstonesDir)
-	if err != nil {
-		return nil, fmt.Errorf("reading the tombstones: %w", err)
-	}
-
-	for _, f := range files {
-		t, err := record.DecodeTombstone(f.Data)
-		if err != nil || t.Lease != id {
-			continue
-		}
-
-		if matchHolder(h, t.Holder, t.Liveness) == matchSame {
-			return t, nil
-		}
-	}
-
-	return nil, nil
 }
 
 // resolveDomain matches the caller's leases whose canonical key set equals the domain. It works from

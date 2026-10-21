@@ -18,8 +18,8 @@ sessions. In progress.
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
 | NIT-001 M1 | DONE | `90d5349` |
-| NIT-001 M2 | DONE | see M3 section |
-| NIT-001 M3 | QUEUED | |
+| NIT-001 M2 | DONE | `0c204bd` |
+| NIT-001 M3 | DONE | see final review section |
 | NIT-001 M4 | HELD | |
 
 The user held M4 at plan time. Its checks need interactive Codex and opencode sessions: closing a window, `/new`, a
@@ -186,8 +186,60 @@ schema's evolution falls under the 2026-10-18 candidate for `list --json`.
 
 ### NIT-001 M3
 
-Commits so far: the M2 commit is named here once M3's first amendment lands.
+M2's commit: `0c204bd` nitipan: add acquire, release, list, advertise, and setup.
+
+The first M3 implementer was restarted on 2026-10-21 at about 06:08 UTC. It had stalled for about 20 minutes on a
+raw `go build ./...` call, which waited on a permission prompt and never started. The stopped agent's result read
+"Use Edit instead". The fresh agent continues from the partial work left in the tree. Its brief says to edit files
+only with the Edit and Write tools, and to build and test only through make targets.
+
+Checks: `make fmt-check lint vet-linux test build` passed. Lint reported 0 issues. `proposals.py check` and
+`proposals.py freeze --row-commit 90d5349 --row-commit 0c204bd` returned `[]`. A command-level test covers each of the
+13 M3 checks, including one that runs 21 failing paths and asserts that no error names `--force`.
+
+Best guesses the implementer made:
+
+- A file in `leases/` or `tombstones/` whose name is not an ID cannot be removed by any command. `break` refuses a
+  file name or a path. The error that reports the file says a person can delete it by hand after checking it. This
+  rests on "Callers with no adapter", which says `break` takes lease IDs only. If `break --force` should take the file
+  name, `break` gains a second kind of argument. Recorded in the Decision Log.
+- `break --force` publishes the tombstone before it removes the lease. A crash between the two leaves a notice for a
+  lease that still exists, and never loses the notice. Delivery prints the notice before it removes the tombstone,
+  so a crash repeats it.
+- `list` reaps a dead holder's tombstone only when `clear_when_dead` is true.
+- `release` has no coverage check, so ownership alone decides.
+- `break` processes and prints repeated or several IDs in sorted ID order, not command-line order. This is a side
+  effect of deduplicating them.
+
+Deviations, all additive to formats nothing had released:
+
+- A tombstone gains an optional `paths` field. `list --json` tombstones gain `summary` and the action `unknown`.
+- "Breaking a live lease", the `list --json` tombstone bullet, and the "Releasing" tombstone bullet are amended in
+  place. The proposal has Decision Log entries for them.
+
+Review findings and dispositions:
+
+1. Fixed (PLAUSIBLE, confirmed by trace). When `list` could not take the lock, or the format marker forbade writes, it
+   stopped showing unusable tombstones as unknown. It now always shows them, and skips only delivery and reaping. The
+   warnings say tombstones were not delivered.
+2. Fixed. `List` with no output callback panicked. It now returns an error.
+3. Fixed (CONFIRMED). `break X X` reported a failure once per repeat. IDs are now deduplicated.
+4. Fixed. The As built block retold a divergence's reason. It now points to the Decision Log.
+5. Dismissed. adr-impact asked whether delivering and removing a tombstone of a higher minor version breaks ADR-04's
+   writer rules. Removing a tombstone is not a rewrite. Delivery reads the tombstone before removing it. Reaping is
+   gated on `clear_when_dead`.
+
+ADR candidates:
+
+- Tombstone delivery (cuts across the system). It is in the Decision Log with "Waits on NIT-001 M4", because M4
+  settles the `hook` exception and the notices for sessions that move to a new host.
+- Declined: `break` addressing leases by ID only. The "Callers with no adapter" decision covers it, and it shapes only
+  the CLI.
+
+## Final review
+
+Pending.
 
 ## Status
 
-M1 and M2 are done. M3 is next.
+M1 (`90d5349`) and M2 (`0c204bd`) are done. M3 is done, and its commit is named in the final review section.

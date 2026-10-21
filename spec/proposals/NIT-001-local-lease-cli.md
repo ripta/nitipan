@@ -184,9 +184,10 @@ holder's agent, handle, agent name, session ID, and description.
 anyway. When it is false, `break` needs `--force`, like a record of a higher minor.
 
 `break` against a live holder refuses unless `--force` is given. With `--force`, it removes the lease and writes a
-tombstone. The tombstone names the broken lease, who broke it, and when. `break` runs under the same lock as `acquire`.
+tombstone. The tombstone names the broken lease, who broke it, and when. It also lists the lease's paths, so the broken
+holder can recognize the lease. `break` runs under the same lock as `acquire`.
 
-Amended 2026-10-18; see Decision Log.
+Amended 2026-10-20; see Decision Log.
 
 Tombstones are keyed by the broken holder's identity, not by the domain. A tombstone never blocks a claim, so the
 breaker can claim the domain at once, unless another live lease overlaps it. A broken NIT-003 sub-lease's keys return
@@ -201,6 +202,9 @@ nitipan cannot trust the holder identity in a record it cannot use, so it cannot
 
 A tombstone nitipan cannot use, for any cause in "Record evolution and unknown records", never blocks a claim. `list`
 shows it as unknown, and `break --force` removes it by its ID.
+
+A file in `leases/` or `tombstones/` whose name is not an ID has no ID to give `break`. No command removes it. The error
+that reports it says what it is and that a person can delete it by hand.
 
 ### Lease record fields
 
@@ -635,8 +639,9 @@ Decision (autonomous): `list --json` is the supported read interface. The record
   entries
 - `list` takes the same domain arguments as `acquire`, and returns the leases that overlap them, using nitipan's own
   canonicalization and overlap rule
-- Tombstones that `list` delivers or reaps appear in the output, and on stderr too. A guardian that discards them still
-  leaves a trace
+- Tombstones that `list` delivers or reaps appear in the output with a one-sentence `summary`, and on stderr too. A
+  guardian that discards them still leaves a trace. A tombstone nitipan cannot use appears with action `unknown` and is
+  left in place. Amended 2026-10-20; see Decision Log
 - `list` writes its read output first. A failed tombstone removal is reported, not fatal
 
 Files only was rejected: a reader cannot apply liveness or the unknown-record rule. Documenting the files too was
@@ -659,7 +664,8 @@ the caller did not name.
 - `--all` releases every lease the caller holds. Subagents share their parent's holder, so `--all` from a subagent
   releases the parent's leases too. Its help text says so
 - An ID that names another holder's lease reports "not yours"
-- An ID with an undelivered tombstone for the caller reports "broken", with who broke it
+- An ID whose tombstone for the caller this call delivers reports "broken", with who broke it. Amended 2026-10-20; see
+  Decision Log
 - Any other ID reports "no such lease" and lists the caller's current lease IDs. A released ID leaves no trace, so
   nitipan cannot tell it from a mistyped one, and never claims "already released"
 - Each of these has its own exit status
@@ -1156,7 +1162,7 @@ Amended 2026-10-20; see Decision Log.
 
 ### M3: Break and tombstones
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `break` removes a dead holder's lease without `--force`
 - `break` refuses a live holder's lease without `--force`, and names the holder
@@ -1175,6 +1181,33 @@ Amended 2026-10-20; see Decision Log.
 - No error message names `break --force` as its fix
 
 Amended 2026-10-20; see Decision Log.
+
+**As built:**
+
+- A file whose name is not an ID cannot be addressed, so `break` refuses it with a usage error and nothing removes it.
+  The error that reports it, from `acquire` or `list`, says a person can delete it by hand. See the 2026-10-20
+  Decision Log entry on file names that are not IDs.
+- Every nitipan call except `hook` delivers the caller's tombstones: `acquire`, `release`, `advertise`, and `break`
+  through the locked path, and `list` through its own. A delivered tombstone is reported on stderr before it is removed,
+  so a crash between the two repeats the notice. A failed removal is a warning, not a failure. `release` reports
+  "broken" for an ID whose tombstone it just delivered, and the next call says "no such lease".
+- The tombstone is published before the lease is removed. A crash between the two can leave a notice for a lease that
+  still exists. The other order could lose the only signal the holder gets.
+- A tombstone gained an optional `paths` field, the broken lease's canonical keys. `list --json` tombstones gained a
+  `summary` sentence and the action `unknown` for a tombstone nitipan cannot use. Both are minor additions to formats
+  nothing had released.
+- `list` reports a tombstone as reaped when its holder is dead and `clear_when_dead` is true. It leaves a dead holder's
+  tombstone with `clear_when_dead` false, and any tombstone addressed to a live holder other than its caller. A listing
+  that cannot take the lock does not deliver, and says so in a warning.
+- `break` on a tombstone it can read is refused as "not a lease". Only an unusable tombstone is removable.
+- A break of the caller's own lease is a usage error that points to `release`. Several IDs resolve first, and nothing is
+  removed unless every one resolves.
+- A break with `--force` on a dead holder's lease writes no tombstone, because nobody can receive it. `break` that needs
+  a tombstone fails when the caller cannot be identified, and says so.
+- The "other-holder check before the coverage check" in `release` held already. `release` only removes, so it has no
+  coverage check, and ownership alone decides. A test pins that another holder's record of a higher minor reports "not
+  yours".
+- No new exit status. The existing broken, no-such-lease, unusable, and refused statuses cover every result.
 
 ### M4: Codex and opencode adapters
 
@@ -1434,6 +1467,24 @@ Amended 2026-10-20; see Decision Log.
   and `break`, is recorded as an anonymous process, and cannot `release`". M2 now requires the `tombstones` array, empty
   until M3, and the anonymous identity without `break`. M3 gains the two matching checks: `list --json` includes the
   tombstones it delivered or reaped, and an anonymous `break` caller is recorded in the tombstone.
+- 2026-10-20: Amended "Breaking a live lease", "A supported read path for guardians", and "Releasing" while building M3.
+  The tombstone text said it names the lease, the breaker, and the time. It now also lists the lease's paths, so the
+  broken holder can recognize a lease it may not remember by ID. The read-path bullet said delivered and reaped
+  tombstones appear in the output. It now adds a `summary` sentence and the action `unknown` for an unusable tombstone.
+  The Releasing bullet said an ID "with an undelivered tombstone" reports "broken". Every call now delivers before it
+  resolves its targets, so the bullet says the tombstone this call delivers. All three are additive to formats nothing
+  had released.
+- 2026-10-20: Best guess: a file whose name is not an ID cannot be removed by any nitipan command. The "Breaking a live
+  lease" text said `break --force` removes an unusable tombstone by its ID, and M2 left open how a person removes a
+  stray file. The candidates were letting `break --force` take the exact file name that `list` prints, and refusing it.
+  Refused won. "Callers with no adapter" says `break` takes lease IDs only so that it always names its exact target,
+  and a file name is a path that a caller could mistype into another file. The error that reports a stray file says a
+  person can delete it by hand after checking what it is. If the user wants `--force` to take a file name, `break`
+  gains a second kind of argument and the guard against a mistyped target weakens.
+- 2026-10-20: ADR candidate (cuts across the system): tombstone delivery. Every call except `hook` delivers and
+  removes the tombstones addressed to its caller. `break --force` publishes the tombstone before it removes the lease,
+  so a crash repeats a notice and never loses one. Waits on NIT-001 M4, which settles the `hook` exception and the
+  notices for sessions that move to a new host. Found in NIT-001 M3.
 
 ## References
 

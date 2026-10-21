@@ -61,13 +61,26 @@ func (a *app) runList(cmd *cobra.Command) error {
 		return err
 	}
 
+	req.Emit = func(out listing.Output) error {
+		for _, t := range out.Tombstones {
+			fmt.Fprintf(a.deps.Stderr, "nitipan: tombstone %s: %s\n", t.Action, t.Summary)
+		}
+
+		if asJSON {
+			return listing.Encode(a.deps.Stdout, out)
+		}
+
+		return listing.WriteText(a.deps.Stdout, out)
+	}
+
 	res, err := e.List(req)
 	if err != nil {
 		return err
 	}
 
 	if res.LockErr != nil {
-		res.Warnings = append(res.Warnings, fmt.Sprintf("listing without the state lock: %v", a.wrapErr(res.LockErr)))
+		res.Warnings = append(res.Warnings, fmt.Sprintf("listing without the state lock, so tombstones are not delivered: %v",
+			a.wrapErr(res.LockErr)))
 	}
 
 	if callerErr != nil {
@@ -78,9 +91,5 @@ func (a *app) runList(cmd *cobra.Command) error {
 		fmt.Fprintf(a.deps.Stderr, "nitipan: warning: %s\n", w)
 	}
 
-	if asJSON {
-		return listing.Encode(a.deps.Stdout, res.Output)
-	}
-
-	return listing.WriteText(a.deps.Stdout, res.Output)
+	return nil
 }

@@ -221,8 +221,10 @@ func TestReleaseOfABrokenLeaseReportsBroken(t *testing.T) {
 	wantStatus(t, res, exitcode.Broken)
 	wantContains(t, "stderr", res.Stderr, "was broken", "the-breaker-of-leases-here")
 
-	// Delivering and removing the tombstone is the break command's work.
-	if _, err := os.Stat(filepath.Join(dir, "01JTTTTTTTTTTTTTTTTTTTTTTT.json")); err != nil {
-		t.Errorf("release removed the tombstone: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "01JTTTTTTTTTTTTTTTTTTTTTTT.json")); !os.IsNotExist(err) {
+		t.Errorf("release left the delivered tombstone: %v", err)
 	}
+
+	res = w.run(c, "release", gone)
+	wantStatus(t, res, exitcode.NoSuchLease)
 }

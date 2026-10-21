@@ -22,6 +22,10 @@ type Tombstone struct {
 	Anonymous bool `json:"anonymous,omitempty"`
 
 	BrokenAt time.Time `json:"broken_at"`
+
+	// Paths are the canonical keys of the broken lease. They only help the broken holder recognize
+	// the lease, so a reader that does not know the field loses nothing.
+	Paths []string `json:"paths,omitempty"`
 }
 
 // DecodeTombstone reads a tombstone. An unusable one comes back as an *UnusableError.

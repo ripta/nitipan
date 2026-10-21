@@ -42,6 +42,19 @@ func usagef(format string, args ...any) error {
 
 // unusableErr names the file of a record this nitipan cannot use.
 func unusableErr(en *entry) error {
-	return failf(record.ErrUnusable, "%s cannot be used by this nitipan (%s); upgrade nitipan or ask the user",
-		en.file(), en.Bad.Reason)
+	msg := fmt.Sprintf("%s cannot be used by this nitipan (%s); upgrade nitipan or ask the user", en.file(),
+		en.Bad.Reason)
+
+	return failf(record.ErrUnusable, "%s%s", msg, strayFileHint(en.Bad.Reason))
+}
+
+// strayFileHint explains the one case that no command can fix. A file whose name is not an ID cannot
+// be addressed, because break takes IDs only so that it always names its exact target.
+func strayFileHint(reason record.Reason) string {
+	if reason != reasonBadName && reason != reasonBadTombstoneName {
+		return ""
+	}
+
+	return ". Its name is not an ID, so no nitipan command can address it. After checking what it is, " +
+		"the user can delete the file by hand"
 }
