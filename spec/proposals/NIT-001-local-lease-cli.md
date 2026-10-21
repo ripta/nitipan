@@ -934,9 +934,10 @@ None.
   an explicit flag and an exact ID.
 - **Linux liveness inside an agent's sandbox is untested** — likelihood: medium, impact: high.
   If Claude Code's Linux sandbox unshares the PID namespace per command, every record reads as unknown, which counts as
-  alive, and dead holders are never reclaimed without `break`. Mitigation: milestone 1 checks liveness inside the
-  Claude Code sandbox on Linux, and milestone 4 inside the Codex and opencode sandboxes. The failure is safe: claims are
-  refused, never stolen.
+  alive, and dead holders are never reclaimed without `break`. Accepted: the user does not run Linux, so no milestone
+  checks Linux at runtime. Milestone 1 checks the Linux code against fixtures only, and milestone 4 checks the Codex and
+  opencode sandboxes on macOS. The first real Linux run is the check, and a milestone is added then. The failure is
+  safe: claims are refused, never stolen. Amended 2026-10-20; see Decision Log.
 - **opencode and Codex session liveness rests on plugin and hook behavior not yet run** — likelihood: medium, impact:
   medium. Live tests confirmed the session variables and the host processes. The plugins' reactive reads, execution
   events on resume, and hook trust are source readings. Mitigation: milestone 4 checks each one. Every failure found so
@@ -993,7 +994,7 @@ None.
 
 ### M1: Record format and liveness
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - The repo has a Makefile per the Makefile standard, with `build`, `test`, `lint`, and `ci` targets
 - Lease records encode and decode every field in "Lease record fields". A higher major, an undecodable envelope, or a
@@ -1019,11 +1020,48 @@ None.
 - With stray agent variables and no matching ancestor, `acquire`, `advertise`, and `release` fail closed, while `list`
   and `break` run as an anonymous caller
 - A lock held past the retry budget gives its own exit status, and the error names the holder and whether it is stopped
-- The liveness check reports alive, dead, and PID-reused correctly on macOS and on Linux
+- The liveness check reports alive, dead, and PID-reused correctly on macOS, and on Linux against fixture `/proc` trees
 - On Linux, the liveness check reports unknown for an unreadable `boot_id` or `stat` file and for a PID-namespace
   mismatch, and parses a `stat` line whose process name contains spaces and parentheses
-- The liveness check works inside the Claude Code sandbox on macOS and on Linux, and the Linux result is recorded in the
-  As built block
+- The liveness check works inside the Claude Code sandbox on macOS
+
+Amended 2026-10-20; see Decision Log.
+
+**As built:**
+
+- Linux was never run. The Linux code is verified by fixture tests over a `/proc` tree, and by `go vet` cross-compiled
+  with cgo off. A real Linux build must use cgo, and no Linux binary has been built or run. See the 2026-10-20 Decision
+  Log entry.
+- The macOS sandbox check was met by running the tests inside Claude Code's sandboxed Bash on macOS. The process-table
+  reads, the machine ID, the canonical-case lookup, and the case-sensitivity query all worked there. A live child
+  process read alive, then dead after it was killed, and a recorded start one microsecond off read as a reused PID.
+- The macOS process-table query returns zero bytes for a dead PID. The `x/sys` single-process wrapper reports that as
+  a generic I/O error, which cannot be told from a real failure. The reader uses the slice variant, so an empty result
+  means "no such process" and every other error reads unknown.
+- A PID that is absent locally reads dead only when the record's platform is known and is the reader's own, and on
+  Linux when the record's PID namespace is the reader's. Otherwise the holder may run where the reader cannot see it,
+  and it reads unknown.
+- Reading a process's arguments on macOS works for every ancestor of the sandboxed shell here. Only the init process
+  fails, so the walk ignores an unreadable init process. An unreadable ancestor still fails the walk closed, and the
+  error names the agent variables that could not be matched.
+- The macOS machine ID uses cgo, because the direct system call is deprecated in `x/sys`. A macOS build with cgo off
+  has no machine ID, and records compare by host name.
+- Volume sensitivity: every macOS volume counts as normalization-insensitive, case-sensitive APFS included. On Linux
+  the casefold flag of the deepest existing directory decides. A filesystem with no casefold support reads sensitive,
+  and any other failure reads insensitive, so it can only add overlaps. That Linux decision logic is tested through an
+  injected flag reader on macOS. The Linux flag read itself has never run. Two keys on different volumes fold when
+  either volume does.
+- Submodule detection asks git with literal pathspecs and NUL-separated output, with the repo-locating environment
+  variables removed. It is tested against a real repo, including glob characters and non-ASCII names.
+- The Codex and opencode adapters recognize their hosts by environment variables and argument lists, so the walk has
+  real signatures to test. Their session rules are still M4 work. Until then their records read unknown and their
+  `acquire` fails closed.
+- All six user commands and `hook` are registered as stubs that exit with the generic status. Behavior lands in M2 and
+  M3. The stray-variable fail-closed check and the lock-busy exit status are tested at the resolver and state level
+  because the commands are stubs. Command-level tests come with M2 and M3. `list --json` is covered at the encoder level
+  only.
+- Module downloads failed inside the sandbox with an x509 error from Go's macOS verifier. The dependencies came from the
+  local module cache with the checksum database off.
 
 ### M2: Acquire, release, and list
 
@@ -1329,6 +1367,19 @@ None.
 - 2026-10-19: Accepted again, on the user's choice at the review gate. ADR-04 became accepted and ADR-02 superseded in
   the same change.
 - 2026-10-20: Scheduled as NIT-001 M1-M4 in queue.md.
+- 2026-10-20: Amended M1 and the Linux sandbox risk, on the user's choice. M1 said "The liveness check works inside the
+  Claude Code sandbox on macOS and on Linux, and the Linux result is recorded in the As built block", and "reports
+  alive, dead, and PID-reused correctly on macOS and on Linux". The risk's mitigation said milestone 1 checks liveness
+  inside the Claude Code sandbox on Linux. The user does not run Linux and did not allow a Linux dependency, so the
+  runtime Linux check is skipped. The macOS sandbox check is met by running the tests in Claude Code's sandbox. The Linux
+  code paths are verified only by fixture tests over a `/proc` tree and by cross-compilation with `go vet`. The risk is
+  now accepted, with the first real Linux run as its check.
+- 2026-10-20: ADR candidate (hard to reverse): the state directory's location and layout. The home directory comes
+  from the user database, never `HOME` or `XDG_STATE_HOME`. Under it sit `leases/`, `tombstones/`, `lock`, and
+  `format`. Every binary on a machine must agree, or two sessions scan different directories. Undecided. Found in
+  NIT-001 M1.
+- 2026-10-20: ADR candidate (hard to reverse): the CLI's exit-status table. Scripts and agents test the numbers, so
+  changing a value breaks them. Undecided. Found in NIT-001 M1.
 
 ## References
 

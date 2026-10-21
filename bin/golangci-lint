@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GOBIN_NAME="golangci-lint"
+GOBIN_PKG="github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
+GOBIN_VERSION="v2.15.0"
+
+# Analyzers built with an older Go cannot load a newer standard library, so the cache is keyed by
+# the toolchain. A Go upgrade rebuilds the tool.
+GO_VERSION=$(go env GOVERSION)
+CACHE_DIR="./.cache/${GO_VERSION}"
+CACHE_BIN="${CACHE_DIR}/${GOBIN_NAME}-${GOBIN_VERSION}"
+
+if [ ! -d "${CACHE_DIR}" ]; then
+  mkdir -p "${CACHE_DIR}"
+fi
+
+if [ ! -f "${CACHE_BIN}" ]; then
+  echo "Installing ${GOBIN_NAME} ${GOBIN_VERSION}..." >&2
+
+  GOBIN_TMP=$(mktemp -d)
+  trap 'rm -rf "${GOBIN_TMP}"' EXIT
+
+  GOBIN="${GOBIN_TMP}" go install -v "${GOBIN_PKG}@${GOBIN_VERSION}"
+  mv "${GOBIN_TMP}/${GOBIN_NAME}" "${CACHE_BIN}"
+fi
+
+exec "${CACHE_BIN}" "$@"
