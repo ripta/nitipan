@@ -9,8 +9,9 @@ It supports Claude Code, Codex, and opencode.
 ## Status
 
 The first version is [NIT-001](spec/proposals/NIT-001-local-lease-cli.md). The commands, the Claude Code adapter, and
-the Codex and opencode session rules are built. The Codex and opencode hooks and plugins still await live checks inside
-real sessions.
+the Codex and opencode session rules are built. The Codex and opencode hooks and plugins pass automated live checks.
+`make live-codex` and `make live-opencode` drive a private Codex app-server and a private opencode server against a
+fake model server. They need no manual steps and cost no model tokens.
 
 ## First version
 

@@ -1617,8 +1617,8 @@ Live facts that change the design's assumptions:
   gains a second kind of argument and the guard against a mistyped target weakens.
 - 2026-10-20: ADR candidate (cuts across the system): tombstone delivery. Every call except `hook` delivers and
   removes the tombstones addressed to its caller. `break --force` publishes the tombstone before it removes the lease,
-  so a crash repeats a notice and never loses one. Waits on NIT-001 M4, which settles the `hook` exception and the
-  notices for sessions that move to a new host. Found in NIT-001 M3.
+  so a crash repeats a notice and never loses one. Undecided on 2026-10-23 (settled by M4, which settled the `hook`
+  exception and the notices for sessions that move to a new host). Found in NIT-001 M3.
 - 2026-10-20: Correction of fact in the M2 As built block. It said `release` "does not deliver or remove that
   tombstone. Delivery and removal belong to M3 with `break`." M3 shipped delivery and removal in the shared locked
   path, so `release` delivers and removes first and then reports "broken". The bullet now says so.
