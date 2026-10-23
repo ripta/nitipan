@@ -42,7 +42,8 @@ what happened. Do not fix nitipan in this session.
    `{ "package": ..., "options": ... }`. It does not confirm that a bare directory path loads. Restart again. Record the
    exact key, the file, and the path form that worked, and the ones that did not (for example `plugin` singular, or a
    `~` path, or a `file://` path).
-6. Start a TUI session in a scratch checkout and point it at this file.
+6. Start a TUI session in `/Users/ripta/projects/nitipan` and point it at this file. The results file is written
+   there. Scratch checkouts are only for `acquire --checkout`.
 
 Record in the results file: the opencode version (`opencode --version`), the macOS version, and the exact way the
 plugins were loaded.

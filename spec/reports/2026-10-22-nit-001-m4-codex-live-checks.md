@@ -37,7 +37,8 @@ Before any step runs, the user does these by hand. The text `nitipan setup codex
    (step 12).
 6. Restart the Codex daemon so it reads the new config. This interrupts every running Codex turn, in every session.
    Warn any other Codex session before doing it.
-7. Start a new Codex session in a scratch checkout and point it at this file.
+7. Start a new Codex session in `/Users/ripta/projects/nitipan` and point it at this file. The results file is
+   written there. Scratch checkouts are only for `acquire --checkout`.
 
 Record in the results file: the Codex version (`codex --version`), the macOS version, and whether the daemon was
 restarted after the config changed.
