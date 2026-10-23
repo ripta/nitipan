@@ -1,6 +1,6 @@
 # NIT-002: Resource Leases and Counted Slots
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
 **Updated:** 2026-10-23
 
