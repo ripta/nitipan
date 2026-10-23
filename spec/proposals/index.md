@@ -2,7 +2,7 @@
 
 | Proposal | Description | Status |
 |----------|-------------|--------|
-| [NIT-001](NIT-001-local-lease-cli.md) | Local lease CLI: acquire, release, list, break, advertise, and setup on one machine | accepted |
+| [NIT-001](NIT-001-local-lease-cli.md) | Local lease CLI: acquire, release, list, break, advertise, and setup on one machine | implemented |
 | [NIT-002](NIT-002-resource-leases-and-slots.md) | Resource leases such as `cpu:heavy`, and counted slots shared by N holders | accepted |
 | [NIT-003](NIT-003-sub-leases.md) | Sub-leases a holder delegates for part of its domain | accepted |
 | [NIT-004](NIT-004-lease-broker.md) | Self-hosted broker with expiring leases, per-machine nodes, and query discovery | draft |

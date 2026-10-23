@@ -1,8 +1,8 @@
 # NIT-001: Local Lease CLI
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-10-22
+**Updated:** 2026-10-23
 
 ## Dependencies
 
