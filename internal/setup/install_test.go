@@ -161,8 +161,16 @@ func TestEmbeddedPluginsCallHookByTheBakedPathAndNeverRemoveMarksOnCleanup(t *te
 		}
 	}
 
-	// Cleanup also runs on a hot reload, so it must not remove a mark.
+	// A TUI on the shared service sees every session's status and events, so running state must not
+	// mark a session. A headless session would then read as open.
 	tui := byName["tui.ts"]
+	for _, source := range []string{"session.status", "session.list", "session.execution", "running.add", "=== \"running\""} {
+		if strings.Contains(tui, source) {
+			t.Errorf("the TUI plugin reads %q, a running-state source", source)
+		}
+	}
+
+	// Cleanup also runs on a hot reload, so it must not remove a mark.
 	cleanup := tui[strings.LastIndex(tui, "return () => {"):]
 
 	if strings.Contains(cleanup, "hook(") {

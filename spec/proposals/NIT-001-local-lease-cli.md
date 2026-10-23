@@ -487,10 +487,10 @@ and a `nitipan setup` command that prints or applies the entries.
 
 Decision (autonomous): `nitipan setup` prints the entries for the detected or named agent, and never writes settings.
 `nitipan setup opencode --install-plugins <dir>` is the one write. It puts nitipan's plugin files into `<dir>/nitipan`,
-with nitipan's absolute path baked in, and nothing else. It refuses to overwrite a file that differs from the one nitipan
-ships unless `--replace` is given. `setup` never prints plugin source. The README documents the same entries. When any
-nitipan write fails with `EPERM` or `EACCES`, the error names the detected agent, says the sandbox likely blocked the
-state directory, and prints the same text `setup` prints.
+with nitipan's absolute path baked in, and nothing else. It refuses to overwrite a file that differs from the one
+nitipan ships unless `--replace` is given. `setup` never prints plugin source. The README documents the same
+entries. When any nitipan write fails with `EPERM` or `EACCES`, the error names the detected agent, says the sandbox
+likely blocked the state directory, and prints the same text `setup` prints.
 
 - "Any write" covers the lock file, temp files, records, and tombstone removal. `list` removes tombstones too, so it can
   hit this error
@@ -886,10 +886,11 @@ while it lives, so `/new` inside it ends the old session after the unload delay.
 opencode, kind `session`:
 
 - `setup` prints install steps for two plugins that nitipan ships. Both call `nitipan hook`
-- The TUI plugin marks each session it has open: one in the shared tab list, the TUI's current route, or running in
-  that TUI. Child sessions from the subagent tool follow their root. The plugin removes the mark when the session leaves
-  all three. Its cleanup never removes marks, since cleanup also runs on a hot reload. It republishes them on load. A
-  presence mark names the TUI process, which the walk from the plugin's subprocess finds by its signature
+- The TUI plugin marks each session it has open: one in its own tab list, or the TUI's current route. Running state is
+  not a source, because a TUI on the shared service sees every session's status and events. Child sessions from the
+  subagent tool follow their root. The plugin removes the mark when the session leaves both. Its cleanup never removes
+  marks, since cleanup also runs on a hot reload. It republishes them on load. A presence mark names the TUI process,
+  which the walk from the plugin's subprocess finds by its signature
 - The server plugin marks a session while it holds an execution claim
 - `acquire` from an opencode session needs a presence mark from a live TUI. An execution mark alone never admits a
   claim. It only extends a lease. A session with no TUI, such as one from `opencode run`, the desktop app, or the API,
@@ -1269,8 +1270,8 @@ Amended 2026-10-20; see Decision Log.
 - A late SessionEnd after a resume does not mark the live session ended while its writer-lock file exists. The order of
   the lock file and the hook is recorded in the As built block
 - The SessionStart hook sees the host's `CODEX_HOME`. Whether trusting one hook trusts the other is recorded
-- The opencode TUI plugin's marks follow the tab list, the current route, and running state, and survive a hot reload.
-  The As built block records whether the plugin can read the tab list and route as they change
+- The opencode TUI plugin's marks follow its own tab list and current route, never running state, and survive a hot
+  reload. The As built block records whether the plugin can read the tab list and route as they change
 - The opencode server plugin sees execution events, including for a turn resumed after a service restart
 - An opencode session whose TUI died mid-turn reads alive until the turn ends. After a service restart, a set
   `time_suspended` reads unknown, and an unreadable database reads unknown
@@ -1529,13 +1530,23 @@ Amended 2026-10-20; see Decision Log.
   dependency. Any failure reads unknown. The upkeep sweep reads the database once for all dead execution marks, within
   800ms, so it fits the Codex hook's 3 seconds, and a failed or slow read keeps every mark. The Codex config checks scan
   `config.toml` and `hooks.json` under the Codex home with a small reader of the documented shapes, because nitipan
-  takes no TOML dependency. A shape it cannot classify records unknown. The acquire gates run after the call takes the lock and delivers tombstones, so a refused gate still
-  delivers. Every lock holder runs the end-mark conversion and the sweep through a hook on the lock, so no command can
-  skip them. The Codex permission modes are the sandbox modes and approval policies from `codex --help`. The opencode
-  modes are `build`, `plan`, and `auto`. The plugins are TypeScript, embedded from `plugins/opencode/nitipan`, and poll
-  the tab list and route every 2 seconds, because reactive reads from a plugin are unconfirmed. They log failures to
-  `plugin.log` in the state directory, and a refused call is retried. A registration publishes its notice before it
-  clears an end, and an old binary never removes a registration or mark of a higher minor.
+  takes no TOML dependency. A shape it cannot classify records unknown. The acquire gates run after the call takes the
+  lock and delivers tombstones, so a refused gate still delivers. Every lock holder runs the end-mark conversion and
+  the sweep through a hook on the lock, so no command can skip them. The Codex permission modes are the sandbox modes
+  and approval policies from `codex --help`. The opencode modes are `build`, `plan`, and `auto`. The plugins are
+  TypeScript, embedded from `plugins/opencode/nitipan`, and poll the tab list and route every 2 seconds, because
+  reactive reads from a plugin are unconfirmed. They log failures to `plugin.log` in the state directory, and a refused
+  call is retried. A registration publishes its notice before it clears an end, and an old binary never removes a
+  registration or mark of a higher minor.
+- 2026-10-22: Corrected the TUI plugin's sources, after the live opencode checks (opencode 2.1.0). The TUI plugin
+  marked a session present when it ran anywhere on the shared service, and the text said the tab list was shared. A TUI
+  on the shared service sees every session's status and events, so any open TUI marked a headless `opencode run`
+  session, and that session's `acquire` succeeded. That broke the check that a session with no TUI cannot acquire, and
+  it hid the execution-mark path, because the session read alive from another TUI's presence mark. Each TUI's tab list
+  is its own in 2.1.0, and every session opens in a tab. Before, the plugin marked sessions in the shared tab list, the
+  route, or running in that TUI. Now it marks only sessions in its own tab list and its current route, with children
+  following their root, and running state comes only from the server plugin's execution marks. Evidence:
+  `spec/reports/2026-10-22-nit-001-m4-opencode-live-results.md`, steps 2.3, 5, 9, and 10.1.
 - 2026-10-22: ADR candidate (hard to reverse): the `sessions/` layout, the session-file name grammar, and the end-mark
   name. They are on-disk formats that every binary on a machine must agree on, and the grammar is part of the V1
   contract. Extends the Undecided state-directory candidate of 2026-10-20. Undecided. Found in NIT-001 M4.

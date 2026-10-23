@@ -212,6 +212,50 @@ func TestOpencodeExecutionMarkUnderADeadHostReadsTimeSuspended(t *testing.T) {
 	}
 }
 
+func TestOpencodeStaleExecutionMarkOfADeadHostIsSweptAndReadsDead(t *testing.T) {
+	// The private server of `opencode run --standalone` dies before its mark-off lands. The session is
+	// absent from the database, or its time_suspended is clear. Either way no turn can resume.
+	for _, db := range []*fakeDB{{suspended: map[string]bool{}}, {suspended: map[string]bool{"other": true}}} {
+		w := newWorld(t)
+		w.db = db
+
+		w.opencodeHost(700, 1, []string{"/opt/homebrew/bin/opencode", "run", "--standalone", "hi"})
+		w.opencodeHost(701, 700, []string{"/opt/homebrew/bin/opencode", "serve", "--stdio", "--port", "0"})
+
+		wantStatus(t, w.hook(w.below(701, 702, nil), "execution", "ses_1", executing(true)), exitcode.OK)
+		wantStatus(t, w.run(w.claude(800, "c"), "list"), exitcode.OK)
+
+		if got := w.sessionFiles("executing"); len(got) != 1 {
+			t.Fatalf("executing = %v", got)
+		}
+
+		w.kill(701)
+
+		other := w.claude(900, "other")
+		wantStatus(t, w.run(other, "list"), exitcode.OK)
+
+		if got := w.sessionFiles("executing"); len(got) != 0 {
+			t.Errorf("the sweep kept a stale execution mark: %v", got)
+		}
+	}
+
+	// The rule reads such a session dead, with a lease that names it.
+	w := newWorld(t)
+	w.db = &fakeDB{}
+	shell, tui, server := opencodeSetup(t, w)
+
+	wantStatus(t, w.hook(tui, "presence", "ses_1", present(true)), exitcode.OK)
+	id := w.acquireOK(shell, "--checkout", w.dir("repo"))
+
+	wantStatus(t, w.hook(server, "execution", "ses_1", executing(true)), exitcode.OK)
+	w.kill(600)
+	w.kill(500)
+
+	if status, reason := w.livenessOf(w.claude(900, "other"), id); status != "dead" {
+		t.Errorf("liveness = %s (%s)", status, reason)
+	}
+}
+
 func TestOpencodeUnreadableDatabaseIsNamedByList(t *testing.T) {
 	w := newWorld(t)
 	w.db = &fakeDB{err: errors.New("unable to open database file")}

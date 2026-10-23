@@ -22,7 +22,7 @@ user to run the two handoffs in real Codex and opencode sessions.
 
 | Milestone | Run status | Commits |
 |-----------|------------|---------|
-| NIT-001 M4 | IN PROGRESS | |
+| NIT-001 M4 | IN PROGRESS | `a0c9f30`, `90e4903` |
 
 M4 lands as two commits. The pre-gate commit carries the code, tests, plugins, and handoffs, with M4 `IN PROGRESS`.
 The run then pauses at one gate while the user runs the live checks in real Codex and opencode sessions. The
@@ -146,6 +146,68 @@ Outcomes of the fix round:
 
 Checks after the fixes: the coordinator ran `make ci`, which passed with 0 lint issues. `proposals.py check` and
 `freeze` returned `[]`.
+
+The pre-gate work was committed as `a0c9f30` (nitipan: judge Codex and opencode leases by session). The handoffs at
+first told each session to start in a scratch checkout. Their results path is relative, and Codex's sandbox blocks
+writes outside the workspace, so `90e4903` (spec: start the NIT-001 M4 live-check sessions in the repo) moved the
+start to the repo.
+
+#### Gate setup, 2026-10-22
+
+The user ran two wrapper scripts from the run's scratchpad, since this sandbox cannot read or write `~/.codex` or
+`~/.config/opencode`.
+
+Codex:
+
+- The setup script backed up `~/.codex/config.toml` to `config.toml.bak-nitipan-20261022212658`. It added
+  `thread_unload_delay_secs = 60` at the top, the state directory under `[sandbox_workspace_write] writable_roots`,
+  and both hooks with `timeout = 3`. None of these existed before.
+- Starting `codex` showed "Hooks need review: 2 hooks are new or changed", with three choices: review, trust all, or
+  continue without trusting.
+- In `/hooks`, both rows started at Installed 1, Active 0, Review 1. Trusting SessionStart alone left SessionEnd at
+  Active 0, Review 1. Trusting one hook does not trust the other. Both were then trusted, and both read Active 1.
+- `codex app-server daemon restart` ran after the trust. It returned `"status":"restarted"`, pid 87537, version
+  0.163.0, with socket `~/.codex/app-server-control/app-server-control.sock`.
+
+opencode:
+
+- The installed opencode is v2.1.0. The 2026-10-18 research and the plugin source reading used 2.0.32.
+- `setup opencode --install-plugins ~/.config/opencode/plugins` wrote `nitipan/index.ts`, `package.json`, and
+  `tui.ts`, and exited 0.
+- Before any restart, `opencode plugin list` showed `nitipan.server local
+  /Users/ripta/.config/opencode/plugins/nitipan/index.ts`. The server plugin autoloads from the plugins directory with
+  no config entry. The TUI plugin was not listed. The handoff's step 5 settles whether it loaded.
+- `opencode service restart` replaced service PID 10041 with PID 2163, `opencode serve --service`. In `ps -ef`, both
+  had parent PID 1 (launchd), not a TUI. The 2026-10-18 opencode handoff saw the service's parent as the launching
+  TUI. Under 2.1.0 the service is detached. Recognizing the host does not depend on the parent, since the walk matches
+  by argument list.
+
+The user then started one Codex session and one opencode TUI session in the repo, and handed each its handoff.
+
+#### Live results, first pass
+
+Codex ran out of quota partway through. Its results are in
+[2026-10-22-nit-001-m4-codex-live-results.md](2026-10-22-nit-001-m4-codex-live-results.md). Steps 1, 2, 3a, 4a, 6,
+7, 12, and 15 passed. Steps 3b, 5, 8, 9, 10, 11, 13, and 14 did not run. The user cannot rerun everything, so M4's
+As built block will track each check's status, and only the unrun checks run next time.
+
+The opencode results are in
+[2026-10-22-nit-001-m4-opencode-live-results.md](2026-10-22-nit-001-m4-opencode-live-results.md). Most steps passed.
+Both plugins autoloaded from `~/.config/opencode/plugins/nitipan` with no config entry. Two findings:
+
+1. Fixed. The TUI plugin marked every session running anywhere on the shared service as present. So a headless
+   `opencode run` session could `acquire` while any TUI was open (steps 2.3 and 10.1). It also hid the execution-mark
+   path in step 9. A TUI now marks only the sessions in its own tab list and its current route. The proposal's TUI
+   plugin bullet and the matching M4 check are amended in place, with a Decision Log entry. The fix has not run live.
+   The user's installed copy of the plugin still predates it.
+2. No change needed. `opencode run --standalone` left a stale execution mark when its private server died. The sweep
+   removes such a mark and the rule reads it dead. A new test pins both.
+
+A review of the fix found only lines past the width limits, and they are rewrapped. `make ci` passed and
+`proposals.py check` returned `[]`.
+
+The user gave feedback on the gate design. It needed too much manual work, and the user should never be asked to edit
+config files. Future live checks are to be scripted.
 
 adr-impact also named the per-lock upkeep run by every lock holder as a possible ADR candidate. Declined: the
 proposal's "Session liveness on shared hosts" already says every lock holder runs it, and it shapes only nitipan's
