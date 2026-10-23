@@ -56,6 +56,7 @@ const (
 	PresenceDir   = "sessions/presence"
 	ExecutingDir  = "sessions/executing"
 	EndedDir      = "sessions/ended"
+	ConfigDir     = "sessions/config"
 
 	lockName   = "lock"
 	formatName = "format"

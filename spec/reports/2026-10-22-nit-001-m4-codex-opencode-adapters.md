@@ -22,7 +22,7 @@ user to run the two handoffs in real Codex and opencode sessions.
 
 | Milestone | Run status | Commits |
 |-----------|------------|---------|
-| NIT-001 M4 | IN PROGRESS | `a0c9f30`, `90e4903` |
+| NIT-001 M4 | DONE | `a0c9f30`, `90e4903`, `afe6aea`, `15ad3d4`, `c33f6ee`, and the M4 completion commit |
 
 M4 lands as two commits. The pre-gate commit carries the code, tests, plugins, and handoffs, with M4 `IN PROGRESS`.
 The run then pauses at one gate while the user runs the live checks in real Codex and opencode sessions. The
@@ -227,6 +227,41 @@ design's assumptions:
 - Codex `-c` overrides force embedded mode.
 - A user `!` shell command in Codex fires no SessionStart.
 - `list --json` hid a stuck tombstone of a dead holder.
+
+#### Automated live checks, 2026-10-23
+
+The user refused further manual checks. The run replaced the handoffs with two harnesses, `make live-codex` and
+`make live-opencode`, in `scripts/live-checks/`. They are Python with the standard library only, the user's choice.
+
+- Each harness runs a private Codex app-server or `opencode serve`, with its own CODEX_HOME or XDG directories. A
+  fake model server answers every model request with scripted tool calls. No run calls a real model, and none
+  touches the user's own Codex or opencode.
+- They share the real nitipan state directory, which has no override by design. They release only their own leases
+  and remove only their own session and config-memory files.
+- They run outside the sandbox, which blocks local ports and ptys.
+- Results: [codex harness results](2026-10-22-nit-001-m4-codex-harness-results.md) and
+  [opencode harness results](2026-10-22-nit-001-m4-opencode-harness-results.md).
+
+The harness runs found these nitipan problems, all fixed and rerun clean:
+
+1. A Codex lease left on its old host, when its session resumed under a new host without its writer-lock file, read
+   alive. It now reads unknown and names both hosts.
+2. Codex rewrites `config.toml` when a TUI starts, so the config was newer than its host and `acquire` failed. The
+   user chose to compare settings: nitipan remembers the confirmed unload delay and SessionEnd entry, and trusts a
+   newer file whose values match. The review found the memory could overwrite a newer version's file, and that
+   nothing was trusted only by rule on Linux. Both are fixed. A narrow stale-trust case is accepted in Risks.
+3. opencode resumes a turn after a managed-service restart but gives the server plugin no execution event. The user
+   chose to mark running sessions at plugin load. The plugin scans with `session.wait`, keeps the mark when a wait
+   fails, ignores events after a hot reload, and clears its own stale marks.
+
+The user decided that unit tests suffice for the opencode `time_suspended` and unreadable-database checks. The
+harness cannot reach the real database path.
+
+Final runs, outside the sandbox: Codex 68 PASS and 1 SKIP. opencode 47 PASS and 3 SKIP. 0 real model calls. M4's As
+built table has 39 rows, all `live` or `tested`, and M4 is DONE.
+
+Left for the user: 11 config-memory files from earlier harness runs remain in
+`~/.local/state/nitipan/sessions/config/`. The permission check blocked their removal. They are harmless.
 
 The user gave feedback on the gate design. It needed too much manual work, and the user should never be asked to edit
 config files. Future live checks are to be scripted.

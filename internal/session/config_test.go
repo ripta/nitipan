@@ -126,7 +126,7 @@ func TestScanCodexConfig(t *testing.T) {
 				write("hooks.json", test.JSON)
 			}
 
-			got := ScanCodexConfig(home, testExe, hostStart, true)
+			got, _ := ScanCodexConfig(home, testExe, hostStart, true, nil)
 
 			if (got.UnloadDelaySecs == nil) != (test.Delay == nil) ||
 				(got.UnloadDelaySecs != nil && *got.UnloadDelaySecs != *test.Delay) {
@@ -165,7 +165,7 @@ func TestScanCodexConfigTrustsOnlyFilesOlderThanTheHost(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got := ScanCodexConfig(home, testExe, hostStart, true)
+		got, _ := ScanCodexConfig(home, testExe, hostStart, true, nil)
 		if got.UnloadDelaySecs != nil || got.SessionEnd != CheckUnknown {
 			t.Errorf("%s: a file not older than the host was trusted: %+v", name, got)
 		}
@@ -175,7 +175,7 @@ func TestScanCodexConfigTrustsOnlyFilesOlderThanTheHost(t *testing.T) {
 func TestScanCodexConfigReadsUnknownWithoutAWallClockStart(t *testing.T) {
 	home := t.TempDir()
 
-	got := ScanCodexConfig(home, testExe, time.Time{}, false)
+	got, _ := ScanCodexConfig(home, testExe, time.Time{}, false, nil)
 	if got.UnloadDelaySecs != nil || got.SessionEnd != CheckUnknown {
 		t.Errorf("checks = %+v", got)
 	}
@@ -191,8 +191,40 @@ func TestScanCodexConfigReadsUnknownWithoutAWallClockStart(t *testing.T) {
 }
 
 func TestScanCodexConfigReadsUnknownForARelativeHome(t *testing.T) {
-	got := ScanCodexConfig("relative/home", testExe, time.Unix(1, 0), true)
+	got, _ := ScanCodexConfig("relative/home", testExe, time.Unix(1, 0), true, nil)
 	if got.UnloadDelaySecs != nil || got.SessionEnd != CheckUnknown {
+		t.Errorf("checks = %+v", got)
+	}
+}
+
+func TestScanCodexConfigReadsUnknownWithoutAStartEvenWithAMemory(t *testing.T) {
+	home := t.TempDir()
+	mem := &ConfigMemory{CodexHome: home, UnloadDelaySecs: intp(1800), SessionEnd: CheckAbsent, Executable: testExe}
+
+	got, confirmed := ScanCodexConfig(home, testExe, time.Time{}, false, mem)
+	if confirmed || got.UnloadDelaySecs != nil || got.SessionEnd != CheckUnknown {
+		t.Errorf("checks = %+v, confirmed = %v", got, confirmed)
+	}
+}
+
+func TestScanCodexConfigDoesNotTrustARememberedSessionEndOfAnotherExecutable(t *testing.T) {
+	hostStart := time.Unix(1_800_000_000, 0)
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+
+	if err := os.WriteFile(path, []byte("thread_unload_delay_secs = 60\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	later := hostStart.Add(time.Hour)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatal(err)
+	}
+
+	mem := &ConfigMemory{CodexHome: home, UnloadDelaySecs: intp(60), SessionEnd: CheckAbsent, Executable: "/other/nitipan"}
+
+	got, _ := ScanCodexConfig(home, testExe, hostStart, true, mem)
+	if got.UnloadDelaySecs == nil || *got.UnloadDelaySecs != 60 || got.SessionEnd != CheckUnknown {
 		t.Errorf("checks = %+v", got)
 	}
 }

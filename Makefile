@@ -19,6 +19,12 @@ LINUX_ARCH ?= amd64
 # Package import path that carries the injected version string.
 VERSION_PKG ?= github.com/space-armada/nitipan/internal/version
 
+# Extra flags for the opencode live harness, for example --dry-run, --probe, or --only tabs.
+LIVE_OPENCODE_ARGS ?=
+
+# Extra flags for the Codex live harness, for example --dry-run, --probe, --selftest, or --only exec.
+LIVE_CODEX_ARGS ?=
+
 .PHONY: help
 help: ## Show this help
 	@awk 'BEGIN { FS = ":.*## " } \
@@ -62,6 +68,26 @@ fmt-check: ## Verify formatting without modifying files
 .PHONY: vet-linux
 vet-linux: ## Vet the Linux build, for example make vet-linux LINUX_ARCH=arm64
 	GOOS=linux GOARCH=$(LINUX_ARCH) CGO_ENABLED=0 $(GO) vet ./...
+
+##@ Live checks
+
+# This target drives the real opencode binary on this machine, but against a private server, private
+# XDG directories, and a fake model provider. Your opencode service, database, and config are not
+# touched, and nothing needs closing. It costs no model usage. It does share nitipan's real state
+# directory, and removes only what it created there. Never part of ci. Use LIVE_OPENCODE_ARGS=--probe
+# first on a new machine, or --dry-run to see the plan.
+.PHONY: live-opencode
+live-opencode: ## Run the opencode live checks on this machine, e.g. make live-opencode LIVE_OPENCODE_ARGS=--probe
+	python3 scripts/live-checks/opencode.py $(LIVE_OPENCODE_ARGS)
+
+# This target drives the real codex binary on this machine, but against a private CODEX_HOME per
+# test config, its own app-server, exec, and TUI processes, and a fake Responses API. Your Codex
+# daemon, ~/.codex, and sessions are not touched, and nothing needs closing. It costs no model
+# usage. It does share nitipan's real state directory, and removes only what it created there.
+# Never part of ci. Use LIVE_CODEX_ARGS=--probe first on a new machine, or --dry-run to see the plan.
+.PHONY: live-codex
+live-codex: ## Run the Codex live checks on this machine, e.g. make live-codex LIVE_CODEX_ARGS=--probe
+	python3 scripts/live-checks/codex.py $(LIVE_CODEX_ARGS)
 
 ##@ CI
 

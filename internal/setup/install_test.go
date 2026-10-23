@@ -178,6 +178,32 @@ func TestEmbeddedPluginsCallHookByTheBakedPathAndNeverRemoveMarksOnCleanup(t *te
 	}
 }
 
+func TestEmbeddedServerPluginMarksSessionsThatAreRunningWhenItLoads(t *testing.T) {
+	files, err := render("/x/nitipan", testState)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var server string
+
+	for _, f := range files {
+		if f.name == "index.ts" {
+			server = string(f.data)
+		}
+	}
+
+	// A turn a restarted service resumes raises no event this plugin sees, so the plugin scans on load.
+	for _, source := range []string{"ctx.session.list", "ctx.session.wait", "RESCAN_MS", "owner.get(id) !== who", "REPROBES", "signal.aborted", "markedHere", "sessions\", \"executing"} {
+		if !strings.Contains(server, source) {
+			t.Errorf("the server plugin lacks %q, part of marking sessions already running at load", source)
+		}
+	}
+
+	if strings.Contains(server, "session.status") {
+		t.Errorf("the server plugin reads session.status, which the 2.1.0 plugin API does not offer")
+	}
+}
+
 func TestTextNamesAbsolutePathsAndQuotesTheExecutable(t *testing.T) {
 	in := Input{StateDir: "/home/u/.local/state/nitipan", Executable: testExe}
 

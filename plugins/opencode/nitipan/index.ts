@@ -4,16 +4,27 @@
 // mark ties to the service process, which the nitipan walk finds from this plugin's subprocess.
 // nitipan reads the marks to tell whether an opencode session still runs.
 //
+// A turn that a restarted service resumes raises no execution event this plugin sees. So on load,
+// and again a few times just after, the plugin asks which recent sessions are running and marks
+// each one. A running session is one whose wait call does not return at once. The same call
+// returns when the turn ends, and that marks the session off.
+//
 // The two paths below are filled in when `nitipan setup opencode --install-plugins` writes this file.
 import { spawn } from "node:child_process"
-import { closeSync, constants, openSync, writeSync } from "node:fs"
+import { closeSync, constants, openSync, readdirSync, writeSync } from "node:fs"
 import { join } from "node:path"
 
 const NITIPAN: string = "@@NITIPAN@@"
 const STATE_DIR: string = "@@STATEDIR@@"
 const LOG = join(STATE_DIR, "plugin.log")
+const EXECUTING = join(STATE_DIR, "sessions", "executing")
 const RETRIES = 3
 const RETRY_MS = 2000
+const SCAN_LIMIT = 200
+const PROBE_MS = 300
+const REPROBES = 5
+const REPROBE_MS = 3000
+const RESCAN_MS = [2000, 5000, 15000, 45000]
 
 // The log sits in nitipan's state directory, which only the user can write. It is opened without
 // following a symlink, with mode 0600.
@@ -66,20 +77,135 @@ function sessionID(event: any): string | undefined {
   return event?.data?.sessionID ?? event?.sessionID ?? event?.properties?.sessionID
 }
 
+// Who last marked a session on. An event owns the session until its next end event. A scan owns
+// it until the wait call returns, unless an event took it over first. Only the current owner may
+// mark the session off, so a late wait never removes the mark of a newer turn.
+const EVENT = Symbol("event")
+const owner = new Map<string, symbol>()
+
+function markOn(id: string, who: symbol) {
+  owner.set(id, who)
+  hook("execution", { session_id: id, executing: true })
+}
+
+function markOff(id: string, who?: symbol) {
+  if (who !== undefined && owner.get(id) !== who) return
+
+  owner.delete(id)
+  hook("execution", { session_id: id, executing: false })
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+// One wait call. It returns true when opencode answered, which means the session is idle or its turn
+// just ended, and false when the call failed. A failure says nothing about the turn.
+function waitOnce(ctx: any, id: string): Promise<boolean> {
+  return Promise.resolve()
+    .then(() => ctx.session.wait({ sessionID: id }))
+    .then(
+      () => true,
+      (e) => {
+        note(`wait for ${id} failed: ${e}`)
+        return false
+      },
+    )
+}
+
+// Waits for the end of a turn this scan marked. A failed wait keeps the mark and probes again, a few
+// times. Past that the mark stays until an end event, because an unknown state counts as running.
+// Nothing runs once the instance is torn down, since the module-level state belongs to its successor.
+async function settle(ctx: any, id: string, who: symbol, first: Promise<boolean>, signal: AbortSignal) {
+  let returned = await first
+
+  for (let attempt = 0; !returned && attempt < REPROBES; attempt++) {
+    await sleep(REPROBE_MS)
+    if (signal.aborted) return
+
+    returned = await waitOnce(ctx, id)
+  }
+
+  if (signal.aborted) return
+
+  if (returned) markOff(id, who)
+  else note(`gave up probing ${id}; its mark stays until an end event`)
+}
+
+// The sessions that already have an execution mark under this process. A turn that ended while an
+// earlier instance of this plugin was torn down leaves its mark behind, and no end event reaches
+// this instance. File names are `opencode.<session>.<pid>.<start>.json`.
+function markedHere(): Set<string> {
+  const found = new Set<string>()
+
+  try {
+    for (const name of readdirSync(EXECUTING)) {
+      const parts = name.split(".")
+      if (parts.length >= 4 && parts[0] === "opencode" && parts[2] === String(process.pid)) found.add(parts[1])
+    }
+  } catch (e) {
+    note(`reading marks failed: ${e}`)
+  }
+
+  return found
+}
+
+// A session is running when its wait call has not returned after the probe delay. The wait call
+// never starts work. A wait that fails before then leaves the state unknown, so it is never marked,
+// and a mark it leaves behind stays. An idle session that still has a mark here, with no owner, lost
+// its end event, so the mark goes.
+async function scan(ctx: any, signal: AbortSignal) {
+  let ids: string[] = []
+
+  try {
+    const page = await ctx.session.list({ limit: SCAN_LIMIT, order: "desc" })
+    ids = (page?.data ?? []).map((session: any) => session?.id).filter((id: unknown) => typeof id === "string")
+  } catch (e) {
+    note(`scan list failed: ${e}`)
+    return
+  }
+
+  const left = markedHere()
+  const probe = new Set<string>([...ids, ...left])
+
+  await Promise.all(
+    [...probe].map(async (id) => {
+      if (owner.has(id) || signal.aborted) return
+
+      const first = waitOnce(ctx, id)
+      const outcome = await Promise.race([first, sleep(PROBE_MS).then(() => "pending" as const)])
+      if (owner.has(id) || signal.aborted) return
+
+      if (outcome === true) {
+        if (left.has(id)) markOff(id)
+        return
+      }
+
+      if (outcome !== "pending") return
+
+      const who = Symbol(id)
+      markOn(id, who)
+      settle(ctx, id, who, first, signal)
+    }),
+  )
+}
+
 export default {
   id: "nitipan.server",
   async setup(ctx: any) {
     const controller = new AbortController()
+    const timers: ReturnType<typeof setTimeout>[] = []
 
     const watch = async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        if (controller.signal.aborted) break
+
         const type: string = event?.type ?? ""
         if (!type.startsWith("session.execution.")) continue
 
         const id = sessionID(event)
         if (!id) continue
 
-        hook("execution", { session_id: id, executing: type === "session.execution.started" })
+        if (type === "session.execution.started") markOn(id, EVENT)
+        else markOff(id)
       }
     }
 
@@ -87,6 +213,14 @@ export default {
       if (!controller.signal.aborted) note(`event stream ended: ${e}`)
     })
 
-    return () => controller.abort()
+    const rescan = () => scan(ctx, controller.signal).catch((e) => note(`scan failed: ${e}`))
+
+    rescan()
+    for (const ms of RESCAN_MS) timers.push(setTimeout(rescan, ms))
+
+    return () => {
+      controller.abort()
+      for (const timer of timers) clearTimeout(timer)
+    }
   },
 }

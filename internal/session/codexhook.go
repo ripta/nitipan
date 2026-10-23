@@ -68,7 +68,7 @@ func (s *Service) RegisterCodex(l *state.Locked, in RegisterInput) (*RegisterRes
 		return nil, err
 	}
 
-	if err := s.fillChecks(reg, in); err != nil {
+	if err := s.fillChecks(l, reg, in); err != nil {
 		return nil, err
 	}
 
@@ -107,8 +107,9 @@ func (s *Service) RegisterCodex(l *state.Locked, in RegisterInput) (*RegisterRes
 	return res, nil
 }
 
-// fillChecks copies the host's checks from a sibling registration, or reads the config.
-func (s *Service) fillChecks(reg *Registration, in RegisterInput) error {
+// fillChecks copies the host's checks from a sibling registration, or reads the config. A read that
+// trusted every file is remembered, so a later host can trust a file Codex rewrote.
+func (s *Service) fillChecks(l *state.Locked, reg *Registration, in RegisterInput) error {
 	all, err := s.registrations("")
 	if err != nil {
 		return err
@@ -126,11 +127,21 @@ func (s *Service) fillChecks(reg *Registration, in RegisterInput) error {
 	}
 
 	start, ok := StartTime(reg.Host.Start)
-	checks := ScanCodexConfig(in.CodexHome, in.Executable, start, ok)
+
+	mem, _, err := s.readConfigMemory(in.CodexHome)
+	if err != nil {
+		return err
+	}
+
+	checks, confirmed := ScanCodexConfig(in.CodexHome, in.Executable, start, ok, mem)
 	reg.UnloadDelaySecs = checks.UnloadDelaySecs
 	reg.SessionEnd = checks.SessionEnd
 
-	return nil
+	if !confirmed {
+		return nil
+	}
+
+	return s.rememberConfig(l, in.CodexHome, in.Executable, checks)
 }
 
 // clearPlan lists what a registration will remove: the session's ended registrations and end marks,

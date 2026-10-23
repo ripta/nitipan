@@ -1,8 +1,12 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -55,56 +59,175 @@ func unknownChecks() Checks {
 
 // ScanCodexConfig reads the config the way a Codex host read it at start.
 //
-// A change to the config needs a host restart, so a file is trusted only when it is older than the
-// host's start. A newer file, an unreadable one, or a host whose start has no wall-clock time makes
-// both checks unknown. Only the user-level config.toml and hooks.json under the Codex home are
-// read. Layered and profile config can still defeat the snapshot, which is why a registration
-// records the result as a check and not a proof.
+// A change to the config needs a host restart, so a file older than the host's start is trusted. The
+// second result says the scan trusted every file, which makes its values worth remembering.
+//
+// Codex rewrites config.toml when a TUI starts, which makes the file newer than that host without
+// changing any setting nitipan checks. A newer file is therefore trusted for a value only when that
+// value equals the one remembered from an earlier scan that trusted the file. A changed value, or
+// none remembered, reads unknown. Only the user-level config.toml and hooks.json under the Codex
+// home are read. Layered and profile config can still defeat the snapshot, which is why a
+// registration records the result as a check and not a proof.
 //
 // nitipan has no TOML parser. The scan reads only the shapes Codex documents, and anything it
 // cannot classify reads unknown.
-func ScanCodexConfig(home, executable string, hostStart time.Time, haveStart bool) Checks {
+func ScanCodexConfig(home, executable string, hostStart time.Time, haveStart bool, mem *ConfigMemory) (checks Checks, confirmed bool) {
 	if !haveStart || !filepath.IsAbs(home) {
-		return unknownChecks()
+		return unknownChecks(), false
 	}
 
-	toml, tomlOK := readOld(filepath.Join(home, "config.toml"), hostStart)
-	hooks, hooksOK := readOld(filepath.Join(home, "hooks.json"), hostStart)
+	toml, tomlOld, tomlOK := readConfigFile(filepath.Join(home, "config.toml"), hostStart, haveStart)
+	hooks, hooksOld, hooksOK := readConfigFile(filepath.Join(home, "hooks.json"), hostStart, haveStart)
 
 	if !tomlOK || !hooksOK {
-		return unknownChecks()
+		return unknownChecks(), false
 	}
 
-	var checks Checks
-
-	delay, ok := unloadDelay(toml)
-	if ok {
+	delay, delayOK := unloadDelay(toml)
+	if delayOK {
 		checks.UnloadDelaySecs = &delay
 	}
 
 	checks.SessionEnd = sessionEndCheck(toml, hooks, executable)
 
-	return checks
-}
-
-// readOld returns a file's text when it is trustworthy: absent, or older than the host's start. An
-// absent file reads as empty text.
-func readOld(path string, hostStart time.Time) (string, bool) {
-	info, err := os.Stat(path)
-	if errors.Is(err, unix.ENOENT) {
-		return "", true
+	if tomlOld && hooksOld {
+		return checks, true
 	}
 
-	if err != nil || info.IsDir() || !info.ModTime().Before(hostStart) {
-		return "", false
+	return mem.vouch(home, executable, checks), false
+}
+
+// readConfigFile returns a file's text, whether it is older than the host's start, and whether it
+// could be read at all. An absent file reads as empty text and counts as old.
+func readConfigFile(path string, hostStart time.Time, haveStart bool) (text string, old, ok bool) {
+	info, err := os.Stat(path)
+	if errors.Is(err, unix.ENOENT) {
+		return "", haveStart, true
+	}
+
+	if err != nil || info.IsDir() {
+		return "", false, false
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
 
-	return string(data), true
+	return string(data), haveStart && info.ModTime().Before(hostStart), true
+}
+
+// ConfigMemory is the pair of checks nitipan last confirmed from config files older than a host's
+// start, for one Codex home. It is the file sessions/config/<digest of the home>.json.
+type ConfigMemory struct {
+	Version   record.Version `json:"version"`
+	CodexHome string         `json:"codex_home"`
+
+	// UnloadDelaySecs is nil when the confirmed scan could not read it.
+	UnloadDelaySecs *int `json:"unload_delay_secs"`
+
+	// SessionEnd is CheckPresent, CheckAbsent, or CheckUnknown.
+	SessionEnd string `json:"session_end"`
+
+	// Executable is the nitipan that SessionEnd was matched against. A different executable never
+	// compares equal, since a changed hook path is a changed setting.
+	Executable string `json:"executable"`
+
+	ConfirmedAt time.Time `json:"confirmed_at"`
+}
+
+// vouch keeps each value of checks that equals the remembered one, and reads the rest unknown.
+func (m *ConfigMemory) vouch(home, executable string, checks Checks) Checks {
+	out := unknownChecks()
+
+	if m == nil || m.CodexHome != home {
+		return out
+	}
+
+	if checks.UnloadDelaySecs != nil && m.UnloadDelaySecs != nil && *checks.UnloadDelaySecs == *m.UnloadDelaySecs {
+		out.UnloadDelaySecs = checks.UnloadDelaySecs
+	}
+
+	if checks.SessionEnd != CheckUnknown && checks.SessionEnd == m.SessionEnd && m.Executable == executable {
+		out.SessionEnd = checks.SessionEnd
+	}
+
+	return out
+}
+
+func (m *ConfigMemory) matches(home, executable string, checks Checks) bool {
+	if m == nil || m.CodexHome != home || m.SessionEnd != checks.SessionEnd || m.Executable != executable {
+		return false
+	}
+
+	if (m.UnloadDelaySecs == nil) != (checks.UnloadDelaySecs == nil) {
+		return false
+	}
+
+	return m.UnloadDelaySecs == nil || *m.UnloadDelaySecs == *checks.UnloadDelaySecs
+}
+
+// configMemoryName names the memory file for a Codex home.
+func configMemoryName(home string) string {
+	sum := sha256.Sum256([]byte(home))
+
+	return hex.EncodeToString(sum[:16]) + ".json"
+}
+
+// readConfigMemory returns the memory for a Codex home. A missing, undecodable, or higher-major file
+// reads as no memory. The second result says a file exists that this binary must not overwrite: one
+// it cannot decode, or one of a higher major or minor.
+func (s *Service) readConfigMemory(home string) (mem *ConfigMemory, locked bool, err error) {
+	data, err := state.ReadName(s.Root, state.ConfigDir, configMemoryName(home))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+
+	if err != nil {
+		return nil, false, err
+	}
+
+	var m ConfigMemory
+	if json.Unmarshal(data, &m) != nil || writable(m.Version) != nil {
+		return nil, true, nil
+	}
+
+	if m.CodexHome != home {
+		return nil, false, nil
+	}
+
+	return &m, false, nil
+}
+
+// rememberConfig records confirmed checks, unless the memory already says the same. It leaves a file
+// it must not overwrite alone.
+func (s *Service) rememberConfig(l *state.Locked, home, executable string, checks Checks) error {
+	prior, locked, err := s.readConfigMemory(home)
+	if err != nil {
+		return err
+	}
+
+	if locked || prior.matches(home, executable, checks) {
+		return nil
+	}
+
+	data, err := encode(ConfigMemory{
+		Version:         record.Current,
+		CodexHome:       home,
+		UnloadDelaySecs: checks.UnloadDelaySecs,
+		SessionEnd:      checks.SessionEnd,
+		Executable:      executable,
+		ConfirmedAt:     s.now(),
+	})
+	if err != nil {
+		return err
+	}
+
+	if err := l.ReplaceNamed(state.ConfigDir, configMemoryName(home), data); err != nil {
+		return fmt.Errorf("remembering the Codex config checks: %w", err)
+	}
+
+	return nil
 }
 
 var (

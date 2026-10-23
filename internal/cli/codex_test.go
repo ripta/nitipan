@@ -481,6 +481,34 @@ func TestCodexLeasesStayOnTheOldHostWhenTheLockFileIsMissing(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseOnTheOldHostReadsUnknownWhileTheNewHostHasNoLockFile(t *testing.T) {
+	w := newWorld(t)
+	shell, _ := codexSession(t, w)
+	id := w.acquireOK(shell, "--checkout", w.dir("repo"))
+
+	w.kill(400)
+	w.tick()
+	w.codexHost(500)
+
+	shell2, hook2 := w.codexShell(500, 501), w.hookFor(500, 502)
+	wantStatus(t, w.hook(hook2, "session-start", "t1", nil), exitcode.OK)
+
+	w.lockFile(false)
+
+	res := w.run(shell2, "advertise", "--name", "renamed")
+	wantStatus(t, res, exitcode.OK)
+	wantContains(t, "stderr", res.Stderr, "stay on the old host and read unknown")
+
+	other := w.claude(700, "other")
+
+	status, reason := w.livenessOf(other, id)
+	if status != "unknown" {
+		t.Fatalf("liveness = %s (%s), want unknown", status, reason)
+	}
+
+	wantContains(t, "reason", reason, "host 400", "host 500")
+}
+
 func TestCodexSessionAlreadyEndedStaysDeadAcrossAHostRestart(t *testing.T) {
 	w := newWorld(t)
 	shell, hook := codexSession(t, w)
@@ -820,4 +848,147 @@ func TestCodexAcceptsItsPermissionModes(t *testing.T) {
 	res := w.run(shell, "advertise", "--permission-mode", "yolo")
 	wantStatus(t, res, exitcode.Usage)
 	wantContains(t, "stderr", res.Stderr, "read-only", "workspace-write", "danger-full-access", "on-request")
+}
+
+const codexTUIRewrite = `
+[tui]
+screen_reader_detection_done = true
+
+[tui.model_availability_nux]
+"gpt-5.5" = 3
+`
+
+// registeredChecks reads the two config checks of the registration for thread t1 under a host.
+func registeredChecks(t *testing.T, w *world, host int) session.Registration {
+	t.Helper()
+
+	var reg session.Registration
+	if err := json.Unmarshal(w.registration(registrationName("t1", host)), &reg); err != nil {
+		t.Fatal(err)
+	}
+
+	return reg
+}
+
+// rewrittenByCodex rewrites the config after the first host started, as a TUI start does, and
+// starts a second host that is older than the rewritten file.
+func rewrittenByCodex(t *testing.T, w *world, content string) session.Registration {
+	t.Helper()
+
+	w.writeFile(filepath.Join(w.codexHome(), "config.toml"), content, time.Unix(codexEpoch+10_000, 0))
+	w.codexHost(500, codexTUIArgs...)
+
+	wantStatus(t, w.hook(w.hookFor(500, 502), "session-start", "t1", nil), exitcode.OK)
+
+	return registeredChecks(t, w, 500)
+}
+
+func TestCodexConfigOlderThanItsHostIsRememberedAndRecorded(t *testing.T) {
+	w := newWorld(t)
+	codexSession(t, w)
+
+	reg := registeredChecks(t, w, 400)
+	if reg.UnloadDelaySecs == nil || *reg.UnloadDelaySecs != 60 || reg.SessionEnd != session.CheckPresent {
+		t.Errorf("checks = %v, %s", reg.UnloadDelaySecs, reg.SessionEnd)
+	}
+
+	if got := w.sessionFiles("config"); len(got) != 1 {
+		t.Errorf("config memory = %v, want one file", got)
+	}
+}
+
+func TestCodexNewerConfigWithTheRememberedValuesIsTrusted(t *testing.T) {
+	w := newWorld(t)
+	codexSession(t, w)
+
+	reg := rewrittenByCodex(t, w, goodCodexConfig+"# touched\n")
+	if reg.UnloadDelaySecs == nil || *reg.UnloadDelaySecs != 60 || reg.SessionEnd != session.CheckPresent {
+		t.Errorf("checks = %v, %s", reg.UnloadDelaySecs, reg.SessionEnd)
+	}
+}
+
+func TestCodexTUIRewriteOfTheConfigDoesNotMatter(t *testing.T) {
+	w := newWorld(t)
+	codexSession(t, w)
+
+	reg := rewrittenByCodex(t, w, goodCodexConfig+codexTUIRewrite)
+	if reg.UnloadDelaySecs == nil || *reg.UnloadDelaySecs != 60 || reg.SessionEnd != session.CheckPresent {
+		t.Errorf("checks = %v, %s", reg.UnloadDelaySecs, reg.SessionEnd)
+	}
+}
+
+func TestCodexNewerConfigWithAChangedDelayReadsUnknown(t *testing.T) {
+	w := newWorld(t)
+	codexSession(t, w)
+
+	changed := strings.Replace(goodCodexConfig, "thread_unload_delay_secs = 60", "thread_unload_delay_secs = 600", 1)
+
+	reg := rewrittenByCodex(t, w, changed+codexTUIRewrite)
+	if reg.UnloadDelaySecs != nil {
+		t.Errorf("a changed delay was trusted: %d", *reg.UnloadDelaySecs)
+	}
+
+	if reg.SessionEnd != session.CheckPresent {
+		t.Errorf("the unchanged SessionEnd check = %s", reg.SessionEnd)
+	}
+}
+
+func TestCodexNewerConfigWithNothingRememberedReadsUnknown(t *testing.T) {
+	w := newWorld(t)
+	w.codexHost(500, codexTUIArgs...)
+	w.writeFile(filepath.Join(w.codexHome(), "config.toml"), goodCodexConfig, time.Unix(codexEpoch+10_000, 0))
+
+	wantStatus(t, w.hook(w.hookFor(500, 502), "session-start", "t1", nil), exitcode.OK)
+
+	reg := registeredChecks(t, w, 500)
+	if reg.UnloadDelaySecs != nil || reg.SessionEnd != session.CheckUnknown {
+		t.Errorf("checks = %v, %s", reg.UnloadDelaySecs, reg.SessionEnd)
+	}
+}
+
+type memoryGuardTest struct {
+	Name string
+	Body string
+}
+
+var memoryGuardTests = []memoryGuardTest{
+	{Name: "higher major", Body: `{"version":"2.0","codex_home":"%s","session_end":"present"}`},
+	{Name: "higher minor", Body: `{"version":"1.9","codex_home":"%s","session_end":"present","extra":1}`},
+	{Name: "undecodable", Body: `not json at all`},
+}
+
+func TestCodexConfigMemoryThatCannotBeWrittenIsLeftUntouched(t *testing.T) {
+	for _, test := range memoryGuardTests {
+		t.Run(test.Name, func(t *testing.T) {
+			w := newWorld(t)
+			codexSession(t, w)
+
+			files := w.sessionFiles("config")
+			if len(files) != 1 {
+				t.Fatalf("config memory = %v", files)
+			}
+
+			path := filepath.Join(w.state, "sessions", "config", files[0])
+			body := strings.Replace(test.Body, "%s", w.codexHome(), 1)
+
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			changed := strings.Replace(goodCodexConfig, "thread_unload_delay_secs = 60", "thread_unload_delay_secs = 30", 1)
+			w.codexConfig(changed)
+			w.codexHost(500, codexTUIArgs...)
+
+			wantStatus(t, w.hook(w.hookFor(500, 502), "session-start", "t1", nil), exitcode.OK)
+
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if string(got) != body {
+				t.Errorf("the memory file was rewritten: %s", got)
+			}
+		})
+	}
 }

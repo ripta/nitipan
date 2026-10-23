@@ -30,6 +30,9 @@ func (r codexRule) Judge(env record.Envelope) liveness.Result {
 // A session is judged by its newest registration whose host is alive. It is dead when an end mark
 // names it under that host and Codex's writer-lock file for it is absent. While the file exists the
 // session is alive, which guards against a late SessionEnd that lands after a resume.
+//
+// A lease on a different host than that registration reads unknown, unless a live registration is
+// under the lease's own host. Such a lease is waiting for a move that has not happened.
 func (r codexRule) JudgeHint(env record.Envelope) (verdict liveness.Result, hint string) {
 	session := env.Holder.SessionID
 	if !ValidSession(session) {
@@ -58,6 +61,17 @@ func (r codexRule) JudgeHint(env record.Envelope) (verdict liveness.Result, hint
 
 	switch n.Host.Status {
 	case liveness.Alive:
+		if !underHost(n, env.Holder) {
+			// The lease stays on its old host until a call under the new host moves it. Judging it by
+			// the new host's registration would read alive a lease that nothing shows runs here.
+			if at, found := liveAtHost(regs, env.Holder); found {
+				return r.alive(at, session)
+			}
+
+			return unknown("the lease is on host %d, but session %s now runs under host %d", env.Holder.PID, session,
+				n.Reg.Host.PID), ""
+		}
+
 		return r.alive(n, session)
 	case liveness.Dead:
 		return r.hostDead(n), ""
@@ -88,6 +102,28 @@ func pickRegistration(regs []regFile) (regFile, bool) {
 	}
 
 	return newest(regs), true
+}
+
+// underHost reports whether a registration is under the host a lease records.
+func underHost(rf regFile, h record.Holder) bool {
+	return rf.Reg.Host.PID == h.PID && rf.Reg.Host.Start.Equal(h.Start)
+}
+
+// liveAtHost finds the newest registration under the lease's recorded host, when that host is alive.
+func liveAtHost(regs []regFile, h record.Holder) (regFile, bool) {
+	var at []regFile
+
+	for _, rf := range regs {
+		if rf.Host.Status == liveness.Alive && underHost(rf, h) {
+			at = append(at, rf)
+		}
+	}
+
+	if len(at) == 0 {
+		return regFile{}, false
+	}
+
+	return newest(at), true
 }
 
 func (r codexRule) alive(n regFile, session string) (verdict liveness.Result, hint string) {
