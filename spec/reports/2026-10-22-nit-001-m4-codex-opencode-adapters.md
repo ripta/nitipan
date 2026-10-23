@@ -178,9 +178,10 @@ opencode:
   /Users/ripta/.config/opencode/plugins/nitipan/index.ts`. The server plugin autoloads from the plugins directory with
   no config entry. The TUI plugin was not listed. The handoff's step 5 settles whether it loaded.
 - `opencode service restart` replaced service PID 10041 with PID 2163, `opencode serve --service`. In `ps -ef`, both
-  had parent PID 1 (launchd), not a TUI. The 2026-10-18 opencode handoff saw the service's parent as the launching
-  TUI. Under 2.1.0 the service is detached. Recognizing the host does not depend on the parent, since the walk matches
-  by argument list.
+  had parent PID 1 (launchd), not a TUI. Later, the opencode session ran `opencode service restart` from its own
+  shell. The new service, PID 50404, had that session's TUI (30555) as its parent (opencode results, step 8.3). The
+  service's parent is whatever ran the restart, and no LaunchAgent plist exists. Recognizing the host does not depend
+  on the parent, since the walk matches by argument list.
 
 The user then started one Codex session and one opencode TUI session in the repo, and handed each its handoff.
 
@@ -205,6 +206,27 @@ Both plugins autoloaded from `~/.config/opencode/plugins/nitipan` with no config
 
 A review of the fix found only lines past the width limits, and they are rewrapped. `make ci` passed and
 `proposals.py check` returned `[]`.
+
+The opencode session was still running when this was written. Its results file may gain more steps. The As built
+counts below reflect the file at that time.
+
+M4's As built block in the proposal now holds one row per check, 38 in all. Each row carries one status:
+
+- `live`: 5
+- `tested`: 16
+- `tested, live pending`: 11
+- `not run`: 2
+- `failed, fixed`: 3, none rerun live
+- `failed, not fixed`: 1. A turn that resumes after an opencode service restart gets no execution mark under the new
+  service PID.
+
+The next live pass reruns only the rows not `live` or `tested`. The block also records live facts that change the
+design's assumptions:
+
+- `time_suspended` is set for every in-flight turn.
+- Codex `-c` overrides force embedded mode.
+- A user `!` shell command in Codex fires no SessionStart.
+- `list --json` hid a stuck tombstone of a dead holder.
 
 The user gave feedback on the gate design. It needed too much manual work, and the user should never be asked to edit
 config files. Future live checks are to be scripted.

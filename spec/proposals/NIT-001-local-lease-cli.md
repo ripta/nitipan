@@ -1287,6 +1287,83 @@ Amended 2026-10-20; see Decision Log.
 - A session file of a higher major, or one nitipan cannot decode, makes its session unknown
 - `list` shows the "likely ended" hint and names an unreadable opencode database
 
+**As built:**
+
+The live checks ran partway on 2026-10-22 against Codex 0.163.0 and opencode 2.1.0. M4 stays IN PROGRESS until every
+check reads live or tested. The Codex run stopped when quota ran out, and the opencode run stopped at step 9.
+
+Results are in `spec/reports/2026-10-22-nit-001-m4-codex-live-results.md` and
+`spec/reports/2026-10-22-nit-001-m4-opencode-live-results.md`.
+
+| Check | Status | Evidence |
+|---|---|---|
+| opencode session ID and PID in a bash tool call | live | opencode results, step 1 |
+| Codex PID and session variables in a shell command | live | Codex results, step 1 |
+| Session variables left by each environment policy | live | Codex step 2: both survive. Flags are user report |
+| Liveness sysctl inside each tool | live | Codex step 3a. opencode steps 2.1 and 2.2, no sandbox |
+| MCP variable passing, and opencode sessions per process | not run | opencode 3 and 4 live. Codex MCP is source only |
+| Codex sessions per process | not run | Codex step 5 not run |
+| Session declarations match the findings | tested, live pending | `TestAdaptersDeclareSessionModel`. Codex not seen |
+| `acquire` with and without the printed entries | tested, live pending | Codex 1 and 3a live. 3b not run |
+| Permission mode lists | live | Codex step 15, opencode step 12. No list changes |
+| Plugins shipped, `--install-plugins`, and printed steps | tested | `TestInstallOpencode*`, `TestSetup*`. Live: 0, 13 |
+| No matching adapter names the agents | tested | `TestResolveWithNoAgentVariablesIsAnonymousAndNeverWalks` |
+| Host recognition in four modes, and `--no-daemon` ancestry | tested, live pending | `TestCodexHostMode`, `TestHost*` |
+| Codex `acquire` fails closed without a registration or delay | tested, live pending | `TestCodexAcquireFailsClosed*` |
+| Codex reads dead after window close and `/new` | tested, live pending | `TestCodexSessionReadsDeadAfterItsEnd*` |
+| Daemon restart, move, ended stays dead | tested, live pending | `TestCodexHostRestart*`, `TestCodexSession*` |
+| Embedded Codex session reads dead at TUI exit | tested, live pending | `TestCodexEmbeddedHost*` |
+| Second SessionEnd succeeds, a registration clears ends | tested | `TestCodexSecondSessionEnd*`, `TestCodexResume*` |
+| Non-ENOENT lock reads unknown, missing lock fails | tested, live pending | `TestCodexWriterLock*`. Order below |
+| Dead then resumed reads unknown after a restart | tested | `TestCodexSessionFoundDeadThenResumed*` |
+| Newest registration ended, host and lock live, reads alive | tested | `TestCodexSessionWhoseNewest*` |
+| Move fails and leaves leases unknown without the lock file | tested | `TestCodexLeasesStayOnTheOldHost*` |
+| Non-TUI Codex host recorded as a daemon | tested | `TestCodexHostThatIsNotTheTUI*`. Daemon mode seen, step 7 |
+| Session ID outside the allowed set refused | tested | `TestCodexHookRefusesASession*`, `TestParseKey` |
+| Dead embedded host's sessions read dead, registration kept | tested | `TestCodexEmbeddedHost*` |
+| Every lock holder converts end marks before it sweeps | tested | `TestAfterLock*`, `TestCodexSessionReadsDead*` |
+| Config-check error names the daemon's PID | tested | `TestCodexAcquireFailsClosedWhenARecordedCheckFails` |
+| No SessionEnd entry fails, no registration names the timeout | tested | Same test. Timeout text seen live, step 2 |
+| Late SessionEnd after a resume, hook order | tested, live pending | `TestCodexSessionReadsDead*`. Step 10 not run |
+| Hook sees `CODEX_HOME`, and hook trust | tested, live pending | Step 7 `codex_home` matches. Trust is user report |
+| TUI plugin marks follow its tabs and route, survive reload | failed, fixed | Marked running sessions. Not rerun live |
+| Server plugin sees events, including a resumed turn | failed, not fixed | Events live. Resumed turn gets no mark |
+| TUI dies mid-turn, `time_suspended`, bad DB | tested, live pending | `TestOpencodeTurnKeeps*`, `TestOpencodeExec*` |
+| Hook input, fail closed, no tombstones, no error naming it | tested | `TestCodexHook*`, `TestHookMistakes*` |
+| Presence ties to the TUI, `run` and `acp` safe | failed, fixed | Ties live. `run` was marked. Not rerun live |
+| `acquire` with no TUI fails and says why | failed, fixed | Step 2.3 acquired. Fixed, not rerun live |
+| Sweep keeps what it must and removes dead files | tested | `TestOpencodeExecutionMarkUnder*`, `TestCodexSession*` |
+| Higher major or undecodable file reads unknown | tested | `TestCodexSessionFileOfAHigherMajor*`, opencode twin |
+| `list` shows the hint and names an unreadable database | tested | `TestCodexListFlags*`, `TestOpencodeUnreadable*` |
+
+Live facts that change the design's assumptions:
+
+- The opencode service's parent is whatever ran `opencode service restart`: PID 1 from a terminal, or the TUI when a
+  session in that TUI ran it. No LaunchAgent plist exists. A service started from a TUI dies with it, so its PID can
+  change.
+- In opencode 2.1.0 each TUI has its own tab list. Every session opens in a tab, so a route without a tab cannot
+  happen. A new empty tab has no session until its first message.
+- Both opencode plugins autoload from `~/.config/opencode/plugins/nitipan` with no config entry. `opencode plugin list`
+  shows only the server plugin. A hot reload republishes every mark, and no lease went dead.
+- `time_suspended` is set for every turn in flight, and cleared at idle. It is not set only by a suspension. Under the
+  rule it matters only for a dead host's execution mark, where a set value still means a turn that a restart resumes.
+- A turn resumed after a service restart gets no execution mark under the new service PID. The old mark names a dead PID
+  until the turn ends. A lease's `holder.pid` also stays on the old service until that session's next call.
+- `opencode run --standalone` and `opencode acp` run on a private server child. The child can die before its mark-off
+  lands, and the sweep removed the stale mark. `opencode run` without `--standalone` uses the shared service.
+- Trusting one Codex hook does not trust the other (user report, `/hooks` showed Active 0, Review 1). Running with only
+  one trusted is not tested.
+- The writer-lock file's modification time came 25 seconds before the registration for the same session. That
+  retrospective comparison does not show whether SessionStart runs before the lock file exists. The first turn's
+  `acquire` worked.
+- Codex MCP servers get neither session variable by default, by source reading only. opencode MCP servers get none,
+  observed.
+- A Codex `-c` override forces embedded mode. Commands the user runs with `!` fire no SessionStart, so their `acquire`
+  fails with no registration. Model turns register, and Policies B, C, and D acquired under embedded hosts.
+- `--permission-mode` on one `acquire` applies to the holder's other leases, as "Session name and permission mode"
+  says.
+- `list --json` showed no tombstones while one for a dead holder was on disk. It was removed later. `break` refuses it.
+
 ## Decision Log
 
 - 2026-10-18: Lease records live at `~/.local/state/nitipan/`, not under `~/.local/state/coding_agent_standards/`.
