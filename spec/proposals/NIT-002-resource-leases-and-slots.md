@@ -241,12 +241,12 @@ None.
   coöperating sessions only. The README says so.
 - **A V1 binary compares a `name` entry with a `path` entry wrongly** — likelihood: low, impact: high.
   Every V1 binary applies the envelope forever. One that treats a mixed pair as overlapping would refuse every path
-  claim while a resource is held. Mitigation: NIT-001 and ADR-02 state that a path entry and a name entry never
+  claim while a resource is held. Mitigation: NIT-001 and ADR-04 state that a path entry and a name entry never
   overlap, while an unknown type still counts as `all`. NIT-001's milestone 1 and this proposal's milestone 1 both test
   that a resource lease never overlaps a path lease. Amended 2026-10-18; see Decision Log.
 - **NIT-002 rests on NIT-001's envelope** — likelihood: low, impact: medium.
   A change to the envelope, the minor-version rule, or the re-acquire rule would change this design. NIT-001 is
-  accepted, and ADR-02 records the envelope, so such a change now needs a superseding ADR. Mitigation: NIT-002's queue
+  accepted, and ADR-04 records the envelope, so such a change now needs a superseding ADR. Mitigation: NIT-002's queue
   rows depend on NIT-001, so none is built first. NIT-002 is amended if NIT-001 changes those sections.
 - **The name grammar, the resource body, and the config syntax are one-way doors** — likelihood: medium, impact:
   medium. Names end up in shared agent instructions and stored records. Mitigation: the grammar starts strict, and
@@ -295,13 +295,11 @@ None.
   the holder was refused as a newer minor and left the record unchanged. `list --json` showed it as kind `resource`
   with its footprint and no domain. That binary reads a dead holder's record as unclearable, as the envelope rules
   require. The check script was not kept.
-- The effective count is not in the output yet, so no lease carries one and the remote lease check holds trivially. The
-  count arrives with M2. The `remote` flag is set on resource leases only, since path leases from another machine keep
-  counting as alive.
+- The `remote` flag is set on resource leases only, since path leases from another machine keep counting as alive.
 - A claim skips another machine's record only when its kind is `resource`. A remote record of an unknown kind with a
   footprint of `all` still blocks, as the envelope requires.
-- The resource body carries `slots`, written as 1, so M2 needs no record change. M1 judges a re-acquire against the
-  record's count and a new claim against a count of 1.
+- The resource body carries `slots`, the count the config gave when the claim was admitted. A re-acquire is judged
+  against the record's own count.
 - A resource name given to `release` and `list` passes the same grammar, so a typo gets the lowercase suggestion there
   too.
 - An empty `--resource ""` reads back from the flag library as no value, which would have claimed the working
@@ -487,5 +485,5 @@ None.
 
 - `spec/reports/2026-10-18-lease-broker-research.md`: "Roadmap" and "Reach"
 - NIT-001: the claim, liveness, and break rules this proposal reuses
-- ADR-02: the record envelope and evolution rules resource records follow
+- ADR-04: the record envelope and evolution rules resource records follow
 - ADR-03: the key and overlap rule, which a resource name never meets

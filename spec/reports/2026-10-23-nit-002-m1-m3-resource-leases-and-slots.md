@@ -15,7 +15,7 @@ sandboxed Bash in `/Users/ripta/projects/nitipan`.
 |-----------|------------|--------|
 | NIT-002 M1 | DONE | `e53b4e3` |
 | NIT-002 M2 | DONE | `bd17947` |
-| NIT-002 M3 | DONE | see row review |
+| NIT-002 M3 | DONE | `44f8042` |
 
 ## Decisions the user made at plan time
 
@@ -161,3 +161,25 @@ Review findings:
 - adr-impact: no conflicts. Two candidates added to the Decision Log. Exit status 10 is `Undecided`. The wait semantics
   wait on NIT-004, since a broker may queue waiters.
 - The sandbox write error takes the non-waitable path but has no test. No test can plant it.
+
+## Row review
+
+Commit for M3: `44f8042 nitipan: let acquire wait for a lease`. Range reviewed: `dff4a6d..44f8042`. The fix commit is
+named in the final review section.
+
+Checks after the fixes: `make ci` passed, and lint reported 0 issues. `proposals.py freeze` with the three row commits
+returned `[]`.
+
+Findings:
+
+- Reviewer, CONFIRMED: a bad `slots.json` warned on every `--wait` attempt, about 150 times in a 5-minute wait.
+  Fixed: a wait passes each distinct warning on once. Other commands are unchanged. A test asserts one warning over
+  several polls.
+- Reviewer, proposal: M1's As built block still said the effective count arrives later and that `slots` is written as
+  1. Fixed as a correction of As built facts, before the proposal is marked implemented.
+- adr-impact: NIT-002 cited the superseded ADR-02 as the envelope ADR in References and two risks. Fixed to ADR-04.
+  Historical Decision Log entries are unchanged.
+- adr-impact: the ADR-04 remote-record point is still rated PLAUSIBLE across the range. It stays dismissed and
+  recorded as an `Undecided` candidate. If it becomes an ADR, that ADR should amend or supersede ADR-04 explicitly.
+- Reviewer, not a finding: the remote and same-machine check repeats in four places. They agree today. A shared helper
+  would be a tidy-up.

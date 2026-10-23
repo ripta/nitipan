@@ -158,6 +158,26 @@ func TestWaitOnAFullSlotIsGrantedOnceOneHolderReleases(t *testing.T) {
 	wantStatus(t, w.run(c, "acquire", "--resource", "gpu:main", "--wait", "30s"), exitcode.OK)
 }
 
+func TestWaitWarnsAboutABadSlotConfigOnce(t *testing.T) {
+	w := newWorld(t)
+	w.writeSlots(`{"version": 1, "slots": {"gpu:main": 0}}`)
+
+	w.acquireOK(w.claude(200, "s1"), "--resource", "gpu:main")
+
+	wt := w.fakeWait(nil)
+
+	res := w.run(w.claude(300, "s2"), "acquire", "--resource", "gpu:main", "--wait", "5s")
+	wantStatus(t, res, exitcode.WaitTimeout)
+
+	if len(wt.slept) < 3 {
+		t.Fatalf("slept %d times, want several attempts", len(wt.slept))
+	}
+
+	if got := strings.Count(res.Stderr, "Ask the user to fix it"); got != 1 {
+		t.Errorf("the warning appeared %d times, want once:\n%s", got, res.Stderr)
+	}
+}
+
 func TestWaitHoldsTheLockOnlyDuringEachAttempt(t *testing.T) {
 	w := newWorld(t)
 	holder, other, waiting := w.claude(200, "s1"), w.claude(300, "s2"), w.claude(400, "s3")

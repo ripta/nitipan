@@ -49,6 +49,28 @@ func (e *WaitTimeoutError) Error() string {
 // Is matches the timeout status.
 func (e *WaitTimeoutError) Is(target error) bool { return target == exitcode.ErrWaitTimeout }
 
+// warnOnce returns a copy of the engine that reports each distinct warning once. A wait runs an attempt
+// per poll, and a standing problem such as a bad slot config would otherwise print on every one.
+func (e *Engine) warnOnce() *Engine {
+	seen := map[string]bool{}
+	next := e.Notify
+
+	next.Warn = func(err error) {
+		if seen[err.Error()] {
+			return
+		}
+
+		seen[err.Error()] = true
+
+		e.Notify.warn(err)
+	}
+
+	cp := *e
+	cp.Notify = next
+
+	return &cp
+}
+
 func indent(s string) string {
 	return "  " + strings.ReplaceAll(s, "\n", "\n  ")
 }
@@ -60,6 +82,8 @@ func indent(s string) string {
 // The lock is held only inside each attempt. Every other error returns at once, with its own status.
 // The last attempt runs at the deadline, so a holder that released just before it is still seen.
 func (e *Engine) AcquireWait(req AcquireRequest, timeout time.Duration) (*AcquireResult, error) {
+	e = e.warnOnce()
+
 	start := e.Now()
 	deadline := start.Add(timeout)
 	delay := waitFirst
