@@ -183,3 +183,39 @@ Findings:
   recorded as an `Undecided` candidate. If it becomes an ADR, that ADR should amend or supersede ADR-04 explicitly.
 - Reviewer, not a finding: the remote and same-machine check repeats in four places. They agree today. A shared helper
   would be a tidy-up.
+
+After the fixes, NIT-002 was marked `implemented` in the proposal and the index. The row already sat above every
+unfinished row in `queue.md`, so the queue did not change. `proposals.py check` returned `[]`.
+
+## Final review
+
+Range: `dff4a6d..9a08f83`. Commits, in order:
+
+1. `e53b4e3 nitipan: add resource leases`
+2. `bd17947 nitipan: add counted slots for resource leases`
+3. `44f8042 nitipan: let acquire wait for a lease`
+4. `6125488 nitipan: warn once about a bad slot config during a wait`
+5. `9a08f83 spec: mark NIT-002 implemented`
+
+The reviewer reported no findings, including on the ADR review. The range touches no ADR file, and the proposal's ADR
+references are correct. adr-impact reported no conflicts and no new candidates. `proposals.py freeze` with all five
+commits returned `[]`. `make ci` passed on `9a08f83`, run by the coordinator, since the reviewers' sandboxes could not
+build.
+
+## ADR candidates for the user
+
+All are in NIT-002's Decision Log. None was written.
+
+- Remote resource records never overlap or count (departs from the past). This narrows ADR-04's other-machine rule
+  for one kind. If written, it should amend or supersede ADR-04 explicitly. `Undecided`.
+- Writers stamp the lowest minor a record's fields use (cuts across the system). `Undecided`.
+- Exit status 10 means a `--wait` timed out (hard to reverse). `Undecided`.
+- Waiting is bounded polling with no queue (cuts across the system). Waits on NIT-004 reaching `accepted`.
+- The three 2026-10-18 candidates: the name grammar and kind `resource`, one record per slot holder, and `slots.json`
+  with the minimum rule. Their hooks fired when NIT-001 was accepted, and their outcomes are still open.
+
+## Left open
+
+- No row is held or blocked. No stash was made.
+- The run found no freeze hunks from other sessions, and no findings were left for the user.
+- Four lines in NIT-002 that predate this run exceed 120 columns. The run did not reflow them.
