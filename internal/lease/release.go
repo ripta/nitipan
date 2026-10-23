@@ -9,17 +9,22 @@ import (
 	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/exitcode"
 	"github.com/space-armada/nitipan/internal/keys"
+	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/state"
 )
 
-// ReleaseRequest names what to release. Exactly one of IDs, Domain, and All is set. A release never
-// acts on a target the caller did not name.
+// ReleaseRequest names what to release. Exactly one of IDs, Domain, Resource, and All is set. A
+// release never acts on a target the caller did not name.
 type ReleaseRequest struct {
 	Holder adapter.Holder
 	IDs    []string
 	Domain *Domain
-	All    bool
+
+	// Resource matches the caller's lease whose resource name is equal.
+	Resource string
+
+	All bool
 }
 
 // ReleaseResult lists the leases that were removed.
@@ -58,10 +63,12 @@ func (e *Engine) Release(req ReleaseRequest) (*ReleaseResult, error) {
 		targets = slices.Clone(c.mine)
 	case req.Domain != nil:
 		targets, err = c.resolveDomain(claimed)
+	case req.Resource != "":
+		targets, err = c.resolveResource(req.Resource)
 	case len(req.IDs) > 0:
 		targets, err = c.resolveIDs(req.IDs)
 	default:
-		err = usagef("release needs a lease ID, a domain, or --all; %s", c.leaseList())
+		err = usagef("release needs a lease ID, a domain, a resource, or --all; %s", c.leaseList())
 	}
 
 	if err != nil {
@@ -150,6 +157,21 @@ func (c *call) notFound(id string) error {
 	return failf(exitcode.ErrNoSuchLease, "no such lease %s; %s", id, c.leaseList())
 }
 
+// resolveResource matches the caller's lease whose resource name equals the one given.
+func (c *call) resolveResource(name string) ([]*entry, error) {
+	if err := keys.ValidateResource(name); err != nil {
+		return nil, usagef("%v", err)
+	}
+
+	for _, en := range c.mine {
+		if held, ok := en.resource(); ok && held == name && liveness.SameMachine(c.e.Machine, en.Rec.Machine) {
+			return []*entry{en}, nil
+		}
+	}
+
+	return nil, failf(exitcode.ErrNoSuchLease, "no lease of yours is on the resource %s; %s", name, c.leaseList())
+}
+
 // resolveDomain matches the caller's leases whose canonical key set equals the domain. It works from
 // the stored keys, so the lease of a deleted worktree can still be released.
 func (c *call) resolveDomain(claimed keys.Domain) ([]*entry, error) {
@@ -171,7 +193,7 @@ func (c *call) resolveDomain(claimed keys.Domain) ([]*entry, error) {
 
 	for _, en := range c.mine {
 		if en.Rec.Footprint.Overlaps(fp, c.e.Finder) {
-			partial = append(partial, fmt.Sprintf("%s (%s)", en.ID, en.pathList()))
+			partial = append(partial, fmt.Sprintf("%s (%s)", en.ID, en.domainList()))
 		}
 	}
 

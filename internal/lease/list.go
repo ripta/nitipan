@@ -14,10 +14,14 @@ import (
 	"github.com/space-armada/nitipan/internal/state"
 )
 
-// ListRequest filters the output. A nil Domain lists every lease. Otherwise it lists the leases that
-// overlap the domain, by nitipan's own canonicalization and overlap rule.
+// ListRequest filters the output. With no Domain or Resource it lists every lease. Otherwise it lists
+// the leases that overlap the domain, by nitipan's own canonicalization and overlap rule, or the ones
+// that hold the resource name.
 type ListRequest struct {
 	Domain *Domain
+
+	// Resource lists the leases whose footprint overlaps the resource name. It excludes Domain.
+	Resource string
 
 	// Caller is who runs the command: the holder when an agent matched, an anonymous process
 	// otherwise. Tombstones are delivered to it. A caller with no adapter holds nothing, so it has
@@ -47,19 +51,28 @@ type ListResult struct {
 func (e *Engine) List(req ListRequest) (*ListResult, error) {
 	res := &ListResult{}
 
-	if req.Domain != nil {
+	switch {
+	case req.Domain != nil && req.Resource != "":
+		return nil, usagef("list takes a domain or a resource, not both")
+	case req.Domain != nil:
 		d, err := e.Canon.Domain(req.Domain.Checkout, req.Domain.Scopes)
 		if err != nil {
 			return nil, usagef("%v", err)
 		}
 
-		return e.list(req, res, &d)
+		return e.list(req, res, record.PathFootprint(d.Keys), true)
+	case req.Resource != "":
+		if err := keys.ValidateResource(req.Resource); err != nil {
+			return nil, usagef("%v", err)
+		}
+
+		return e.list(req, res, record.ResourceFootprint(req.Resource), true)
 	}
 
-	return e.list(req, res, nil)
+	return e.list(req, res, record.Footprint{}, false)
 }
 
-func (e *Engine) list(req ListRequest, res *ListResult, filter *keys.Domain) (*ListResult, error) {
+func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint, filtered bool) (*ListResult, error) {
 	l, err := e.Dir.Lock()
 
 	var c *call
@@ -98,7 +111,7 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter *keys.Domain) (*L
 		return nil, errors.New("listing needs an Emit function to write its output")
 	}
 
-	out := c.output(filter)
+	out := c.output(filter, filtered)
 
 	canWrite := c.l != nil && c.l.FormatErr() == nil
 
@@ -122,7 +135,7 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter *keys.Domain) (*L
 
 // output builds the document. A record this binary cannot use always appears, as an unknown entry,
 // because it may overlap the filter.
-func (c *call) output(filter *keys.Domain) listing.Output {
+func (c *call) output(filter record.Footprint, filtered bool) listing.Output {
 	var out listing.Output
 
 	shared := c.sharedNames()
@@ -134,12 +147,13 @@ func (c *call) output(filter *keys.Domain) listing.Output {
 			continue
 		}
 
-		if filter != nil && !en.Rec.Footprint.Overlaps(record.PathFootprint(filter.Keys), c.e.Finder) {
+		if filtered && !en.Rec.Footprint.Overlaps(filter, c.e.Finder) {
 			continue
 		}
 
 		lease := listing.FromRecord(en.Rec, en.Live)
 		lease.Hint = en.Hint
+		lease.Remote = en.Rec.Domain.Kind == record.KindResource && !liveness.SameMachine(c.e.Machine, en.Rec.Machine)
 		lease.NameShared = shared[en.Rec.Holder.Name] && en.Rec.Holder.Name != ""
 
 		out.Leases = append(out.Leases, lease)

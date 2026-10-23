@@ -15,8 +15,9 @@ import (
 	"github.com/space-armada/nitipan/internal/record"
 )
 
-// SchemaVersion is the version of the output schema.
-const SchemaVersion = "1.0"
+// SchemaVersion is the version of the output schema. Minor 1 adds the domain kind "resource" and the
+// remote flag.
+const SchemaVersion = "1.1"
 
 // Output is the whole `list --json` document.
 type Output struct {
@@ -64,27 +65,32 @@ type Liveness struct {
 // A lease of an unknown kind carries its envelope only. A record nitipan cannot use is an unknown
 // entry with its file name and the raw fields that could be read.
 type Lease struct {
-	ID            string                     `json:"id,omitempty"`
-	File          string                     `json:"file,omitempty"`
-	Version       string                     `json:"version,omitempty"`
-	Kind          string                     `json:"kind,omitempty"`
-	Usable        bool                       `json:"usable"`
-	Liveness      Liveness                   `json:"liveness"`
-	Hint          string                     `json:"hint,omitempty"`
-	Footprint     *record.Footprint          `json:"footprint,omitempty"`
-	ClearWhenDead *bool                      `json:"clear_when_dead,omitempty"`
-	Machine       *record.Machine            `json:"machine,omitempty"`
-	Holder        *record.Holder             `json:"holder,omitempty"`
-	Reach         string                     `json:"reach,omitempty"`
-	Domain        *record.Domain             `json:"domain,omitempty"`
-	ActingFor     string                     `json:"acting_for,omitempty"`
-	Mode          string                     `json:"permission_mode,omitempty"`
-	Description   string                     `json:"description,omitempty"`
-	AcquiredAt    *time.Time                 `json:"acquired_at,omitempty"`
-	Absorbs       []string                   `json:"absorbs,omitempty"`
-	NameShared    bool                       `json:"name_shared,omitempty"`
-	UnusableWhy   string                     `json:"unusable_reason,omitempty"`
-	RawFields     map[string]json.RawMessage `json:"raw_fields,omitempty"`
+	ID            string            `json:"id,omitempty"`
+	File          string            `json:"file,omitempty"`
+	Version       string            `json:"version,omitempty"`
+	Kind          string            `json:"kind,omitempty"`
+	Usable        bool              `json:"usable"`
+	Liveness      Liveness          `json:"liveness"`
+	Hint          string            `json:"hint,omitempty"`
+	Footprint     *record.Footprint `json:"footprint,omitempty"`
+	ClearWhenDead *bool             `json:"clear_when_dead,omitempty"`
+	Machine       *record.Machine   `json:"machine,omitempty"`
+	Holder        *record.Holder    `json:"holder,omitempty"`
+	Reach         string            `json:"reach,omitempty"`
+	Domain        *record.Domain    `json:"domain,omitempty"`
+	ActingFor     string            `json:"acting_for,omitempty"`
+	Mode          string            `json:"permission_mode,omitempty"`
+	Description   string            `json:"description,omitempty"`
+	AcquiredAt    *time.Time        `json:"acquired_at,omitempty"`
+	Absorbs       []string          `json:"absorbs,omitempty"`
+	NameShared    bool              `json:"name_shared,omitempty"`
+
+	// Remote is true on a resource lease written on another machine. Another machine's resource is a
+	// different resource, so a consumer that counts the holders of a name skips these.
+	Remote bool `json:"remote,omitempty"`
+
+	UnusableWhy string                     `json:"unusable_reason,omitempty"`
+	RawFields   map[string]json.RawMessage `json:"raw_fields,omitempty"`
 }
 
 // FromRecord builds the entry for a usable record.

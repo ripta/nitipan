@@ -134,7 +134,7 @@ func (s *Service) SetMark(l *state.Locked, dir string, host adapter.Holder, sess
 	}
 
 	m := &Mark{
-		Version:   record.Current,
+		Version:   record.SessionVersion,
 		Agent:     AgentOpencode,
 		Session:   session,
 		PID:       host.PID,

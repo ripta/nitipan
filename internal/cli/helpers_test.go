@@ -247,6 +247,10 @@ type plantSpec struct {
 	Paths   []string
 	Version string
 
+	// Resource plants a record of kind resource on this name, with a footprint and body that agree.
+	// Paths stays empty.
+	Resource string
+
 	// KeepAfterDeath is true to write clear_when_dead false.
 	KeepAfterDeath bool
 
@@ -273,6 +277,10 @@ func (w *world) plant(spec plantSpec) string {
 
 	if spec.Version == "" {
 		spec.Version = "1.0"
+
+		if spec.Resource != "" {
+			spec.Version = "1.1"
+		}
 	}
 
 	if spec.Machine == (record.Machine{}) {
@@ -285,6 +293,10 @@ func (w *world) plant(spec plantSpec) string {
 
 	if spec.Kind == "" {
 		spec.Kind = record.KindPath
+
+		if spec.Resource != "" {
+			spec.Kind = record.KindResource
+		}
 	}
 
 	if spec.Liveness == "" {
@@ -299,6 +311,18 @@ func (w *world) plant(spec plantSpec) string {
 		domainKeys = append(domainKeys, map[string]any{"path": p})
 	}
 
+	domain := map[string]any{"kind": spec.Kind}
+
+	switch {
+	case spec.Resource != "":
+		footprint = append(footprint, map[string]any{"type": "name", "name": spec.Resource})
+		domain["name"] = spec.Resource
+		domain["slots"] = 1
+	default:
+		domain["checkout"] = spec.Paths[0]
+		domain["keys"] = domainKeys
+	}
+
 	doc := map[string]any{
 		"version":         spec.Version,
 		"id":              spec.ID,
@@ -311,7 +335,7 @@ func (w *world) plant(spec plantSpec) string {
 			"start": map[string]any{"platform": "darwin", "sec": spec.PID},
 		},
 		"reach":       "machine",
-		"domain":      map[string]any{"kind": spec.Kind, "checkout": spec.Paths[0], "keys": domainKeys},
+		"domain":      domain,
 		"acting_for":  "someone",
 		"acquired_at": "2026-10-19T12:00:00Z",
 	}

@@ -48,10 +48,10 @@ func TestListJSONEmitsALeaseOfAnUnknownKindWithLivenessAndFootprint(t *testing.T
 	w := newWorld(t)
 	w.table.Add(77, proctest.Process{Start: startOf(77)})
 
-	id := w.plant(plantSpec{PID: 77, Paths: []string{w.dir("repo")}, Version: "1.3", Kind: "resource"})
+	id := w.plant(plantSpec{PID: 77, Paths: []string{w.dir("repo")}, Version: "1.3", Kind: "future"})
 
 	doc := w.listJSON(w.terminal(900))
-	if doc["schema_version"] != "1.0" {
+	if doc["schema_version"] != "1.1" {
 		t.Errorf("schema_version = %v", doc["schema_version"])
 	}
 
@@ -62,7 +62,7 @@ func TestListJSONEmitsALeaseOfAnUnknownKindWithLivenessAndFootprint(t *testing.T
 
 	lease := leases[0]
 
-	if lease["id"] != id || lease["kind"] != "resource" || lease["usable"] != true || liveStatus(t, lease) != "alive" {
+	if lease["id"] != id || lease["kind"] != "future" || lease["usable"] != true || liveStatus(t, lease) != "alive" {
 		t.Errorf("lease = %v", lease)
 	}
 

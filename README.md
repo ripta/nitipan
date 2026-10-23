@@ -36,9 +36,35 @@ session instead, through the hooks and plugins that `setup` prints.
 Leases live under `~/.local/state/nitipan/`. That directory must be on a local disk. A sandboxed agent needs a write
 allowance for it.
 
-Later versions add resource leases, such as `cpu:heavy`, and a self-hosted broker that works across machines. Callers
+Later versions add counted slots, waiting for a lease, and a self-hosted broker that works across machines. Callers
 will not change when the broker arrives. See the
 [broker research](spec/reports/2026-10-18-lease-broker-research.md).
+
+## Resource leases
+
+A resource lease names a machine resource instead of a path. `nitipan acquire --resource cpu:heavy` claims "all cores"
+for a full build or test run. A second live claim on the same name is refused, and the refusal names the holder.
+`release --resource` and `list --resource` take the same name.
+
+A name is `<namespace>:<name>`. Each part holds lowercase letters, digits, `-`, `_`, and `.`. The whole name is at most
+64 bytes. A name outside that grammar is refused and never folded. When the only problem is case, the error suggests
+the lowercase spelling. The `repo` namespace is reserved.
+
+Names are flat. Two names overlap only when they are equal, so `cpu:heavy` and `cpu:light` never see each other. A
+resource never overlaps a path lease. `--replace` does not apply to resource leases. Release the old one and acquire the
+new one.
+
+A resource belongs to its machine. A resource lease from another machine, as on a shared home directory, blocks nothing.
+`list` marks it remote.
+
+`--slots <N>` states the count you expect for the resource. Every name is exclusive for now, so only `--slots 1` is
+accepted.
+
+Resource leases are advisory. They coordinate cooperating sessions only. A process that never calls nitipan can still
+use every core.
+
+Acquire resources from the parent session only. Subagents share their parent's holder, so two subagents that both claim
+`cpu:heavy` both succeed, and the first to release frees the name while the other still runs.
 
 ## Codex and opencode
 

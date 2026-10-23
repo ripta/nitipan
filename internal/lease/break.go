@@ -196,7 +196,7 @@ func (c *call) planLease(en *entry, req BreakRequest) (breakPlan, error) {
 	case dead && !req.Force:
 		return breakPlan{}, failf(exitcode.ErrRefused, "lease %s on %s is held by %s, which has died, but its record asks "+
 			"that only a newer nitipan clear it (record version %s, this nitipan writes %s). Upgrade nitipan, "+
-			"coordinate with the holder, or ask the user.", en.ID, en.pathList(), describeHolder(rec.Holder),
+			"coordinate with the holder, or ask the user.", en.ID, en.domainList(), describeHolder(rec.Holder),
 			rec.Version, record.Current)
 	case dead:
 		return breakPlan{id: en.ID, outcome: Cleared, lease: en}, nil
@@ -212,7 +212,7 @@ func (c *call) planLease(en *entry, req BreakRequest) (breakPlan, error) {
 // liveHolderRefusal names the holder. It never names the flag that overrides it, because an agent
 // follows the command its error names.
 func (c *call) liveHolderRefusal(en *entry) string {
-	msg := fmt.Sprintf("lease %s on %s is held by %s", en.ID, en.pathList(), describeHolder(en.Rec.Holder))
+	msg := fmt.Sprintf("lease %s on %s is held by %s", en.ID, en.domainList(), describeHolder(en.Rec.Holder))
 
 	if en.Live.Status != liveness.Alive {
 		msg += fmt.Sprintf(" (its liveness is unknown, which counts as alive: %s)", en.Live.Reason)
@@ -276,9 +276,13 @@ func (c *call) writeTombstone(en *entry, req BreakRequest) (*record.Tombstone, e
 		}
 	}
 
+	if name, ok := en.resource(); ok {
+		paths = append(paths, name)
+	}
+
 	t := &record.Tombstone{
 		Envelope: record.Envelope{
-			Version:       record.Current,
+			Version:       record.TombstoneVersion,
 			ID:            c.e.NewID(),
 			Footprint:     record.NoneFootprint(),
 			ClearWhenDead: true,

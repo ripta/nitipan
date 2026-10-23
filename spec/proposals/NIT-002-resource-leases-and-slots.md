@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-20
+**Updated:** 2026-10-23
 
 ## Dependencies
 
@@ -106,7 +106,8 @@ record.
 
 ### Record and output versions
 
-Resource records and the slot count arrive in a minor version of NIT-001's major.
+Resource records and the slot count arrive in a minor version of NIT-001's major. Resource records are version 1.1, and
+`list --json` is schema 1.1. Amended 2026-10-23; see Decision Log.
 
 - The body of kind `resource` holds `name` and `slots`, the N the holder was admitted under. The footprint is exactly
   one `name` entry equal to `name`. A mismatch makes the record unusable, per NIT-001's footprint check
@@ -161,10 +162,10 @@ under a strict grammar with an explicit flag, free text compared byte for byte, 
 a path by its shape.
 
 Decision (autonomous): a resource name is `<namespace>:<name>` under a strict grammar. The record's `domain.kind` is
-`resource`. On the CLI, a resource is given with `--resource <name>`. Amended 2026-10-18; see Decision Log.
+`resource`. On the CLI, a resource is given with `--resource <name>`. Amended 2026-10-23; see Decision Log.
 
 - Each part holds lowercase ASCII letters, digits, `-`, `_`, and `.`. There is exactly one colon, both parts are
-  non-empty, and the whole name has a length limit
+  non-empty, and the whole name is at most 64 bytes
 - A name outside the grammar is refused, never folded, so the stored name is the only spelling. When a name is refused
   for case, the error suggests the lowercase spelling without applying it
 - The namespace `repo` is refused at `machine` reach. NIT-004 drafts `repo:` names for wider reach, and a machine
@@ -263,7 +264,7 @@ None.
 
 ### M1: Resource leases
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `acquire --resource` claims a resource name, and a second live claim on it is refused with the holder named
 - A resource lease never overlaps a path lease
@@ -279,6 +280,28 @@ None.
 - A binary that knows only NIT-001's version, reading a resource record, does not block path claims with it, does not
   clear it during a path claim, needs `--force` to `break` it, and never rewrites it
 - `list --json` keeps every resource lease as a top-level entry, and gives no effective count on a remote one
+
+**As built:**
+
+- A NIT-001-only binary was checked against a record the new binary wrote. The binary came from the run's base commit,
+  built from a `git archive` copy, and its own test harness drove it over a temporary state directory. With the holder
+  alive and with it dead, a path claim by another session and by the holder itself succeeded and left the record
+  byte-identical. `break` without `--force` was refused in both states, and `break --force` removed it. `advertise` by
+  the holder was refused as a newer minor and left the record unchanged. `list --json` showed it as kind `resource`
+  with its footprint and no domain. That binary reads a dead holder's record as unclearable, as the envelope rules
+  require. The check script was not kept.
+- The effective count is not in the output yet, so no lease carries one and the remote lease check holds trivially. The
+  count arrives with M2. The `remote` flag is set on resource leases only, since path leases from another machine keep
+  counting as alive.
+- A claim skips another machine's record only when its kind is `resource`. A remote record of an unknown kind with a
+  footprint of `all` still blocks, as the envelope requires.
+- The resource body carries `slots`, written as 1, so M2 needs no record change. M1 judges a re-acquire against the
+  record's count and a new claim against a count of 1.
+- A resource name given to `release` and `list` passes the same grammar, so a typo gets the lowercase suggestion there
+  too.
+- An empty `--resource ""` reads back from the flag library as no value, which would have claimed the working
+  directory. It is refused as a usage error.
+- A broken resource lease puts its name in the tombstone's `paths`, so the notice reads "lease ID on cpu:heavy".
 
 ### M2: Counted slots
 
@@ -386,6 +409,18 @@ None.
   "still in design". The hooks on the three ADR candidates above have fired, since NIT-001 is accepted with the
   cross-type rule. Their outcomes are left for the user to choose.
 - 2026-10-20: Scheduled as NIT-002 M1-M3 in queue.md.
+- 2026-10-23 (run best guess): Amended "Record and output versions" and "Name syntax". The text said only "a minor" and
+  "a length limit". It now says resource records are version 1.1, `list --json` is schema 1.1, and a name is at most 64
+  bytes. Nothing stored changes if a later run picks other numbers, since each is one constant. Loosening the length
+  limit later breaks no stored name. The same run settled exit statuses without changing the text. A bad name, a second
+  `--resource`, `--resource` with path flags, and `--slots` on a path claim exit as usage. `--replace` on a resource
+  claim or lease, and a `--slots` that differs from the count that applies, exit as refused.
+- 2026-10-23: ADR candidate (departs from the past): another machine's `resource` record never overlaps a claim or
+  counts toward a slot, although ADR-04 reads every other-machine record as alive. Later proposals that add kinds must
+  say whether they follow it. Undecided. Found in NIT-002 M1.
+- 2026-10-23: ADR candidate (cuts across the system): a writer stamps the lowest minor whose fields a record uses, so
+  path records, tombstones, and session files stay 1.0 while the binary reads 1.1. Every later minor must follow it.
+  Undecided. Found in NIT-002 M1.
 
 ## References
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/space-armada/nitipan/internal/record"
 )
 
 // WriteText prints the leases for a person. The handle and the agent name are labeled apart: the
@@ -81,11 +83,26 @@ func leaseText(l Lease) string {
 
 func domainText(l Lease) string {
 	d := l.Domain
+
+	if d.Kind == record.KindResource {
+		return resourceText(l)
+	}
+
 	if len(d.Scopes) == 0 {
 		return d.Checkout
 	}
 
 	return fmt.Sprintf("%s, scopes %s", d.Checkout, strings.Join(d.Scopes, ", "))
+}
+
+func resourceText(l Lease) string {
+	text := "resource " + l.Domain.Name
+
+	if l.Remote && l.Machine != nil {
+		text += fmt.Sprintf(" (remote, on machine %s)", orNone(l.Machine.Host))
+	}
+
+	return text
 }
 
 func sharedText(l Lease) string {

@@ -23,8 +23,8 @@ type Tombstone struct {
 
 	BrokenAt time.Time `json:"broken_at"`
 
-	// Paths are the canonical keys of the broken lease. They only help the broken holder recognize
-	// the lease, so a reader that does not know the field loses nothing.
+	// Paths are the canonical keys of the broken lease, or its resource name. They only help the
+	// broken holder recognize the lease, so a reader that does not know the field loses nothing.
 	Paths []string `json:"paths,omitempty"`
 
 	// Kind says what the notice reports. Empty means a break, which is what every tombstone meant

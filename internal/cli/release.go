@@ -15,17 +15,18 @@ func (a *app) releaseCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "release [lease-id ...]",
 		Short: "Give up a lease you hold",
-		Long: `Give up leases you hold. Name them by lease ID, by the domain flags, or with --all.
+		Long: `Give up leases you hold. Name them by lease ID, by the domain flags, by --resource, or with --all.
 
 The domain flags match a lease whose canonical keys equal them, using the keys stored in the lease,
-so the lease of a deleted worktree can still be released. With no target, release refuses and lists
-your leases.`,
+so the lease of a deleted worktree can still be released. --resource matches a lease whose resource
+name is equal. With no target, release refuses and lists your leases.`,
 		RunE: func(cmd *cobra.Command, ids []string) error {
 			return a.wrapErr(a.runRelease(cmd, ids))
 		},
 	}
 
 	addDomainFlags(cmd, "whose lease to release")
+	addResourceFlag(cmd, "name of the resource whose lease to release")
 	cmd.Flags().Bool("all", false,
 		"release every lease you hold; subagents share their parent's holder, so this releases the parent's leases too")
 
@@ -75,19 +76,25 @@ func (a *app) releaseRequest(cmd *cobra.Command, ids []string) (lease.ReleaseReq
 		return lease.ReleaseRequest{}, fmt.Errorf("reading --all: %w", err)
 	}
 
+	resource, err := resourceName(cmd)
+	if err != nil {
+		return lease.ReleaseRequest{}, err
+	}
+
 	given := 0
 
-	for _, set := range []bool{len(ids) > 0, domainGiven(cmd), all} {
+	for _, set := range []bool{len(ids) > 0, domainGiven(cmd), resource != "", all} {
 		if set {
 			given++
 		}
 	}
 
 	if given > 1 {
-		return lease.ReleaseRequest{}, fmt.Errorf("%w: name lease IDs, a domain, or --all, not a mix", exitcode.ErrUsage)
+		return lease.ReleaseRequest{}, fmt.Errorf("%w: name lease IDs, a domain, a resource, or --all, not a mix",
+			exitcode.ErrUsage)
 	}
 
-	req := lease.ReleaseRequest{IDs: ids, All: all}
+	req := lease.ReleaseRequest{IDs: ids, All: all, Resource: resource}
 
 	if domainGiven(cmd) {
 		d, err := a.domain(cmd)

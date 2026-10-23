@@ -157,6 +157,36 @@ func addDomainFlags(cmd *cobra.Command, what string) {
 	cmd.Flags().StringArray("scope", nil, "path scope inside the checkout; repeat for several")
 }
 
+func addResourceFlag(cmd *cobra.Command, help string) {
+	cmd.Flags().StringArray("resource", nil, help)
+}
+
+// resourceName reads --resource. It refuses a second one, since a lease names one resource, and any
+// mix with the domain flags, since a resource is not a path. The name is checked against the grammar
+// by the engine.
+func resourceName(cmd *cobra.Command) (string, error) {
+	names, err := cmd.Flags().GetStringArray("resource")
+	if err != nil {
+		return "", fmt.Errorf("reading --resource: %w", err)
+	}
+
+	switch {
+	case !cmd.Flags().Changed("resource"):
+		return "", nil
+	case len(names) > 1:
+		return "", fmt.Errorf("%w: give one --resource per call, since a lease names one resource", exitcode.ErrUsage)
+	case domainGiven(cmd):
+		return "", fmt.Errorf("%w: --resource names a resource, not a path, so it cannot be combined with --checkout or "+
+			"--scope", exitcode.ErrUsage)
+	case len(names) == 0 || names[0] == "":
+		// An empty value reads back as no value at all, and must never turn into a claim on the working
+		// directory.
+		return "", fmt.Errorf("%w: --resource needs a name, such as cpu:heavy", exitcode.ErrUsage)
+	}
+
+	return names[0], nil
+}
+
 // domainGiven reports whether either domain flag was passed.
 func domainGiven(cmd *cobra.Command) bool {
 	return cmd.Flags().Changed("checkout") || cmd.Flags().Changed("scope")
@@ -171,6 +201,20 @@ func optString(cmd *cobra.Command, name string) *string {
 	v, _ := cmd.Flags().GetString(name)
 
 	return &v
+}
+
+// optInt returns the flag's value, or nil when the flag was left out.
+func optInt(cmd *cobra.Command, name string) (*int, error) {
+	if !cmd.Flags().Changed(name) {
+		return nil, nil
+	}
+
+	v, err := cmd.Flags().GetInt(name)
+	if err != nil {
+		return nil, fmt.Errorf("reading --%s: %w", name, err)
+	}
+
+	return &v, nil
 }
 
 func noArgs(cmd *cobra.Command, args []string) error {

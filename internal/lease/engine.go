@@ -92,16 +92,30 @@ func (en *entry) file() string {
 	return en.Path
 }
 
-// keysOf returns the canonical keys of a record whose body this binary understands.
+// keysOf returns the canonical keys of a path record whose body this binary understands.
 func (en *entry) keysOf() ([]keys.Key, bool) {
-	if en.Rec == nil || !en.Rec.BodyKnown {
+	if en.Rec == nil || !en.Rec.BodyKnown || en.Rec.Domain.Kind != record.KindPath {
 		return nil, false
 	}
 
 	return en.Rec.Domain.Keys, true
 }
 
-func (en *entry) pathList() string {
+// resource returns the name of a resource record whose body this binary understands.
+func (en *entry) resource() (string, bool) {
+	if en.Rec == nil || !en.Rec.BodyKnown || en.Rec.Domain.Kind != record.KindResource {
+		return "", false
+	}
+
+	return en.Rec.Domain.Name, true
+}
+
+// domainList names what a lease holds: its paths, or its resource name.
+func (en *entry) domainList() string {
+	if name, ok := en.resource(); ok {
+		return name
+	}
+
 	ks, ok := en.keysOf()
 	if !ok {
 		return "an unreadable domain"
@@ -330,7 +344,7 @@ func (c *call) leaseList() string {
 
 	parts := make([]string, len(c.mine))
 	for i, en := range c.mine {
-		parts[i] = fmt.Sprintf("%s (%s)", en.ID, en.pathList())
+		parts[i] = fmt.Sprintf("%s (%s)", en.ID, en.domainList())
 	}
 
 	return "your leases are " + strings.Join(parts, "; ")
