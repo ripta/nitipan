@@ -15,7 +15,9 @@ func (a *app) listCmd() *cobra.Command {
 		Short: "Print every lease with its holder's liveness",
 		Long: `Print every lease with its holder's liveness. With the domain flags, print only the leases that
 overlap that domain, by nitipan's own canonicalization and overlap rule. With --resource, print the
-leases on that resource name. A resource lease written on another machine is marked remote.
+leases on that resource name. A resource lease written on another machine is marked remote. A local
+resource lease shows how many holders its name admits and which leases hold it. The text output also
+prints where the counts are configured.
 
 --json is the supported interface for scripts and guardians. Its schema is versioned apart from the
 lease files, which are nitipan's own format. A liveness of "unknown" means treat the holder as alive.`,

@@ -22,6 +22,7 @@ const (
 	childEnv       = "NITIPAN_TEST_RACE_CHILD"
 	childStateEnv  = "NITIPAN_TEST_RACE_STATE"
 	childCheckEnv  = "NITIPAN_TEST_RACE_CHECKOUT"
+	childSlotEnv   = "NITIPAN_TEST_RACE_RESOURCE"
 	raceChildren   = 8
 	raceRounds     = 6
 	childAgentBase = 1000
@@ -80,6 +81,10 @@ func runRaceChild(idx string) int {
 		args = append(args, "--scope", "sub")
 	}
 
+	if resource := os.Getenv(childSlotEnv); resource != "" {
+		args = []string{"acquire", "--resource", resource}
+	}
+
 	return Execute(deps, args)
 }
 
@@ -88,7 +93,7 @@ type childResult struct {
 	output string
 }
 
-func startRaceChild(t *testing.T, idx int, stateDir, checkout string, release <-chan struct{}) <-chan childResult {
+func startRaceChild(t *testing.T, idx int, stateDir, checkout, resource string, release <-chan struct{}) <-chan childResult {
 	t.Helper()
 
 	done := make(chan childResult, 1)
@@ -98,6 +103,7 @@ func startRaceChild(t *testing.T, idx int, stateDir, checkout string, release <-
 		childEnv+"="+strconv.Itoa(idx),
 		childStateEnv+"="+stateDir,
 		childCheckEnv+"="+checkout,
+		childSlotEnv+"="+resource,
 	)
 
 	stdin, err := cmd.StdinPipe()
@@ -151,7 +157,7 @@ func TestAcquireRaceNeverLetsTwoOverlappingClaimsSucceed(t *testing.T) {
 
 		var results []<-chan childResult
 		for i := 0; i < raceChildren; i++ {
-			results = append(results, startRaceChild(t, i, stateDir, checkout, release))
+			results = append(results, startRaceChild(t, i, stateDir, checkout, "", release))
 		}
 
 		close(release)
@@ -194,6 +200,76 @@ func TestAcquireRaceNeverLetsTwoOverlappingClaimsSucceed(t *testing.T) {
 
 		if published != 1 {
 			t.Errorf("round %d: %d records published, want 1", round, published)
+		}
+	}
+}
+
+func TestAcquireRaceNeverExceedsTheSlotCount(t *testing.T) {
+	const slots = 2
+
+	for round := 0; round < raceRounds; round++ {
+		root, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		stateDir := filepath.Join(root, "state")
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		config := fmt.Sprintf(`{"version": 1, "slots": {"gpu:main": %d}}`, slots)
+		if err := os.WriteFile(filepath.Join(stateDir, "slots.json"), []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		release := make(chan struct{})
+
+		var results []<-chan childResult
+		for i := 0; i < raceChildren; i++ {
+			results = append(results, startRaceChild(t, i, stateDir, "", "gpu:main", release))
+		}
+
+		close(release)
+
+		var (
+			winners int
+			refused int
+			dump    strings.Builder
+		)
+
+		for i, ch := range results {
+			res := <-ch
+			fmt.Fprintf(&dump, "child %d: status %d\n%s\n", i, res.status, res.output)
+
+			switch res.status {
+			case exitcode.OK:
+				winners++
+			case exitcode.Refused:
+				refused++
+			}
+		}
+
+		if winners != slots || refused != raceChildren-slots {
+			t.Fatalf("round %d: %d winners and %d refusals among %d claims on a slot of %d\n%s",
+				round, winners, refused, raceChildren, slots, dump.String())
+		}
+
+		entries, err := os.ReadDir(filepath.Join(stateDir, state.LeasesDir))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		published := 0
+
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), ".tmp-") {
+				published++
+			}
+		}
+
+		if published != slots {
+			t.Errorf("round %d: %d records published, want %d", round, published, slots)
 		}
 	}
 }

@@ -180,6 +180,9 @@ type call struct {
 	others      []*entry
 	sameProcess map[*entry]bool
 
+	// slots is the slot config as read under the lock. It is nil for a call that never reads it.
+	slots *SlotConfig
+
 	// delivered holds the tombstones this call reported to the caller and removed.
 	delivered []*record.Tombstone
 
@@ -209,6 +212,11 @@ func (e *Engine) begin(h *adapter.Holder) (*call, error) {
 		c.close()
 
 		return nil, err
+	}
+
+	c.slots = LoadSlotConfig(e.Dir.Path())
+	if warning := c.slots.Warning(); warning != "" {
+		e.Notify.warn(errors.New(warning))
 	}
 
 	if err := c.load(); err != nil {

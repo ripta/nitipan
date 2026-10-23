@@ -15,8 +15,8 @@ import (
 	"github.com/space-armada/nitipan/internal/record"
 )
 
-// SchemaVersion is the version of the output schema. Minor 1 adds the domain kind "resource" and the
-// remote flag.
+// SchemaVersion is the version of the output schema. Minor 1 adds the domain kind "resource", the
+// remote flag, and the effective count and live holders of a local resource lease.
 const SchemaVersion = "1.1"
 
 // Output is the whole `list --json` document.
@@ -28,6 +28,10 @@ type Output struct {
 	// in place, marked unknown. It is always an array, empty when there were none, so a consumer never
 	// has to test for absence.
 	Tombstones []Tombstone `json:"tombstones"`
+
+	// SlotConfigPath is where the slot counts are configured. The text output prints it. The JSON
+	// document leaves it out, since a consumer has no use for it.
+	SlotConfigPath string `json:"-"`
 }
 
 // Tombstone actions.
@@ -88,6 +92,12 @@ type Lease struct {
 	// Remote is true on a resource lease written on another machine. Another machine's resource is a
 	// different resource, so a consumer that counts the holders of a name skips these.
 	Remote bool `json:"remote,omitempty"`
+
+	// EffectiveSlots is the number of holders this machine admits on a local resource lease's name.
+	// SlotHolders are the IDs of the live local leases on that name. Both are computed, never stored,
+	// and a remote lease carries neither, since this machine's counts say nothing about another's.
+	EffectiveSlots *int     `json:"effective_slots,omitempty"`
+	SlotHolders    []string `json:"slot_holders,omitempty"`
 
 	UnusableWhy string                     `json:"unusable_reason,omitempty"`
 	RawFields   map[string]json.RawMessage `json:"raw_fields,omitempty"`

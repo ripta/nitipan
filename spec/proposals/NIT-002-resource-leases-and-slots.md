@@ -192,7 +192,7 @@ with a stated N the claim expects. A fifth arose in review: the config file and 
 more holders than any live holder was admitted under.
 
 Decision (autonomous): N comes from a per-machine config file in the state directory, and admission never exceeds the N
-any live holder was admitted under. Amended 2026-10-18; see Decision Log.
+any live holder was admitted under. Amended 2026-10-23; see Decision Log.
 
 - The file is `slots.json` in the state directory NIT-001 resolves. That is the only directory nitipan resolves, and
   `~/.config` is unreadable from inside the Claude Code sandbox. It holds a `version` and a map from names to N, and
@@ -210,8 +210,10 @@ any live holder was admitted under. Amended 2026-10-18; see Decision Log.
   `--slots` on a re-acquire is compared with the record's N, not the config's, and a different value is refused
 - N must be an integer of at least 1. Each name must pass the grammar and must not use `repo`. Any invalid entry or an
   unknown `version` makes the whole file unparseable, and every error in it is reported together
-- An unparseable config treats every name as N = 1. Every call warns with the config's absolute path and its errors,
-  and says to ask the user to fix the file. Path claims are unaffected
+- An unparseable config treats every name as N = 1. Every command that takes the lock or lists warns with the
+  config's absolute path and its errors, and says to ask the user to fix the file. `hook` and `setup` never read
+  leases and do not warn. `list` reads the config without the lock when the lock is busy, the way it reads leases. Path
+  claims are unaffected
 - A refusal for a full slot names the holders and says to ask the user to raise N for that name. It names neither the
   config's path nor an edit to it, the same way NIT-001's errors name no bypass. `list` shows the config's path
 
@@ -305,7 +307,7 @@ None.
 
 ### M2: Counted slots
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - N live holders can hold one slot name, and the N+1th claim is refused
 - A dead holder's slot is freed for the next claim
@@ -324,6 +326,24 @@ None.
   with the path and every error. Path claims are unaffected
 - A full-slot refusal names the holders and says to ask the user to raise N, without printing the config's path
 - `list` and `list --json` show each slot name's effective count and live holders, and `list` shows the config's path
+
+**As built:**
+
+- `list --json` stays at schema 1.1. M1 introduced 1.1 in this same unreleased row, so the effective count and the live
+  holders are part of that minor. The computed fields are `effective_slots` and `slot_holders`. `slot_holders` holds
+  lease IDs, since every lease stays a top-level entry and a consumer joins on the ID.
+- `slots.json` is `{"version": 1, "slots": {"<name>": N}}`. A missing `slots` map means no entries. The loader reports
+  every error it finds, and a file that is not one JSON object reports that one error, since nothing past it can be read.
+- The config warning prints on every call that takes the lock, which covers acquire of any kind, release, break, and
+  advertise, and on `list` whether or not it got the lock. `hook` and `setup` do not warn. The warning goes to stderr,
+  like acquire's other notices.
+- Admission counts the live local records of the name, where unknown liveness counts as alive. A dead record that
+  asks only a newer nitipan to clear it still blocks the claim, as it does for a path. A record of the name whose body
+  this binary cannot read is not a slot holder. It blocks as exclusive.
+- Text `list` always prints the config's path, even with no leases. The JSON document leaves the path out.
+- The raise and lower checks, the retry with the same `--slots` after a config change, the over-count refresh, and the
+  remote exclusion are tests. The race test now also runs 8 children against a slot of 2, and expects exactly 2 winners
+  and 2 records in every round.
 
 ### M3: Waiting
 
@@ -415,6 +435,14 @@ None.
   limit later breaks no stored name. The same run settled exit statuses without changing the text. A bad name, a second
   `--resource`, `--resource` with path flags, and `--slots` on a path claim exit as usage. `--replace` on a resource
   claim or lease, and a `--slots` that differs from the count that applies, exit as refused.
+- 2026-10-23 (run best guess): M2 kept `list --json` at schema 1.1 instead of raising it to 1.2. M1 introduced 1.1 in
+  the same unreleased row, so no consumer has seen a 1.1 without the effective count. "Record and output versions" is
+  unchanged, since it already lists the effective count as a field of the minor. A later release that ships M1 without
+  M2 would need this revisited.
+- 2026-10-23 (run best guess): Amended "Who sets N". The text said an unparseable config warns on "every call". It now
+  says every command that takes the lock or lists warns, that `hook` and `setup` do not since they never read leases,
+  and that `list` reads the config without the lock when the lock is busy. The earlier wording over-promised for
+  commands that never touch leases.
 - 2026-10-23: ADR candidate (departs from the past): another machine's `resource` record never overlaps a claim or
   counts toward a slot, although ADR-04 reads every other-machine record as alive. Later proposals that add kinds must
   say whether they follow it. Undecided. Found in NIT-002 M1.

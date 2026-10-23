@@ -13,8 +13,8 @@ sandboxed Bash in `/Users/ripta/projects/nitipan`.
 
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
-| NIT-002 M1 | DONE | see M2 |
-| NIT-002 M2 | QUEUED | |
+| NIT-002 M1 | DONE | `e53b4e3` |
+| NIT-002 M2 | IN PROGRESS | |
 | NIT-002 M3 | QUEUED | |
 
 ## Decisions the user made at plan time
@@ -87,3 +87,37 @@ Review findings:
 - adr-impact, uncovered decisions: two ADR candidates were added to NIT-002's Decision Log as `Undecided`. One covers
   remote resource records never overlapping. The other covers writers stamping the lowest minor they use. The three
   older NIT-002 candidates still wait on the user's choice. Their hooks fired when NIT-001 was accepted.
+
+### NIT-002 M2
+
+Commit for M1: `e53b4e3 nitipan: add resource leases`. The M2 commit is named under M3's section.
+
+Checks: `make ci` passed, before and after the review fixes. Lint reported 0 issues. `proposals.py check` and
+`proposals.py freeze --row-commit e53b4e3` both returned `[]`.
+
+Best guesses the implementer made:
+
+1. `list --json` stays at schema 1.1. M1 introduced 1.1 in this same unreleased row, so the new computed fields
+   `effective_slots` and `slot_holders` join it. Recorded in the Decision Log. If 1.2 is wanted, it is one constant
+   and the test assertions.
+2. `slot_holders` lists lease IDs. Every lease stays a top-level entry, so a consumer joins on the ID.
+3. The config path is in text `list` only, never in `--json`.
+4. A read error on `slots.json`, such as a permission failure, makes it unparseable and falls back to N = 1. A file
+   that is not one JSON value reports that single error, since nothing past it can be read.
+5. Counts must be JSON integers. `2.0`, `"2"`, and `1.5` are rejected.
+6. A live same-name record whose body this binary cannot read blocks as exclusive. It is not counted as a slot holder.
+7. The full-slot refusal reads "gpu:main has 2 of 2 slots taken." and names the holders through the existing holder
+   lines. When the limit is below the configured N, it adds that a holder admitted under a lower count keeps it there.
+
+Review findings:
+
+- Reviewer, proposal: "Who sets N" said every call warns on an unparseable config. Fixed: amended in place to every
+  command that takes the lock or lists, which is the plan's best guess 7, with a Decision Log entry.
+- Reviewer, plan: `list` printed the config path only when a resource lease was listed, though the proposal says
+  `list` shows it. Fixed in code: text `list` always prints it.
+- Reviewer, tests: three As built claims had no test. Fixed: an unknown-liveness holder takes a slot, a dead
+  unclearable holder blocks, and an unreadable live same-name record blocks as exclusive.
+- Reviewer, PLAUSIBLE: under an unparseable config, stderr on a full-slot refusal carries the config path through the
+  warning. Dismissed. The proposal requires that warning on every call, and the refusal text itself never names the
+  path.
+- adr-impact: no conflicts and no new candidates. The `slots.json` candidate from 2026-10-18 now has a settled shape.

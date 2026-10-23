@@ -412,8 +412,8 @@ func TestListShowsResourceLeasesBesidePathLeases(t *testing.T) {
 			t.Errorf("a local lease carries the remote flag: %v", lease)
 		}
 
-		if _, ok := lease["effective_slots"]; ok {
-			t.Errorf("lease = %v, want no effective count yet", lease)
+		if lease["effective_slots"] != float64(1) {
+			t.Errorf("lease = %v, want an effective count of 1", lease)
 		}
 	}
 }

@@ -265,6 +265,9 @@ type plantSpec struct {
 
 	// SessionID is the holder's session.
 	SessionID string
+
+	// Slots is the count a resource record was admitted under. Zero means 1.
+	Slots int
 }
 
 // plant writes a record for another holder and returns its ID.
@@ -317,7 +320,7 @@ func (w *world) plant(spec plantSpec) string {
 	case spec.Resource != "":
 		footprint = append(footprint, map[string]any{"type": "name", "name": spec.Resource})
 		domain["name"] = spec.Resource
-		domain["slots"] = 1
+		domain["slots"] = max(spec.Slots, 1)
 	default:
 		domain["checkout"] = spec.Paths[0]
 		domain["keys"] = domainKeys
@@ -377,4 +380,17 @@ func (w *world) listJSON(c caller, args ...string) map[string]any {
 	}
 
 	return doc
+}
+
+// writeSlots writes the slot config, replacing any earlier one.
+func (w *world) writeSlots(doc string) {
+	w.t.Helper()
+
+	if err := os.MkdirAll(w.state, 0o700); err != nil {
+		w.t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(w.state, lease.SlotConfigFile), []byte(doc), 0o600); err != nil {
+		w.t.Fatal(err)
+	}
 }

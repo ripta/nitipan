@@ -36,9 +36,8 @@ session instead, through the hooks and plugins that `setup` prints.
 Leases live under `~/.local/state/nitipan/`. That directory must be on a local disk. A sandboxed agent needs a write
 allowance for it.
 
-Later versions add counted slots, waiting for a lease, and a self-hosted broker that works across machines. Callers
-will not change when the broker arrives. See the
-[broker research](spec/reports/2026-10-18-lease-broker-research.md).
+Later versions add waiting for a lease, and a self-hosted broker that works across machines. Callers will not change
+when the broker arrives. See the [broker research](spec/reports/2026-10-18-lease-broker-research.md).
 
 ## Resource leases
 
@@ -57,8 +56,37 @@ new one.
 A resource belongs to its machine. A resource lease from another machine, as on a shared home directory, blocks nothing.
 `list` marks it remote.
 
-`--slots <N>` states the count you expect for the resource. Every name is exclusive for now, so only `--slots 1` is
-accepted.
+### Counted slots
+
+A name admits one holder unless the user gives it a larger count. A count lets that many holders share the name at once.
+The next claim is refused while the slots are full. The refusal names the holders and says to ask the user to raise the
+count. A dead holder's slot is freed for the next claim.
+
+The counts live in `slots.json`, in the state directory beside `leases/`. The user writes it, and every resource claim
+reads it under the lock:
+
+```json
+{"version": 1, "slots": {"gpu:main": 2, "db:pg": 4}}
+```
+
+Each key is a resource name under the grammar above, and each count is an integer of at least 1. Any bad entry, an
+unknown `version`, or an unknown top-level field makes the whole file unusable. Every call then warns with the file's
+path and every error, and treats every name as exclusive. Path claims are unaffected.
+
+Each lease records the count it was admitted under. A new claim is admitted only while the live holders number fewer than
+the smallest of the configured count and every live holder's recorded count. Only this machine's leases count. Lowering
+a count takes effect at once. Raising it takes effect once every holder admitted under a lower count has released.
+
+A holder already on the name can claim it again at any time. That refreshes its lease and keeps its recorded count, even
+when the slot is now over its count. A holder admitted under an old count therefore pins that count until it releases.
+Ask the user to `break --force` it if it must go.
+
+`--slots <N>` states the count you expect for the resource. A new claim is refused when `N` differs from the configured
+count, and the error names the configured one. A repeat claim is compared with the count on the lease you already hold.
+
+`list` shows, for each local resource lease, how many holders the name admits and which leases hold it. It also prints
+the path of `slots.json`. `list --json` carries the same two values as `effective_slots` and `slot_holders` on each
+local resource lease. Every lease stays a top-level entry, and a lease with the `remote` flag carries neither value.
 
 Resource leases are advisory. They coordinate cooperating sessions only. A process that never calls nitipan can still
 use every core.

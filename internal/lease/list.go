@@ -111,7 +111,12 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 		return nil, errors.New("listing needs an Emit function to write its output")
 	}
 
-	out := c.output(filter, filtered)
+	cfg := LoadSlotConfig(e.Dir.Path())
+	if warning := cfg.Warning(); warning != "" {
+		res.Warnings = append(res.Warnings, warning)
+	}
+
+	out := c.output(filter, filtered, cfg)
 
 	canWrite := c.l != nil && c.l.FormatErr() == nil
 
@@ -135,10 +140,14 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 
 // output builds the document. A record this binary cannot use always appears, as an unknown entry,
 // because it may overlap the filter.
-func (c *call) output(filter record.Footprint, filtered bool) listing.Output {
-	var out listing.Output
+//
+// Each local resource lease carries its name's effective count and live holders, computed over every
+// record, so a filter never changes the count. A remote lease carries neither.
+func (c *call) output(filter record.Footprint, filtered bool, cfg *SlotConfig) listing.Output {
+	out := listing.Output{SlotConfigPath: cfg.Path}
 
 	shared := c.sharedNames()
+	views := c.slotViews(cfg)
 
 	for _, en := range c.entries {
 		if en.Rec == nil {
@@ -155,6 +164,10 @@ func (c *call) output(filter record.Footprint, filtered bool) listing.Output {
 		lease.Hint = en.Hint
 		lease.Remote = en.Rec.Domain.Kind == record.KindResource && !liveness.SameMachine(c.e.Machine, en.Rec.Machine)
 		lease.NameShared = shared[en.Rec.Holder.Name] && en.Rec.Holder.Name != ""
+
+		if name, ok := en.resource(); ok && !lease.Remote {
+			lease.EffectiveSlots, lease.SlotHolders = slotFields(views[name])
+		}
 
 		out.Leases = append(out.Leases, lease)
 	}
@@ -192,4 +205,20 @@ func (c *call) sharedNames() map[string]bool {
 	}
 
 	return shared
+}
+
+// slotFields turns a name's view into the computed fields of a lease.
+func slotFields(view *slotView) (limit *int, holders []string) {
+	if view == nil {
+		return nil, nil
+	}
+
+	count := view.Limit
+
+	holders = make([]string, len(view.Holders))
+	for i, en := range view.Holders {
+		holders[i] = en.ID
+	}
+
+	return &count, holders
 }

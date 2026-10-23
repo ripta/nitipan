@@ -25,7 +25,9 @@ refreshes the advertisement, and a flag you leave out keeps its stored value.
 <namespace>:<name>, in lowercase letters, digits, '-', '_', and '.'. Two names overlap only when they
 are equal, and a resource never overlaps a path. Resource leases are advisory and coordinate
 cooperating sessions only. Acquire them from the parent session, since subagents share its holder.
---slots states the count you expect for the resource, and is refused when it differs.`,
+--slots states the count you expect for the resource, and is refused when it differs from the count
+that applies. A name admits as many holders as the user configured for it, and one holder when the user
+configured none. When a slot is full, the refusal names the holders. Ask the user to raise the count.`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return a.wrapErr(a.runAcquire(cmd))
