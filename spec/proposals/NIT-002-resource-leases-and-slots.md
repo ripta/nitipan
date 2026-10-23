@@ -128,17 +128,20 @@ NIT-001's `acquire` refuses at once. The candidates were no wait, a bounded poll
 bounded wait with a FIFO queue of waiter records.
 
 Decision (autonomous): `acquire --wait <duration>` waits for a lease. The duration is required. It applies to path and
-resource claims alike. Amended 2026-10-18; see Decision Log.
+resource claims alike. Amended 2026-10-23; see Decision Log.
 
-- It polls with backoff. It takes NIT-001's lock only for each attempt and releases it between attempts
+- It polls with backoff. The delay starts at 100ms, doubles to a 2s cap, and is jittered. No sleep passes the
+  deadline, and one last attempt runs at the deadline. It takes NIT-001's lock only for each attempt and releases it
+  between attempts
 - Only three refusals are waited on: a live holder overlaps, the slot is full, or the lock is busy. A lock-busy attempt
   counts as a failed attempt, not as the lock-busy exit
 - Every other refusal exits at once with its own status and message. That covers an unusable record, a dead holder's
   record with `clear_when_dead` false, a self-overlap that needs `--replace`, a mismatched `--slots`, the `format`
   marker, and a sandbox write error
-- When the duration passes, `acquire` exits with its own wait-timeout status. The message names the holders it waited
-  on. When the lock was busy at the deadline, it names the lock holder too
-- Nothing persists while waiting. A waiter killed by its shell tool leaves nothing behind
+- When the duration passes, `acquire` exits with its own wait-timeout status, exit code 10. The message names the
+  holders it waited on. When the lock was busy at the deadline, it names the lock holder too
+- No file is created while waiting. Each attempt rewrites the holder note inside the existing lock file. A waiter killed
+  by its shell tool leaves nothing behind
 - A retry after a kill is safe. If the lease was published before the kill, the retry is a re-acquire and succeeds.
   The help text and README tell callers to retry, or run `list`, after a killed `acquire`
 - There is no queue. A waiter can lose a freed slot to a claim that arrived later
@@ -347,7 +350,7 @@ None.
 
 ### M3: Waiting
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `acquire --wait <duration>` requires a duration, and is granted once the blocking holder releases or dies
 - The lock is held only for each attempt, in a test where another call succeeds while a waiter polls
@@ -357,6 +360,25 @@ None.
 - A waiter killed mid-wait leaves no file in the state directory
 - A retry after a kill that followed publication succeeds as a re-acquire
 - The help text says to retry, or run `list`, after a killed `acquire`
+
+**As built:**
+
+- The wait loop lives in the lease package, above the single-attempt `Acquire`, which is unchanged. The sleeper and the
+  jitter source are fields on the engine. The command layer takes the sleeper through its dependencies, next to the
+  clock.
+- Waitable refusals carry a marker error that only a live overlap and a full slot wrap. They still exit as refused, so
+  no existing status changed. A mixed refusal that includes a dead holder whose record asks to be kept is not
+  waitable, since that holder never frees itself.
+- The timeout exit is code 10. The message repeats the last refusal that named holders. It adds the lock holder when the
+  last attempt found the lock busy. A wait that only ever met a busy lock names no holders.
+- The jitter puts each sleep in the upper half of its delay. The last sleep is cut to the time left, so the clock
+  reaches the deadline exactly and the final attempt runs there.
+- Each attempt's lock wait is cut to the time left until the deadline, with a floor of one try. A wedged lock cannot
+  stretch a wait past its duration. A plain `acquire` keeps the full lock budget.
+- The kill test runs the waiter as a child process and compares the state directory's contents before and after. The
+  retry after a kill that followed publication is covered by a re-acquire test, since the refresh path is the same one.
+- The sandbox write error is not in the table of refusals that exit at once. It is an error with no waitable marker,
+  so it takes the same path as the others, but no test plants it.
 
 ## Decision Log
 
@@ -443,12 +465,23 @@ None.
   says every command that takes the lock or lists warns, that `hook` and `setup` do not since they never read leases,
   and that `list` reads the config without the lock when the lock is busy. The earlier wording over-promised for
   commands that never touch leases.
+- 2026-10-23 (run best guess): Amended "Waiting". The text said only that the wait polls with backoff and that the
+  timeout has its own status. It now says the delay starts at 100ms, doubles to a 2s cap with jitter, never sleeps past
+  the deadline, and makes one last attempt there, that each attempt's lock wait is cut to the time left, and that the
+  timeout is exit code 10. Nothing stored changes if a later run picks other numbers, since they are constants. Exit
+  status 10 is a published value once released. A dead holder whose record asks to be kept is also named as not waited
+  on, which the earlier list already implied.
 - 2026-10-23: ADR candidate (departs from the past): another machine's `resource` record never overlaps a claim or
   counts toward a slot, although ADR-04 reads every other-machine record as alive. Later proposals that add kinds must
   say whether they follow it. Undecided. Found in NIT-002 M1.
 - 2026-10-23: ADR candidate (cuts across the system): a writer stamps the lowest minor whose fields a record uses, so
   path records, tombstones, and session files stay 1.0 while the binary reads 1.1. Every later minor must follow it.
   Undecided. Found in NIT-002 M1.
+- 2026-10-23: ADR candidate (hard to reverse): exit status 10 means a `--wait` timed out. Scripts and agents test exit
+  statuses, and a released value never changes. Undecided. Found in NIT-002 M3.
+- 2026-10-23: ADR candidate (cuts across the system): waiting is bounded polling with no queue, the lock is held only
+  per attempt, and nothing persists while waiting. A broker would have to keep these semantics for callers. Waits on
+  NIT-004 reaching `accepted`, since a broker may queue waiters instead.
 
 ## References
 

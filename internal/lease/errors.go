@@ -19,21 +19,35 @@ var (
 	ErrHandleCollision = errors.New("handle collision with another live holder")
 )
 
+// ErrWaitable marks the refusals that `acquire --wait` waits out: a live holder overlaps, or a slot is
+// full. It never changes an exit status. Every other refusal ends a wait at once.
+var ErrWaitable = errors.New("a refusal that a wait can outlast")
+
 // statusError carries a message and the exit-status sentinel it maps to. The sentinel stays out of
 // the message, so the text reads as written.
 type statusError struct {
 	msg    string
 	status error
+
+	// waitable is set only on the refusals that a later attempt can see lifted.
+	waitable bool
 }
 
 // Error implements error.
 func (e *statusError) Error() string { return e.msg }
 
-// Is matches the sentinel the exit-status table keys on.
-func (e *statusError) Is(target error) bool { return target == e.status }
+// Is matches the sentinel the exit-status table keys on, and ErrWaitable when the refusal is one.
+func (e *statusError) Is(target error) bool {
+	return target == e.status || (e.waitable && target == ErrWaitable)
+}
 
 func failf(status error, format string, args ...any) error {
 	return &statusError{msg: fmt.Sprintf(format, args...), status: status}
+}
+
+// waitablef is a refusal that exits as refused, and that a wait retries.
+func waitablef(format string, args ...any) error {
+	return &statusError{msg: fmt.Sprintf(format, args...), status: exitcode.ErrRefused, waitable: true}
 }
 
 func usagef(format string, args ...any) error {

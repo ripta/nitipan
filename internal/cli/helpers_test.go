@@ -70,6 +70,12 @@ type world struct {
 	home   func() (string, error)
 	now    time.Time
 
+	// sleep replaces the pause between the attempts of a wait. Nil sleeps for real.
+	sleep func(time.Duration)
+
+	// lockSleep replaces the pause between lock tries. Nil sleeps for real.
+	lockSleep func(time.Duration)
+
 	// stdin is the input the next command reads, as a hook would get it.
 	stdin string
 
@@ -158,8 +164,9 @@ func (w *world) deps(c caller, stdout, stderr *bytes.Buffer) Deps {
 		User:         func() (string, error) { return tester, nil },
 		Cwd:          func() (string, error) { return w.root, nil },
 		Now:          func() time.Time { return w.now },
+		Sleep:        w.sleep,
 		Finder:       w.finder,
-		StateOptions: state.Options{LockBudget: w.budget, LockPoll: 10 * time.Millisecond},
+		StateOptions: state.Options{LockBudget: w.budget, LockPoll: 10 * time.Millisecond, Sleep: w.lockSleep},
 		Hooks:        w.hooks,
 	}
 }

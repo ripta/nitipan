@@ -80,13 +80,18 @@ type AcquireResult struct {
 // even when the caller's own leases cover it. Only then does the caller's own state decide between
 // an idempotent re-acquire, a covered claim, a refused scope change, and a new lease.
 func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
+	return e.acquire(req, e.Dir.Lock)
+}
+
+// acquire is Acquire with the way the lock is taken left to the caller.
+func (e *Engine) acquire(req AcquireRequest, lock func() (*state.Locked, error)) (*AcquireResult, error) {
 	h := req.Holder
 
 	if h.MissingSession() {
 		return nil, ErrMissingSession
 	}
 
-	c, err := e.begin(&h)
+	c, err := e.beginWith(&h, lock)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +336,14 @@ func (c *call) checkOthers(fp record.Footprint, slotted string) (cleared []*entr
 		next = "Upgrade nitipan, coordinate with the holder, or ask the user."
 	}
 
-	return nil, failf(exitcode.ErrRefused, "the claim overlaps %s.\n  %s\n%s",
+	// A dead holder whose record only a newer nitipan may clear never frees itself, so a wait cannot
+	// outlast it.
+	refuse := waitablef
+	if stuck {
+		refuse = func(format string, args ...any) error { return failf(exitcode.ErrRefused, format, args...) }
+	}
+
+	return nil, refuse("the claim overlaps %s.\n  %s\n%s",
 		Plural(len(blocks), "a lease", "leases"), strings.Join(blocks, "\n  "), next)
 }
 
@@ -362,7 +374,7 @@ func (cl *claim) admitSlot() error {
 			"there until it releases.", configured, view.Limit)
 	}
 
-	return failf(exitcode.ErrRefused, "%s has %d of %d slots taken.%s\n  %s\nCoordinate with a holder, or ask the user to "+
+	return waitablef("%s has %d of %d slots taken.%s\n  %s\nCoordinate with a holder, or ask the user to "+
 		"raise the count for %s.", cl.resource, len(view.Holders), view.Limit, why, strings.Join(lines, "\n  "), cl.resource)
 }
 

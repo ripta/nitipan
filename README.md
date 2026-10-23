@@ -36,8 +36,9 @@ session instead, through the hooks and plugins that `setup` prints.
 Leases live under `~/.local/state/nitipan/`. That directory must be on a local disk. A sandboxed agent needs a write
 allowance for it.
 
-Later versions add waiting for a lease, and a self-hosted broker that works across machines. Callers will not change
-when the broker arrives. See the [broker research](spec/reports/2026-10-18-lease-broker-research.md).
+`acquire --wait <duration>` waits for a lease instead of being refused at once. See "Waiting" below. A later version
+adds a self-hosted broker that works across machines. Callers will not change when the broker arrives. See the
+[broker research](spec/reports/2026-10-18-lease-broker-research.md).
 
 ## Resource leases
 
@@ -88,11 +89,34 @@ count, and the error names the configured one. A repeat claim is compared with t
 the path of `slots.json`. `list --json` carries the same two values as `effective_slots` and `slot_holders` on each
 local resource lease. Every lease stays a top-level entry, and a lease with the `remote` flag carries neither value.
 
+`--wait` applies to resource claims, including a full slot. See "Waiting" below.
+
 Resource leases are advisory. They coordinate cooperating sessions only. A process that never calls nitipan can still
 use every core.
 
 Acquire resources from the parent session only. Subagents share their parent's holder, so two subagents that both claim
 `cpu:heavy` both succeed, and the first to release frees the name while the other still runs.
+
+## Waiting
+
+`nitipan acquire --wait 5m` waits for a lease instead of being refused at once. It applies to path claims and resource
+claims alike. The duration is required, and it is a Go duration such as `30s` or `5m`. A missing, unparseable, or
+non-positive value is a usage error.
+
+A wait polls with backoff, starting at 100ms and growing to a 2s pause. It takes the state lock only for each attempt
+and releases it between attempts, so other commands run while a waiter polls. Only three outcomes are waited on: a live
+holder overlaps the claim, the slot is full, or the lock is busy. A busy lock counts as a failed attempt, not as the
+lock-busy exit. Every other refusal exits at once with its own status, such as an unusable record, a dead holder whose
+record asks to be kept, an overlap with your own lease, or a `--slots` that differs from the count.
+
+When the time runs out, `acquire` exits with status 10. The message names the holders it waited on. When the last
+attempt found the lock busy, it names the process holding the lock too.
+
+No file is created while waiting, so a waiter that is killed leaves nothing behind. A shell tool that kills a long
+`acquire` may do so after the lease was published. Retry the same `acquire`. It reports the lease as already held. Or
+run `list`.
+
+There is no queue. A waiter can lose a freed slot to a claim that arrived later.
 
 ## Codex and opencode
 

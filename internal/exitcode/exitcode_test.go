@@ -27,6 +27,7 @@ var forTests = []forTest{
 	{Name: "broken", Err: ErrBroken, Want: Broken},
 	{Name: "no such lease", Err: ErrNoSuchLease, Want: NoSuchLease},
 	{Name: "unusable record", Err: &record.UnusableError{Reason: record.ReasonHigherMajor}, Want: Unusable},
+	{Name: "wait timeout", Err: fmt.Errorf("gave up: %w", ErrWaitTimeout), Want: WaitTimeout},
 	{Name: "format refusal has no status of its own", Err: &state.FormatError{Need: 2}, Want: Error},
 }
 
@@ -60,7 +61,7 @@ func TestTableIsDocumentedAndUnique(t *testing.T) {
 		seen[e.Code], names[e.Name] = true, true
 	}
 
-	for _, code := range []int{OK, Error, Usage, Refused, LockBusy, AlreadyCovered, NotYours, Broken, NoSuchLease, Unusable} {
+	for _, code := range []int{OK, Error, Usage, Refused, LockBusy, AlreadyCovered, NotYours, Broken, NoSuchLease, Unusable, WaitTimeout} {
 		if !seen[code] {
 			t.Errorf("status %d is missing from the table", code)
 		}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -41,6 +42,11 @@ type Engine struct {
 	Now   func() time.Time
 	NewID func() string
 
+	// Sleep and Jitter drive the wait between attempts of AcquireWait. Jitter returns a number in
+	// [0, 1). Tests replace them so a wait runs without real sleeping.
+	Sleep  func(time.Duration)
+	Jitter func() float64
+
 	// HandleOf derives a holder's handle. Nil means the standard derivation. Tests force collisions
 	// through it.
 	HandleOf func(adapter.Holder) string
@@ -65,6 +71,8 @@ func NewEngine(dir *state.Dir, checker *liveness.Checker, machine record.Machine
 		Machine: machine,
 		Now:     time.Now,
 		NewID:   state.NewID,
+		Sleep:   time.Sleep,
+		Jitter:  rand.Float64,
 	}
 }
 
@@ -201,7 +209,13 @@ func (c *call) close() {
 // writes, because every caller changes something. With a holder, the records are split into the
 // caller's and everyone else's, and the tombstones addressed to it are delivered.
 func (e *Engine) begin(h *adapter.Holder) (*call, error) {
-	l, err := e.Dir.Lock()
+	return e.beginWith(h, e.Dir.Lock)
+}
+
+// beginWith is begin with the way the lock is taken left to the caller. A wait attempt passes a lock
+// whose retry budget is cut to the time left.
+func (e *Engine) beginWith(h *adapter.Holder, lock func() (*state.Locked, error)) (*call, error) {
+	l, err := lock()
 	if err != nil {
 		return nil, err
 	}

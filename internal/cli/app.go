@@ -88,6 +88,7 @@ func (a *app) engine() (*lease.Engine, error) {
 
 	e := lease.NewEngine(dir, checker, local, a.deps.Finder)
 	e.Now = a.deps.Now
+	e.Sleep = a.deps.Sleep
 	e.Hooks = a.deps.Hooks
 	e.Notify = lease.Notify{Delivered: a.deliverNotice, Warn: a.warn}
 	e.Sessions = sessions

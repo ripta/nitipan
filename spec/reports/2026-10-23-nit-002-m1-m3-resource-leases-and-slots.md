@@ -14,8 +14,8 @@ sandboxed Bash in `/Users/ripta/projects/nitipan`.
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
 | NIT-002 M1 | DONE | `e53b4e3` |
-| NIT-002 M2 | IN PROGRESS | |
-| NIT-002 M3 | QUEUED | |
+| NIT-002 M2 | DONE | `bd17947` |
+| NIT-002 M3 | DONE | see row review |
 
 ## Decisions the user made at plan time
 
@@ -121,3 +121,43 @@ Review findings:
   warning. Dismissed. The proposal requires that warning on every call, and the refusal text itself never names the
   path.
 - adr-impact: no conflicts and no new candidates. The `slots.json` candidate from 2026-10-18 now has a settled shape.
+
+### NIT-002 M3
+
+Commit for M2: `bd17947 nitipan: add counted slots for resource leases`. The M3 commit is named in the row review
+section.
+
+Checks: `make ci` passed, before and after the review fixes. Lint reported 0 issues. `proposals.py freeze` returned
+`[]`. `proposals.py check` reported only that every milestone is finished, so the proposal should be implemented. That
+is written after the row review.
+
+Restart: the first M3 implementer hung for about 25 minutes during the review fixes. Its `cg_run` of `awk` never
+started a run. `awk` is not in `.cg.yaml`'s allow list, so the call was most likely waiting on a permission prompt.
+One nudge got no response, so it was stopped. A fresh implementer continued from the partial work in the tree and
+finished the fixes without `awk`.
+
+Best guesses the implementers made:
+
+1. The wait loop lives in the lease package as `Engine.AcquireWait`. `Engine.Acquire` keeps its single-attempt
+   behavior.
+2. Jitter puts each sleep in the upper half of its delay, 50 to 100 percent.
+3. The timeout message repeats the last waitable refusal under a "Waited on:" heading. It adds the lock holder only
+   when the last attempt was lock busy.
+4. `--wait` parses with `time.ParseDuration`, so a bare number such as `5` is a usage error.
+5. A refusal that includes a dead holder whose record asks to be kept is not waited on, since that holder never frees
+   itself. Its status stays Refused (3).
+6. Each wait attempt's lock budget is the time left, capped at the default budget, with a floor of one try.
+
+Review findings:
+
+- Reviewer, proposal and plan: an attempt could overrun the deadline by the full 5s lock budget, and the message
+  still named the requested duration. Fixed: the state lock takes a per-call budget, and each wait attempt's lock wait
+  is cut to the time left. A test asserts lock waiting plus sleeps equals the `--wait` duration.
+- Reviewer, docs: a README line ran 174 characters. Fixed, along with three 121-character lines.
+- Reviewer, PLAUSIBLE: the kill test killed the child after a fixed delay and could pass without the child attempting.
+  Fixed: the child signals after its first refused attempt, and the parent kills it only then.
+- Reviewer, docs: "nothing is written while waiting" was imprecise, since each attempt rewrites the lock file's holder
+  note. Fixed: the help text, README, and proposal now say no file is created.
+- adr-impact: no conflicts. Two candidates added to the Decision Log. Exit status 10 is `Undecided`. The wait semantics
+  wait on NIT-004, since a broker may queue waiters.
+- The sandbox write error takes the non-waitable path but has no test. No test can plant it.

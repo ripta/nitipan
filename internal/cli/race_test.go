@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,8 @@ const (
 	childStateEnv  = "NITIPAN_TEST_RACE_STATE"
 	childCheckEnv  = "NITIPAN_TEST_RACE_CHECKOUT"
 	childSlotEnv   = "NITIPAN_TEST_RACE_RESOURCE"
+	childWaitEnv   = "NITIPAN_TEST_RACE_WAIT"
+	waitingLine    = "race child: attempt refused, waiting"
 	raceChildren   = 8
 	raceRounds     = 6
 	childAgentBase = 1000
@@ -76,6 +79,15 @@ func runRaceChild(idx string) int {
 		StateOptions: state.Options{LockBudget: 20 * time.Second},
 	}
 
+	// A wait pauses only after an attempt was refused, so this line is evidence that the waiter
+	// tried and is now waiting.
+	if os.Getenv(childWaitEnv) != "" {
+		deps.Sleep = func(d time.Duration) {
+			fmt.Fprintln(os.Stderr, waitingLine)
+			time.Sleep(d)
+		}
+	}
+
 	args := []string{"acquire", "--checkout", os.Getenv(childCheckEnv)}
 	if n%2 == 1 {
 		args = append(args, "--scope", "sub")
@@ -83,6 +95,10 @@ func runRaceChild(idx string) int {
 
 	if resource := os.Getenv(childSlotEnv); resource != "" {
 		args = []string{"acquire", "--resource", resource}
+	}
+
+	if wait := os.Getenv(childWaitEnv); wait != "" {
+		args = append(args, "--wait", wait)
 	}
 
 	return Execute(deps, args)
@@ -271,5 +287,112 @@ func TestAcquireRaceNeverExceedsTheSlotCount(t *testing.T) {
 		if published != slots {
 			t.Errorf("round %d: %d records published, want %d", round, published, slots)
 		}
+	}
+}
+
+// stateNames lists every path under the state directory, relative to it.
+func stateNames(t *testing.T, stateDir string) []string {
+	t.Helper()
+
+	var names []string
+
+	err := filepath.WalkDir(stateDir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(stateDir, path)
+		if err != nil {
+			return err
+		}
+
+		names = append(names, rel)
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return names
+}
+
+func TestWaiterKilledMidWaitLeavesNothingInTheStateDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir := filepath.Join(root, "state")
+
+	release := make(chan struct{})
+	holder := startRaceChild(t, 0, stateDir, "", "cpu:heavy", release)
+
+	close(release)
+
+	if res := <-holder; res.status != exitcode.OK {
+		t.Fatalf("the holder's acquire exited %d\n%s", res.status, res.output)
+	}
+
+	before := stateNames(t, stateDir)
+
+	t.Setenv(childWaitEnv, "60s")
+
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(),
+		childEnv+"=1",
+		childStateEnv+"="+stateDir,
+		childCheckEnv+"=",
+		childSlotEnv+"=cpu:heavy",
+	)
+
+	var out strings.Builder
+
+	cmd.Stdout = &out
+	cmd.Stdin = strings.NewReader("")
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	waiting := make(chan struct{})
+
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		announced := false
+
+		for scanner.Scan() {
+			if !announced && scanner.Text() == waitingLine {
+				announced = true
+
+				close(waiting)
+			}
+		}
+	}()
+
+	select {
+	case <-waiting:
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+
+		t.Fatalf("the waiter never reported a refused attempt\n%s", out.String())
+	}
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmd.Wait(); err == nil {
+		t.Error("the waiter exited cleanly after a kill")
+	}
+
+	after := stateNames(t, stateDir)
+	if strings.Join(before, "\n") != strings.Join(after, "\n") {
+		t.Errorf("the state directory changed while a waiter ran and died:\nbefore %v\nafter  %v", before, after)
 	}
 }
