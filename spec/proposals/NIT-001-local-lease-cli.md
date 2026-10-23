@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-20
+**Updated:** 2026-10-22
 
 ## Dependencies
 
@@ -69,7 +69,7 @@ sandbox allowance".
 
 ### Commands
 
-Amended 2026-10-19; see Decision Log.
+Amended 2026-10-22; see Decision Log.
 
 - `acquire` claims a domain. It fails when a live holder owns an overlapping domain.
 - `release` gives up a lease the caller holds.
@@ -77,7 +77,8 @@ Amended 2026-10-19; see Decision Log.
 - `break` removes another holder's lease. See "Breaking a live lease".
 - `advertise` updates the caller's name, permission mode, or a lease's description. See "Session name and permission
   mode".
-- `setup` prints the sandbox allowance entries for an agent. See "Granting the sandbox allowance".
+- `setup` prints the sandbox allowance entries for an agent. For opencode it also writes the plugin files into a
+  directory the user names. See "Granting the sandbox allowance".
 - `hook` is called only by the agent hooks and plugins that `setup` prints. Its subcommands are `session-start`,
   `session-end`, `presence`, and `execution`. See "Session liveness on shared hosts".
 
@@ -485,8 +486,11 @@ surface" depends on this. Agents call nitipan from inside their sandboxes. The c
 and a `nitipan setup` command that prints or applies the entries.
 
 Decision (autonomous): `nitipan setup` prints the entries for the detected or named agent, and never writes settings.
-The README documents the same entries. When any nitipan write fails with `EPERM` or `EACCES`, the error names the
-detected agent, says the sandbox likely blocked the state directory, and prints the same text `setup` prints.
+`nitipan setup opencode --install-plugins <dir>` is the one write. It puts nitipan's plugin files into `<dir>/nitipan`,
+with nitipan's absolute path baked in, and nothing else. It refuses to overwrite a file that differs from the one nitipan
+ships unless `--replace` is given. `setup` never prints plugin source. The README documents the same entries. When any
+nitipan write fails with `EPERM` or `EACCES`, the error names the detected agent, says the sandbox likely blocked the
+state directory, and prints the same text `setup` prints.
 
 - "Any write" covers the lock file, temp files, records, and tombstone removal. `list` removes tombstones too, so it can
   hit this error
@@ -494,7 +498,7 @@ detected agent, says the sandbox likely blocked the state directory, and prints 
   write path
 - The message says "likely", because a plain file-mode failure gives the same errno
 
-Amended 2026-10-19; see Decision Log.
+Amended 2026-10-22; see Decision Log.
 
 `setup` also prints what session liveness needs. See "Session liveness on shared hosts".
 
@@ -502,9 +506,9 @@ Amended 2026-10-19; see Decision Log.
   that run `nitipan hook` by absolute path with `timeout: 3`, and `thread_unload_delay_secs = 60`. The text says that a
   thread's background terminals and MCP servers stop 60 seconds after the user switches away from it, and that the
   delay applies after a Codex restart
-- opencode: install steps for nitipan's TUI plugin and server plugin. When the user has tightened opencode's
-  permissions, it also prints a `shell` allow rule for `nitipan *` and an `external_directory` allow rule for the state
-  directory
+- opencode: install steps for nitipan's TUI plugin and server plugin, which `--install-plugins <dir>` carries out. When
+  the user has tightened opencode's permissions, it also prints a `shell` allow rule for `nitipan *` and an
+  `external_directory` allow rule for the state directory
 
 Writing settings with `--apply` was rejected for reasons beyond effort. Claude Code's sandbox denies writes to its own
 settings file, so `--apply` would fail from inside a session. Codex's config is TOML and opencode's is JSONC. A
@@ -830,6 +834,8 @@ Each record carries a liveness kind in its envelope. `process` means the holder 
 `session` means the agent's rule below decides. An unknown kind reads as unknown liveness. See "Record evolution and
 unknown records".
 
+Amended 2026-10-22; see Decision Log.
+
 Codex, kind `session`:
 
 - `setup` prints a SessionStart hook and a SessionEnd hook, both running `nitipan hook`. It also prints
@@ -844,8 +850,8 @@ Codex, kind `session`:
   call delivers it
 - The first registration under a host records two checks of the config in force. One is the unload delay. The other is
   whether a SessionEnd entry runs `nitipan hook`. It trusts the config file only when the file is older than the host's
-  start, since a change needs a restart. Otherwise both checks record unknown. Later registrations under that host reuse
-  them
+  start, since a change needs a restart. Otherwise both checks record unknown. Only a macOS start converts to wall-clock
+  time, so on Linux both checks always record unknown. Later registrations under that host reuse them
 - `acquire` from a Codex session needs a registration under a live host, a recorded delay of 60 seconds or less, a
   recorded SessionEnd entry, and the session's own writer-lock file. The lock file proves the veto below works for this
   Codex version. An `acquire` runs mid-turn, when the writer is certainly live. Without all four, `acquire` fails
@@ -890,7 +896,8 @@ opencode, kind `session`:
   cannot `acquire`. Its error says the session needs a TUI with nitipan's plugin loaded
 - A session is alive while a presence mark names it from a live TUI, or an execution mark names it under a live host
 - An execution mark under a dead host reads `time_suspended` from opencode's database, read-only. Set means unknown,
-  since the next service boot resumes that turn. Clear means the turn ended. A failed read means unknown
+  since the next service boot resumes that turn. Clear means the turn ended, and so does a session the database does
+  not know, which has no turn to resume. A failed read means unknown
 - Otherwise the session is dead
 
 Shared rules:
@@ -903,8 +910,10 @@ Shared rules:
 - `hook` is never named in an error message
 - A session file nitipan cannot use, or one of a higher major version, makes the session it names unknown. See
   "Record evolution and unknown records"
-- Clearing a session's end mark, or moving its leases to a new host, is reported to that session like a tombstone. It
-  names the time, and any lease another session claimed meanwhile
+- Clearing a session's end mark, or moving its leases to a new host, is reported to that session like a tombstone. A
+  clearing is stored as a tombstone addressed to the session, with a `kind` field and a `detail` sentence, and the
+  session's next call delivers it. It names the time, and any lease another session claimed meanwhile. A move happens in
+  the session's own call, so that call reports it at once and stores nothing
 - `list` flags a Codex session as "likely ended" when it holds a lease, has a live registration, and has no writer-lock
   file. It never clears the lease on that hint. It also names an opencode database it could not read
 
@@ -1220,7 +1229,7 @@ Amended 2026-10-20; see Decision Log.
 
 ### M4: Codex and opencode adapters
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS
 
 - The opencode adapter's session ID and PID are verified from inside an opencode bash tool call
 - The Codex adapter's PID, `CODEX_THREAD_ID`, and `CODEX_SESSION_ID` are verified from inside a Codex shell command
@@ -1232,7 +1241,8 @@ Amended 2026-10-20; see Decision Log.
 - The Codex and opencode adapters' session declarations match what those checks found
 - With the entries `nitipan setup` prints, `acquire` succeeds inside each agent. Without them, the sandbox error appears
 - The Codex and opencode adapters each define their list of `permission_mode` values
-- nitipan ships the opencode TUI and server plugins, and `setup` prints their install steps and the Codex hook entries
+- nitipan ships the opencode TUI and server plugins, `setup opencode --install-plugins <dir>` writes them, and `setup`
+  prints their install steps and the Codex hook entries. Amended 2026-10-22; see Decision Log
 - With no matching adapter, `acquire` fails and names the agents nitipan recognizes
 - Each adapter recognizes its host process by its argument list, in daemon, embedded, shared-service, and standalone
   modes. Whether the shell's ancestry reaches the TUI under `codex --no-daemon` is recorded in the As built block
@@ -1501,6 +1511,34 @@ Amended 2026-10-20; see Decision Log.
 - 2026-10-20: Final-review fixes to M3. Delivery now runs before request validation wherever the holder is known, so a
   call that fails on a bad permission mode, a bad domain, or a release target still delivers. Where the holder cannot
   be identified, delivery is impossible. Recorded in the M3 As built block.
+
+- 2026-10-22: Amended "Commands", "Granting the sandbox allowance", and the M4 plugin check, on the user's choice at M4
+  planning. They said `setup` never writes settings and prints the plugin install steps. `setup opencode
+  --install-plugins <dir>` now also writes the embedded plugin files into `<dir>/nitipan`, with nitipan's absolute path
+  baked in, and refuses to overwrite a differing file without `--replace`. The user's reason: printing long plugin
+  source to stdout and expecting a redirect is unacceptable. The scope is plugin files only. No settings file is ever
+  written, and `setup` never prints plugin source.
+- 2026-10-22 (autonomous, M4 best guesses): Amended "Session liveness on shared hosts". Before, the config check
+  trusted a file older than the host's start on every platform. Only a macOS start converts to wall-clock time, so on
+  Linux both checks record unknown. Before, a session missing from opencode's database was unspecified. It reads clear,
+  since it has no turn to resume. Before, the Codex end-mark clearing and a host move were both "reported like a
+  tombstone". A clearing is stored as a tombstone with a new optional `kind` and `detail`, and a move is reported by the
+  call that makes it and not stored. The `kind` field is a minor addition to a format nothing has released, and an empty
+  `kind` still means a break, so an old reader is no more permissive.
+- 2026-10-22 (autonomous, M4 best guesses): `time_suspended` is read by running `sqlite3 -readonly`, with no Go SQLite
+  dependency. Any failure reads unknown. The upkeep sweep reads the database once for all dead execution marks, within
+  800ms, so it fits the Codex hook's 3 seconds, and a failed or slow read keeps every mark. The Codex config checks scan
+  `config.toml` and `hooks.json` under the Codex home with a small reader of the documented shapes, because nitipan
+  takes no TOML dependency. A shape it cannot classify records unknown. The acquire gates run after the call takes the lock and delivers tombstones, so a refused gate still
+  delivers. Every lock holder runs the end-mark conversion and the sweep through a hook on the lock, so no command can
+  skip them. The Codex permission modes are the sandbox modes and approval policies from `codex --help`. The opencode
+  modes are `build`, `plan`, and `auto`. The plugins are TypeScript, embedded from `plugins/opencode/nitipan`, and poll
+  the tab list and route every 2 seconds, because reactive reads from a plugin are unconfirmed. They log failures to
+  `plugin.log` in the state directory, and a refused call is retried. A registration publishes its notice before it
+  clears an end, and an old binary never removes a registration or mark of a higher minor.
+- 2026-10-22: ADR candidate (hard to reverse): the `sessions/` layout, the session-file name grammar, and the end-mark
+  name. They are on-disk formats that every binary on a machine must agree on, and the grammar is part of the V1
+  contract. Extends the Undecided state-directory candidate of 2026-10-20. Undecided. Found in NIT-001 M4.
 
 ## References
 

@@ -139,6 +139,7 @@ func (c *call) output(filter *keys.Domain) listing.Output {
 		}
 
 		lease := listing.FromRecord(en.Rec, en.Live)
+		lease.Hint = en.Hint
 		lease.NameShared = shared[en.Rec.Holder.Name] && en.Rec.Holder.Name != ""
 
 		out.Leases = append(out.Leases, lease)

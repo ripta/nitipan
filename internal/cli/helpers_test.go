@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/proc/proctest"
 	"github.com/space-armada/nitipan/internal/record"
+	"github.com/space-armada/nitipan/internal/session"
 	"github.com/space-armada/nitipan/internal/state"
 )
 
@@ -67,6 +69,15 @@ type world struct {
 	budget time.Duration
 	home   func() (string, error)
 	now    time.Time
+
+	// stdin is the input the next command reads, as a hook would get it.
+	stdin string
+
+	// exe is the nitipan path the hook entries name.
+	exe string
+
+	// db answers opencode's time_suspended. Nil makes every read fail.
+	db session.OpencodeDB
 }
 
 func newWorld(t *testing.T) *world {
@@ -88,6 +99,7 @@ func newWorld(t *testing.T) *world {
 		finder: fakeFinder{},
 		budget: 60 * time.Millisecond,
 		now:    time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+		exe:    "/usr/local/bin/nitipan",
 	}
 
 	return w
@@ -135,6 +147,10 @@ func (w *world) deps(c caller, stdout, stderr *bytes.Buffer) Deps {
 	return Deps{
 		Stdout:       stdout,
 		Stderr:       stderr,
+		Stdin:        strings.NewReader(w.stdin),
+		Executable:   func() (string, error) { return w.exe, nil },
+		UserHome:     func() (string, error) { return filepath.Join(w.root, "userhome"), nil },
+		OpencodeDB:   w.db,
 		Getenv:       func(k string) string { return c.env[k] },
 		Procs:        w.table,
 		StateDir:     stateDir,
@@ -239,6 +255,12 @@ type plantSpec struct {
 	Handle  string
 	Agent   string
 	Kind    string
+
+	// Liveness is the liveness kind. Empty means process.
+	Liveness string
+
+	// SessionID is the holder's session.
+	SessionID string
 }
 
 // plant writes a record for another holder and returns its ID.
@@ -265,6 +287,10 @@ func (w *world) plant(spec plantSpec) string {
 		spec.Kind = record.KindPath
 	}
 
+	if spec.Liveness == "" {
+		spec.Liveness = record.LivenessProcess
+	}
+
 	footprint := []map[string]any{}
 	domainKeys := []map[string]any{}
 
@@ -278,10 +304,10 @@ func (w *world) plant(spec plantSpec) string {
 		"id":              spec.ID,
 		"footprint":       footprint,
 		"clear_when_dead": !spec.KeepAfterDeath,
-		"liveness":        "process",
+		"liveness":        spec.Liveness,
 		"machine":         map[string]any{"host": spec.Machine.Host, "id": spec.Machine.ID},
 		"holder": map[string]any{
-			"agent": spec.Agent, "pid": spec.PID, "handle": spec.Handle, "name": spec.Name,
+			"agent": spec.Agent, "pid": spec.PID, "handle": spec.Handle, "name": spec.Name, "session_id": spec.SessionID,
 			"start": map[string]any{"platform": "darwin", "sec": spec.PID},
 		},
 		"reach":       "machine",

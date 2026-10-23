@@ -419,6 +419,103 @@ func TestOpencodeIsServe(t *testing.T) {
 	}
 }
 
+func TestHostWalksEvenWithNoAgentVariableAndNeverReadsTheSessionFromTheEnvironment(t *testing.T) {
+	table := tree(func(table *proctest.Table) {
+		table.Add(80, proctest.Process{
+			Start: start(80), PPID: 1, Name: "codex",
+			Args: []string{"/usr/local/bin/codex", "app-server", "--managed-daemon"},
+		})
+		table.Add(1, proctest.Process{Start: start(1), Name: "launchd"})
+	})
+
+	// The environment carries a session ID for the hook to ignore, and no marker at all otherwise.
+	host, err := resolver(table, map[string]string{"CODEX_SESSION_ID": "from-the-environment"}).Host()
+	if err != nil {
+		t.Fatalf("Host: %v", err)
+	}
+
+	if host.Adapter.Name != "codex" || host.PID != 80 || host.SessionID != "" || host.User != "ripta" {
+		t.Errorf("host = %+v", host)
+	}
+
+	// Resolve never walks without a variable. Host does.
+	bare, err := resolver(table, nil).Host()
+	if err != nil || bare.PID != 80 {
+		t.Errorf("host with no variables = %+v, %v", bare, err)
+	}
+}
+
+func TestHostFailsClosedWhenNoAncestorIsAnAgent(t *testing.T) {
+	table := tree(func(table *proctest.Table) {
+		table.Add(80, proctest.Process{Start: start(80), PPID: 1, Name: "bash", Args: []string{"bash"}})
+		table.Add(1, proctest.Process{Start: start(1), Name: "launchd"})
+	})
+
+	_, err := resolver(table, nil).Host()
+	if !errors.Is(err, ErrFailClosed) {
+		t.Errorf("err = %v, want ErrFailClosed", err)
+	}
+}
+
+func TestHostFailsClosedOnAnUnreadableAncestor(t *testing.T) {
+	table := tree(func(table *proctest.Table) {
+		table.Add(80, proctest.Process{
+			Start: start(80), PPID: 1, Name: "bash", ArgsErr: errors.New("permission denied"),
+		})
+	})
+
+	_, err := resolver(table, nil).Host()
+
+	var unreadable *UnreadableAncestorError
+	if !errors.As(err, &unreadable) {
+		t.Errorf("err = %v, want an unreadable ancestor", err)
+	}
+}
+
+func TestHostFindsTheOpencodeTUIAndTheServiceBySignature(t *testing.T) {
+	for _, test := range []struct {
+		Name string
+		Args []string
+		Serv bool
+	}{
+		{"service", []string{"/opt/homebrew/bin/opencode", "serve", "--service"}, true},
+		{"standalone child", []string{"/opt/homebrew/bin/opencode", "serve", "--stdio", "--port", "0"}, true},
+		{"tui", []string{"/opt/homebrew/bin/opencode"}, false},
+		{"run is also a TUI signature", []string{"/opt/homebrew/bin/opencode", "run", "hi"}, false},
+		{"acp is also a TUI signature", []string{"/opt/homebrew/bin/opencode", "acp"}, false},
+	} {
+		t.Run(test.Name, func(t *testing.T) {
+			table := tree(func(table *proctest.Table) {
+				table.Add(80, proctest.Process{Start: start(80), PPID: 1, Name: "opencode", Args: test.Args})
+				table.Add(1, proctest.Process{Start: start(1), Name: "launchd"})
+			})
+
+			host, err := resolver(table, nil).Host()
+			if err != nil || host.Adapter.Name != "opencode" || host.PID != 80 {
+				t.Fatalf("host = %+v, %v", host, err)
+			}
+
+			if OpencodeIsServe(test.Args) != test.Serv {
+				t.Errorf("OpencodeIsServe = %v", !test.Serv)
+			}
+		})
+	}
+}
+
+func TestAdaptersListTheirPermissionModes(t *testing.T) {
+	want := map[string][]string{
+		"claude":   {"default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"},
+		"codex":    {"read-only", "workspace-write", "danger-full-access", "on-request", "never"},
+		"opencode": {"build", "plan", "auto"},
+	}
+
+	for _, a := range All() {
+		if !reflect.DeepEqual(a.PermissionModes, want[a.Name]) {
+			t.Errorf("%s permission modes = %v, want %v", a.Name, a.PermissionModes, want[a.Name])
+		}
+	}
+}
+
 func TestAdaptersDeclareSessionModel(t *testing.T) {
 	want := map[string]bool{"claude": false, "codex": true, "opencode": true}
 

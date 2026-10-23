@@ -26,7 +26,24 @@ type Tombstone struct {
 	// Paths are the canonical keys of the broken lease. They only help the broken holder recognize
 	// the lease, so a reader that does not know the field loses nothing.
 	Paths []string `json:"paths,omitempty"`
+
+	// Kind says what the notice reports. Empty means a break, which is what every tombstone meant
+	// before the field existed. A reader that does not know the field still delivers the notice and
+	// then removes it, so the field never makes an old reader more permissive.
+	Kind string `json:"kind,omitempty"`
+
+	// Detail is the sentence a notice of a kind other than a break carries.
+	Detail string `json:"detail,omitempty"`
 }
+
+// Notice kinds. A break leaves Kind empty.
+const (
+	// NoticeMoved reports that a session's leases moved to a new host process.
+	NoticeMoved = "moved"
+
+	// NoticeRevived reports that a session registered again, which cleared its end marks.
+	NoticeRevived = "revived"
+)
 
 // DecodeTombstone reads a tombstone. An unusable one comes back as an *UnusableError.
 func DecodeTombstone(data []byte) (*Tombstone, error) {

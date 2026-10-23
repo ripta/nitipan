@@ -78,10 +78,6 @@ func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
 		return nil, ErrMissingSession
 	}
 
-	if h.Adapter.Liveness != record.LivenessProcess {
-		return nil, fmt.Errorf("session liveness for %s is not supported yet", h.Adapter.Name)
-	}
-
 	c, err := e.begin(&h)
 	if err != nil {
 		return nil, err
@@ -89,8 +85,13 @@ func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
 	defer c.close()
 
 	// Validation runs after begin so that a request that fails here still delivers the caller's
-	// tombstones. A broken holder gets no other signal.
+	// tombstones. A broken holder gets no other signal. The session gate runs here too, under the
+	// lock, so what it reads agrees with the upkeep that ran as the lock was taken.
 	if err := validMode(h.Adapter, req.Mode); err != nil {
+		return nil, err
+	}
+
+	if err := e.admit(h); err != nil {
 		return nil, err
 	}
 
@@ -130,7 +131,12 @@ type claim struct {
 }
 
 func (cl *claim) fields() holderFields {
-	return holderFields{Name: cl.req.Name, Mode: cl.req.Mode, Session: cl.req.Holder.SessionID}
+	return holderFields{
+		Name:    cl.req.Name,
+		Mode:    cl.req.Mode,
+		Session: cl.req.Holder.SessionID,
+		Host:    cl.hostSync(cl.req.Holder),
+	}
 }
 
 func (cl *claim) footprint() record.Footprint {
@@ -516,6 +522,8 @@ func (cl *claim) create() (*AcquireResult, error) {
 		return nil, err
 	}
 
+	cl.reportMoves(cl.req.Holder, w)
+
 	return &AcquireResult{Lease: rec, Outcome: Created, Cleared: cleared}, nil
 }
 
@@ -555,6 +563,8 @@ func (cl *claim) refresh(target *entry) (*AcquireResult, error) {
 	if err := cl.flush(w); err != nil {
 		return nil, err
 	}
+
+	cl.reportMoves(cl.req.Holder, w)
 
 	return &AcquireResult{Lease: w.result(target), Outcome: outcome, Cleared: cleared}, nil
 }
@@ -649,6 +659,8 @@ func (cl *claim) replace() (*AcquireResult, error) {
 	if err := cl.flush(rest); err != nil {
 		return nil, err
 	}
+
+	cl.reportMoves(cl.req.Holder, w)
 
 	return &AcquireResult{Lease: w.result(lead), Outcome: Replaced, Cleared: cleared, Absorbed: mergedIDs,
 		Dropped: droppedPaths}, nil

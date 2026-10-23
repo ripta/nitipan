@@ -50,6 +50,14 @@ type SessionRule interface {
 	Judge(env record.Envelope) Result
 }
 
+// HintingRule is a session rule that can also advise a person. The hint never changes the verdict.
+// `list` shows it, as for a Codex session that probably ended.
+type HintingRule interface {
+	SessionRule
+
+	JudgeHint(env record.Envelope) (Result, string)
+}
+
 // Checker judges holders.
 type Checker struct {
 	// Procs reads the local process table.
@@ -84,6 +92,18 @@ func (c *Checker) Check(env record.Envelope) Result {
 	default:
 		return Result{Unknown, fmt.Sprintf("unknown liveness kind %q", env.Liveness)}
 	}
+}
+
+// CheckHint is Check with the advice a hinting session rule gives. The hint is empty for every other
+// record.
+func (c *Checker) CheckHint(env record.Envelope) (verdict Result, hint string) {
+	if env.Liveness == record.LivenessSession && SameMachine(c.Local, env.Machine) {
+		if rule, ok := c.Sessions[env.Holder.Agent].(HintingRule); ok {
+			return rule.JudgeHint(env)
+		}
+	}
+
+	return c.Check(env), ""
 }
 
 // CheckProcess judges a local process by its PID and recorded start.

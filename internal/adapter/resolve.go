@@ -239,6 +239,32 @@ func (r *Resolver) Resolve() Resolution {
 	return res
 }
 
+// Host finds the agent process above a hook or plugin subprocess. It always walks, even with no
+// agent variable set, because an agent's hook environment may carry none. The session ID is never
+// read from the environment. The caller takes it from the hook's input.
+//
+// When the walk finds no agent, it fails closed.
+func (r *Resolver) Host() (Holder, error) {
+	user, err := r.User()
+	if err != nil {
+		return Holder{}, fmt.Errorf("looking up the OS user: %w", err)
+	}
+
+	holder, found, err := r.walk()
+	if err != nil {
+		return Holder{}, err
+	}
+
+	if !found {
+		return Holder{}, fmt.Errorf("%w: no ancestor of this command is a supported agent", ErrFailClosed)
+	}
+
+	holder.SessionID = ""
+	holder.User = user
+
+	return holder, nil
+}
+
 // fillAnonymous reads the parent process, which identifies a caller with no adapter.
 func (r *Resolver) fillAnonymous(a *Anonymous) error {
 	self := r.Procs.Self()

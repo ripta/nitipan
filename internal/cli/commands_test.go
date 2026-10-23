@@ -176,28 +176,34 @@ func TestSetupNeedsAnAgentWhenNoneRunsIt(t *testing.T) {
 }
 
 type unsupportedTest struct {
-	Name  string
-	Agent string
-	Proc  proctest.Process
-	Env   map[string]string
+	Name      string
+	Agent     string
+	Proc      proctest.Process
+	Env       map[string]string
+	WantErr   string
+	WantSetup string
 }
 
 var unsupportedTests = []unsupportedTest{
 	{
-		Name:  "codex",
-		Agent: "codex",
-		Proc:  proctest.Process{Name: "codex", Args: []string{"/usr/local/bin/codex", "app-server", "--managed-daemon"}},
-		Env:   map[string]string{"CODEX_SESSION_ID": "thread-1", "CODEX_THREAD_ID": "thread-1"},
+		Name:      "codex",
+		Agent:     "codex",
+		Proc:      proctest.Process{Name: "codex", Args: []string{"/usr/local/bin/codex", "app-server", "--managed-daemon"}},
+		Env:       map[string]string{"CODEX_SESSION_ID": "thread-1", "CODEX_THREAD_ID": "thread-1"},
+		WantErr:   "has no registration under the Codex daemon (pid 400)",
+		WantSetup: "Codex needs three things",
 	},
 	{
-		Name:  "opencode",
-		Agent: "opencode",
-		Proc:  proctest.Process{Name: "opencode", Args: []string{"/usr/local/bin/opencode", "serve", "--service"}},
-		Env:   map[string]string{"OPENCODE_SESSION_ID": "ses_1"},
+		Name:      "opencode",
+		Agent:     "opencode",
+		Proc:      proctest.Process{Name: "opencode", Args: []string{"/usr/local/bin/opencode", "serve", "--service"}},
+		Env:       map[string]string{"OPENCODE_SESSION_ID": "ses_1"},
+		WantErr:   "needs a TUI with nitipan's plugin loaded",
+		WantSetup: "opencode needs nitipan's two plugins",
 	},
 }
 
-func TestAcquireFromCodexAndOpencodeFailsClosedUntilTheirSessionRulesLand(t *testing.T) {
+func TestAcquireFromCodexAndOpencodeFailsClosedWithoutTheirReports(t *testing.T) {
 	for _, test := range unsupportedTests {
 		t.Run(test.Name, func(t *testing.T) {
 			w := newWorld(t)
@@ -209,11 +215,11 @@ func TestAcquireFromCodexAndOpencodeFailsClosedUntilTheirSessionRulesLand(t *tes
 
 			res := w.run(caller{shellPID: 401, env: test.Env}, "acquire", "--checkout", w.dir("repo"))
 			wantStatus(t, res, exitcode.Error)
-			wantContains(t, "stderr", res.Stderr, "session liveness for "+test.Agent+" is not supported yet")
-			wantAbsent(t, "stderr", res.Stderr, "hook", "--force")
+			wantContains(t, "stderr", res.Stderr, test.WantErr, test.WantSetup)
+			wantAbsent(t, "stderr", res.Stderr, "--force")
 
 			if len(w.leases()) != 0 {
-				t.Error("an unsupported agent wrote a lease")
+				t.Error("an agent without a report wrote a lease")
 			}
 		})
 	}

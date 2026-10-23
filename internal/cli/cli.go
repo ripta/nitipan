@@ -5,11 +5,11 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,17 +22,18 @@ import (
 	"github.com/space-armada/nitipan/internal/machine"
 	"github.com/space-armada/nitipan/internal/proc"
 	"github.com/space-armada/nitipan/internal/record"
+	"github.com/space-armada/nitipan/internal/session"
 	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/version"
 )
-
-// errNotImplemented marks a command whose behavior has not landed yet.
-var errNotImplemented = errors.New("not implemented yet")
 
 // Deps are the dependencies the commands share. A nil optional field takes its production default.
 type Deps struct {
 	Stdout io.Writer
 	Stderr io.Writer
+
+	// Stdin carries the input of the hook command. Nil reads as empty.
+	Stdin io.Reader
 
 	// Getenv reads an environment variable.
 	Getenv func(string) string
@@ -67,9 +68,29 @@ type Deps struct {
 
 	// Hooks stop an operation between two writes. Only tests set them.
 	Hooks lease.Hooks
+
+	// Executable returns the absolute path of this nitipan with symlinks resolved. Hook entries and
+	// plugins run nitipan by that path. Default: os.Executable.
+	Executable func() (string, error)
+
+	// UserHome returns the home directory from the user database. It locates opencode's database and
+	// the default Codex home. Like the state directory, it never reads $HOME. Default: the user
+	// database entry.
+	UserHome func() (string, error)
+
+	// OpencodeDB reads opencode's database. Nil reads it with the sqlite3 program.
+	OpencodeDB session.OpencodeDB
 }
 
 func (d Deps) withDefaults() Deps {
+	if d.Executable == nil {
+		d.Executable = executablePath
+	}
+
+	if d.UserHome == nil {
+		d.UserHome = userHome
+	}
+
 	if d.Machine == nil {
 		d.Machine = machine.Local
 	}
@@ -91,6 +112,33 @@ func (d Deps) withDefaults() Deps {
 	}
 
 	return d
+}
+
+func executablePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("finding the nitipan executable: %w", err)
+	}
+
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolving the nitipan executable %s: %w", exe, err)
+	}
+
+	return resolved, nil
+}
+
+func userHome() (string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("reading the current user: %w", err)
+	}
+
+	if u.HomeDir == "" || !filepath.IsAbs(u.HomeDir) {
+		return "", fmt.Errorf("user database gives %q as the home directory, want an absolute path", u.HomeDir)
+	}
+
+	return u.HomeDir, nil
 }
 
 func currentUser() (string, error) {
@@ -131,7 +179,7 @@ func newRoot(a *app) *cobra.Command {
 		a.breakCmd(),
 		a.advertiseCmd(),
 		a.setupCmd(),
-		hookStub(),
+		a.hookCmd(),
 	)
 
 	return root
@@ -150,17 +198,4 @@ func Execute(deps Deps, args []string) int {
 	}
 
 	return exitcode.For(err)
-}
-
-// hookStub registers the command that agent hooks and plugins call. It stays out of help and
-// error messages, because only the entries `setup` prints should ever invoke it.
-func hookStub() *cobra.Command {
-	return &cobra.Command{
-		Use:    "hook",
-		Short:  "Called by agent hooks and plugins",
-		Hidden: true,
-		RunE: func(*cobra.Command, []string) error {
-			return fmt.Errorf("this command is %w", errNotImplemented)
-		},
-	}
 }

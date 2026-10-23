@@ -34,6 +34,9 @@ var (
 
 	// ErrExists means a record with that ID is already published.
 	ErrExists = errors.New("record already exists")
+
+	// ErrBadName means a file name could escape its directory or hide as a temp file.
+	ErrBadName = errors.New("not a usable file name")
 )
 
 // Defaults for Options.
@@ -46,6 +49,13 @@ const (
 const (
 	LeasesDir     = "leases"
 	TombstonesDir = "tombstones"
+
+	// The session directories hold what Codex hooks and opencode plugins report. They sit under
+	// sessions/, as paths relative to the state directory.
+	RegisteredDir = "sessions/registered"
+	PresenceDir   = "sessions/presence"
+	ExecutingDir  = "sessions/executing"
+	EndedDir      = "sessions/ended"
 
 	lockName   = "lock"
 	formatName = "format"
@@ -79,6 +89,15 @@ type Options struct {
 
 	// Sleep pauses between lock attempts. Nil means time.Sleep.
 	Sleep func(time.Duration)
+
+	// AfterLock runs under the lock, after the temp-file sweep, whenever the format marker allows
+	// writes. It does the upkeep that every lock holder owes, such as turning Codex end marks into
+	// ended registrations and sweeping dead hosts' session files. A failure goes to Warn and never
+	// fails the call.
+	AfterLock func(*Locked) error
+
+	// Warn receives failures that must not fail a call. Nil drops them.
+	Warn func(error)
 }
 
 // Dir is an opened state directory.

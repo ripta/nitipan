@@ -65,6 +65,12 @@ func (d *Dir) checkFormat() error {
 	return nil
 }
 
+// FormatErrAt reads the format marker of the state directory at root, without the lock. The Codex
+// end mark takes no lock, so it checks the marker this way before it writes.
+func FormatErrAt(root string) error {
+	return (&Dir{path: root}).checkFormat()
+}
+
 // FormatErr returns the reason the format marker forbids writes, or nil.
 func (l *Locked) FormatErr() error {
 	return l.formatErr

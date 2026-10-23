@@ -70,6 +70,7 @@ type Lease struct {
 	Kind          string                     `json:"kind,omitempty"`
 	Usable        bool                       `json:"usable"`
 	Liveness      Liveness                   `json:"liveness"`
+	Hint          string                     `json:"hint,omitempty"`
 	Footprint     *record.Footprint          `json:"footprint,omitempty"`
 	ClearWhenDead *bool                      `json:"clear_when_dead,omitempty"`
 	Machine       *record.Machine            `json:"machine,omitempty"`

@@ -54,15 +54,27 @@ func TestExecute(t *testing.T) {
 	}
 }
 
-func TestHookErrorDoesNotNameHook(t *testing.T) {
-	deps, _, stderr := testDeps()
+var hookMistakes = [][]string{
+	{"hook"},
+	{"hook", "bogus"},
+	{"hook", "session-start", "--nope"},
+	{"hook", "session-start"},
+	{"hook", "presence"},
+}
 
-	if got := Execute(deps, []string{"hook"}); got != exitcode.Error {
-		t.Fatalf("status = %d", got)
-	}
+func TestHookMistakesDoNotNameHook(t *testing.T) {
+	for _, args := range hookMistakes {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			deps, _, stderr := testDeps()
 
-	if strings.Contains(stderr.String(), "hook") {
-		t.Errorf("error %q names the hook command", stderr)
+			if got := Execute(deps, args); got == exitcode.OK {
+				t.Fatalf("status = %d", got)
+			}
+
+			if strings.Contains(stderr.String(), "hook") {
+				t.Errorf("error %q names the hook command", stderr)
+			}
+		})
 	}
 }
 

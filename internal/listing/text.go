@@ -46,6 +46,10 @@ func leaseText(l Lease) string {
 		fmt.Fprintf(&b, "  liveness: %s\n", l.Liveness.Reason)
 	}
 
+	if l.Hint != "" {
+		fmt.Fprintf(&b, "  hint: %s\n", l.Hint)
+	}
+
 	if l.Domain != nil {
 		fmt.Fprintf(&b, "  domain: %s\n", domainText(l))
 	} else if l.Footprint != nil {

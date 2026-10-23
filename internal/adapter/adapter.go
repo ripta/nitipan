@@ -82,9 +82,16 @@ func Codex() Adapter {
 		Name:         "codex",
 		MultiSession: true,
 		Liveness:     record.LivenessSession,
-		SessionVar:   "CODEX_SESSION_ID",
-		Markers:      []string{"CODEX_THREAD_ID", "CODEX_VERSION"},
-		Signature:    codexSignature,
+
+		// Codex's sandbox modes, from `codex --sandbox`, and its approval policies, from
+		// `codex --ask-for-approval`. Codex exports neither to a shell command, so the caller reports
+		// whichever it wants to advertise.
+		PermissionModes: []string{
+			"read-only", "workspace-write", "danger-full-access", "on-request", "never",
+		},
+		SessionVar: "CODEX_SESSION_ID",
+		Markers:    []string{"CODEX_THREAD_ID", "CODEX_VERSION"},
+		Signature:  codexSignature,
 	}
 }
 
@@ -95,9 +102,13 @@ func Opencode() Adapter {
 		Name:         "opencode",
 		MultiSession: true,
 		Liveness:     record.LivenessSession,
-		SessionVar:   "OPENCODE_SESSION_ID",
-		Markers:      []string{"OPENCODE_TERMINAL"},
-		Signature:    opencodeSignature,
+
+		// opencode has no global permission mode. Its agents are the closest thing, and `--auto`
+		// approves what no rule denies.
+		PermissionModes: []string{"build", "plan", "auto"},
+		SessionVar:      "OPENCODE_SESSION_ID",
+		Markers:         []string{"OPENCODE_TERMINAL"},
+		Signature:       opencodeSignature,
 	}
 }
 

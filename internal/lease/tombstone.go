@@ -171,8 +171,18 @@ func (c *call) tombstoneItem(t *record.Tombstone, action string) listing.Tombsto
 		BrokenBy:  &by,
 		Anonymous: t.Anonymous,
 		BrokenAt:  &at,
-		Summary:   fmt.Sprintf("%s (holder: %s)", DescribeBroken(t), describeHolder(t.Holder)),
+		Summary:   fmt.Sprintf("%s (holder: %s)", DescribeNotice(t), describeHolder(t.Holder)),
 	}
+}
+
+// DescribeNotice says what a tombstone reports. A break names the lease, the breaker, and the time.
+// Any other kind carries its own sentence.
+func DescribeNotice(t *record.Tombstone) string {
+	if t.Kind == "" {
+		return DescribeBroken(t)
+	}
+
+	return strings.TrimSuffix(t.Detail, ".")
 }
 
 // DescribeBroken says which lease was broken, by whom, and when.

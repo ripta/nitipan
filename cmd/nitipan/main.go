@@ -13,6 +13,7 @@ func main() {
 	deps := cli.Deps{
 		Stdout:   os.Stdout,
 		Stderr:   os.Stderr,
+		Stdin:    os.Stdin,
 		Getenv:   os.Getenv,
 		Procs:    proc.System(),
 		StateDir: state.ResolveDir,

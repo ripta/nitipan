@@ -44,7 +44,7 @@ func (e *Engine) Advertise(req AdvertiseRequest) (*AdvertiseResult, error) {
 	}
 
 	w := newWrites()
-	c.syncHolder(w, holderFields{Name: req.Name, Mode: req.Mode, Session: h.SessionID})
+	c.syncHolder(w, holderFields{Name: req.Name, Mode: req.Mode, Session: h.SessionID, Host: c.hostSync(h)})
 
 	if req.Description != nil {
 		target, err := c.descriptionTarget(req.LeaseID)
@@ -69,6 +69,8 @@ func (e *Engine) Advertise(req AdvertiseRequest) (*AdvertiseResult, error) {
 	if err := c.flush(w); err != nil {
 		return nil, err
 	}
+
+	c.reportMoves(h, w)
 
 	res := &AdvertiseResult{}
 	for _, en := range c.mine {

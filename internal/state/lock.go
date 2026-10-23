@@ -115,6 +115,12 @@ func (d *Dir) Lock() (*Locked, error) {
 
 			return nil, err
 		}
+
+		if d.opts.AfterLock != nil {
+			if err := d.opts.AfterLock(l); err != nil && d.opts.Warn != nil {
+				d.opts.Warn(fmt.Errorf("session upkeep: %w", err))
+			}
+		}
 	}
 
 	return l, nil

@@ -18,6 +18,7 @@ import (
 	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/record"
+	"github.com/space-armada/nitipan/internal/session"
 	"github.com/space-armada/nitipan/internal/state"
 )
 
@@ -48,6 +49,10 @@ type Engine struct {
 	Notify Notify
 
 	Hooks Hooks
+
+	// Sessions reads and writes the files that Codex hooks and opencode plugins report. Nil means no
+	// agent of liveness kind session can acquire.
+	Sessions *session.Service
 }
 
 // NewEngine returns an Engine with the default clock and ID source.
@@ -72,6 +77,9 @@ type entry struct {
 	Rec  *record.Record
 	Bad  *record.UnusableError
 	Live liveness.Result
+
+	// Hint is advice for a person that never changes the verdict.
+	Hint string
 }
 
 // Reasons this package adds to the ones the record package defines.
@@ -128,7 +136,7 @@ func (e *Engine) load() ([]*entry, error) {
 			en.Bad = &record.UnusableError{Reason: reasonNameVsBody, Version: rec.Version}
 		default:
 			en.Rec = rec
-			en.Live = e.Checker.Check(rec.Envelope)
+			en.Live, en.Hint = e.Checker.CheckHint(rec.Envelope)
 		}
 
 		out = append(out, en)
@@ -160,6 +168,12 @@ type call struct {
 
 	// delivered holds the tombstones this call reported to the caller and removed.
 	delivered []*record.Tombstone
+
+	// held says why the caller's leases stayed on their old host, when a move was needed and refused.
+	held string
+
+	// hs caches the host decision, since acquire asks for it more than once.
+	hs *hostSync
 }
 
 func (c *call) close() {
@@ -426,6 +440,9 @@ type holderFields struct {
 	Name    *string
 	Mode    *string
 	Session string
+
+	// Host is the host the caller runs under now. It matters only for liveness kind session.
+	Host hostSync
 }
 
 // effective returns the name and mode every record of the caller should carry. A flag left out keeps
@@ -467,6 +484,20 @@ func (c *call) syncHolder(w *writes, f holderFields) {
 			}
 
 			r.Holder.SessionID = f.Session
+
+			return true
+		})
+
+		w.edit(en, false, func(r *record.Record) bool {
+			if !f.Host.Move || r.Liveness != record.LivenessSession {
+				return false
+			}
+
+			if r.Holder.PID == f.Host.PID && r.Holder.Start.Equal(f.Host.Start) {
+				return false
+			}
+
+			r.Holder.PID, r.Holder.Start = f.Host.PID, f.Host.Start
 
 			return true
 		})
