@@ -11,8 +11,9 @@ The previous run, which built M1 to M3 and held M4, is reported in
 
 ## TL;DR
 
-In progress. The pre-gate work is reviewed and committed with M4 `IN PROGRESS`. The run waits at the gate for the
-user to run the two handoffs in real Codex and opencode sessions.
+M4 is DONE and NIT-001 is `implemented`. The Codex and opencode adapters pass automated live checks, `make
+live-codex` and `make live-opencode`, which need no manual steps and spend no model quota. The manual handoffs ran
+partway first. Their gaps led to the harnesses, and the harnesses found three bugs, all fixed.
 
 ## Run state
 
@@ -22,7 +23,7 @@ user to run the two handoffs in real Codex and opencode sessions.
 
 | Milestone | Run status | Commits |
 |-----------|------------|---------|
-| NIT-001 M4 | DONE | `a0c9f30`, `90e4903`, `afe6aea`, `15ad3d4`, `c33f6ee`, and the M4 completion commit |
+| NIT-001 M4 | DONE | `a0c9f30`, `90e4903`, `afe6aea`, `15ad3d4`, `c33f6ee`, `6b8d637` |
 
 M4 lands as two commits. The pre-gate commit carries the code, tests, plugins, and handoffs, with M4 `IN PROGRESS`.
 The run then pauses at one gate while the user runs the live checks in real Codex and opencode sessions. The
@@ -270,6 +271,37 @@ adr-impact also named the per-lock upkeep run by every lock holder as a possible
 proposal's "Session liveness on shared hosts" already says every lock holder runs it, and it shapes only nitipan's
 internals.
 
+## Row and final reviews
+
+The row review covered `d9dbcdc..6b8d637`. It found no code defects. Two texts were stale: the README's Status line,
+and the tombstone delivery ADR candidate, still "Waits on NIT-001 M4". Both were fixed in `c0fe185`. The candidate
+now reads Undecided. adr-impact found no conflicts with ADR-01 through ADR-04.
+
+NIT-001 was then marked `implemented` in the proposal and the index, in `4debea7`. Row `NIT-001 M1-M4` already sat
+above every unfinished row in `queue.md`.
+
+The final review covered `d9dbcdc..4debea7` and was also the ADR review. The range adds no ADR. `make ci` passed,
+and `proposals.py check` and `freeze` returned `[]`.
+
 ## Status
 
-In progress.
+The run is finished. Commits in this repo, in order:
+
+1. `a0c9f30` nitipan: judge Codex and opencode leases by session
+2. `90e4903` spec: start the NIT-001 M4 live-check sessions in the repo
+3. `afe6aea` nitipan: mark only a TUI's own opencode sessions as present
+4. `15ad3d4` spec: record NIT-001 M4 live-check progress per check
+5. `c33f6ee` spec: record the NIT-001 M4 opencode live results
+6. `6b8d637` nitipan: verify Codex and opencode liveness with automated live checks
+7. `c0fe185` nitipan: describe the automated live checks in the README
+8. `4debea7` spec: mark NIT-001 implemented
+9. This report's last amendment, committed on its own
+
+No stashes were made. Open for the user:
+
+- Undecided ADR candidates in NIT-001's Decision Log: the state directory layout (now including `sessions/`), the
+  exit-status table, and tombstone delivery.
+- 11 config-memory files from early harness runs in `~/.local/state/nitipan/sessions/config/`. They are harmless.
+  The permission check blocked their removal.
+- Best guesses worth a look: plugin `session.wait` timing (300 ms probe, rescans at 2, 5, 15, and 45 s), and the
+  config memory keyed by a hash of CODEX_HOME.
