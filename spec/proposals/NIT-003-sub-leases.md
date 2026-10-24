@@ -1,8 +1,8 @@
 # NIT-003: Sub-Leases
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-10-20
+**Updated:** 2026-10-24
 
 ## Dependencies
 
