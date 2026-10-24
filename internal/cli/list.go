@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +19,10 @@ overlap that domain, by nitipan's own canonicalization and overlap rule. With --
 leases on that resource name. A resource lease written on another machine is marked remote. A local
 resource lease shows how many holders its name admits and which leases hold it. The text output also
 prints where the counts are configured.
+
+A sub-lease prints indented under its parent, and a pending request under the lease it asks to share. A
+list that takes the lock also delivers the caller's notices, as any other command does. A list that
+reads without the lock delivers none.
 
 --json is the supported interface for scripts and guardians. Its schema is versioned apart from the
 lease files, which are nitipan's own format. A liveness of "unknown" means treat the holder as alive.`,
@@ -77,6 +82,10 @@ func (a *app) runList(cmd *cobra.Command) error {
 			fmt.Fprintf(a.deps.Stderr, "nitipan: tombstone %s: %s\n", t.Action, t.Summary)
 		}
 
+		for _, n := range out.Notices {
+			fmt.Fprintf(a.deps.Stderr, "nitipan: notice: %s.\n", strings.TrimSuffix(n.Summary, "."))
+		}
+
 		if asJSON {
 			return listing.Encode(a.deps.Stdout, out)
 		}
@@ -90,12 +99,12 @@ func (a *app) runList(cmd *cobra.Command) error {
 	}
 
 	if res.LockErr != nil {
-		res.Warnings = append(res.Warnings, fmt.Sprintf("listing without the state lock, so tombstones are not delivered: %v",
+		res.Warnings = append(res.Warnings, fmt.Sprintf("listing without the state lock, so tombstones and notices are not delivered: %v",
 			a.wrapErr(res.LockErr)))
 	}
 
 	if callerErr != nil {
-		res.Warnings = append(res.Warnings, fmt.Sprintf("%v; tombstones are not delivered", callerErr))
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%v; tombstones and notices are not delivered", callerErr))
 	}
 
 	for _, w := range res.Warnings {

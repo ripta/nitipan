@@ -139,16 +139,26 @@ func (c *call) holdsCoverOf(paths []string) bool {
 	return true
 }
 
-// deliverNotices reports every notice addressed to the caller, then removes it. It runs under the
-// lock after the call's repairs, so a notice never describes a state that a repair is about to change.
-// A notice that cannot be used is left alone, and a failed removal is reported without failing the call.
-func (c *call) deliverNotices(h adapter.Holder) {
+// dueNotice is a notice addressed to the caller that a call is done with. Report says the caller is
+// told. A notice that is not reported is dropped, since it no longer says anything true.
+type dueNotice struct {
+	Name   string
+	Notice *record.Notice
+	Report bool
+}
+
+// dueNotices finds the notices addressed to the caller that this call delivers or drops, after the
+// call's repairs. A notice that cannot be used is left alone, and so is a loss notice that waits for
+// its loss.
+func (c *call) dueNotices(h adapter.Holder) []dueNotice {
 	names, err := state.ListNames(c.e.Dir.Path(), state.NoticesDir)
 	if err != nil {
 		c.e.Notify.warn(err)
 
-		return
+		return nil
 	}
+
+	var due []dueNotice
 
 	for _, name := range names {
 		data, err := state.ReadName(c.e.Dir.Path(), state.NoticesDir, name)
@@ -171,12 +181,31 @@ func (c *call) deliverNotices(h adapter.Holder) {
 		case keepNotice:
 			continue
 		case deliverNotice:
-			c.e.Notify.notice(n)
+			due = append(due, dueNotice{Name: name, Notice: n, Report: true})
+		case dropNotice:
+			due = append(due, dueNotice{Name: name, Notice: n})
+		}
+	}
+
+	return due
+}
+
+// deliverNotices reports every notice addressed to the caller, then removes it. It runs under the
+// lock after the call's repairs, so a notice never describes a state that a repair is about to change.
+// A failed removal is reported without failing the call.
+func (c *call) deliverNotices(h adapter.Holder) {
+	for _, d := range c.dueNotices(h) {
+		if d.Report {
+			c.e.Notify.notice(d.Notice)
 		}
 
-		if err := c.l.RemoveNamed(state.NoticesDir, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			c.e.Notify.warn(fmt.Errorf("removing the notice %s: %w", filepath.Join(c.e.Dir.Path(), state.NoticesDir, name), err))
-		}
+		c.removeNotice(d.Name)
+	}
+}
+
+func (c *call) removeNotice(name string) {
+	if err := c.l.RemoveNamed(state.NoticesDir, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		c.e.Notify.warn(fmt.Errorf("removing the notice %s: %w", filepath.Join(c.e.Dir.Path(), state.NoticesDir, name), err))
 	}
 }
 

@@ -587,7 +587,7 @@ func TestListWithoutWriteAccessStillShowsUnusableTombstonesAndDeliversNothing(t 
 
 			res := w.run(holder, "list", "--json")
 			wantStatus(t, res, exitcode.OK)
-			wantContains(t, "stderr", res.Stderr, "tombstones are not delivered", "nitipan: tombstone unknown:")
+			wantContains(t, "stderr", res.Stderr, "tombstones and notices are not delivered", "nitipan: tombstone unknown:")
 			wantAbsent(t, "stderr", res.Stderr, "was broken by")
 
 			var doc map[string]any

@@ -121,8 +121,10 @@ is the holder's own session, when the requester has died, when the keys are no l
 another live lease overlaps them.
 
 The requester learns of a grant or a refusal from a notice on its next nitipan call. A notice goes to stderr as
-`nitipan: notice: ...` and is removed once it is delivered. `list` does not deliver notices. Requests wait in
-`requests/` and notices in `notices/`, both in the state directory. Older binaries never read either one.
+`nitipan: notice: ...` and is removed once it is delivered. A `list` that takes the lock delivers the caller's notices
+like any other command, and `list --json` also reports them in its `notices` array. A `list` that reads without the
+lock delivers none. Requests wait in `requests/` and notices in `notices/`, both in the state directory. Older binaries
+never read either one.
 
 While a sub-lease lives:
 
@@ -153,6 +155,30 @@ When a sub-lease or its parent ends:
 - A request whose parent lease ended is declined with a notice. A notice whose holder is dead is removed by the next
   call that takes the lock.
 - A binary older than a sub-lease's record version never rewrites it and writes no notice for it.
+
+`list` shows the tree. The text output prints each sub-lease indented under its parent, and each pending request under
+the lease it asks to share. A sub-lease whose parent is dead or gone prints at the top level, with its stored `parent`
+link, until a locked call repairs it. A `list` that reads without the lock prints it that way too.
+
+`list --json` has schema version 1.2, an additive change over 1.1. Consumers ignore fields they do not know. Every
+lease stays a top-level entry in `leases`, so a consumer of the earlier schema still sees all of them.
+
+- `parent` is on a sub-lease, and names its parent lease ID.
+- `delegated` is on a parent that has live sub-leases. It lists each one as `{"id": ..., "keys": [...]}`. It is
+  computed when `list` runs and is never stored. A lease with no live sub-leases carries no `delegated` field.
+- `owner` and `grantor_of` appear only when `list` is filtered by a domain. An unfiltered `list` has no path to answer
+  for, so it omits both. `owner` is true when the filter overlaps a part of the lease that no live sub-lease holds, and
+  false when the match lies wholly inside the sub-leases. `grantor_of` lists the IDs of the live sub-leases whose keys
+  the filter overlaps, and is absent when there are none. A parent that holds `/repo` and delegated `/repo/src` is the
+  owner and the grantor when filtered by `/repo`. Filtered by `/repo/src`, it is only the grantor, and the sub-lease is
+  the owner. A resource filter sets neither mark.
+- `requests` lists the pending requests, each with its `id`, `parent` lease ID, `requester` holder (which carries the
+  handle), `liveness`, `keys`, `description` when the requester gave one, and `requested_at`. A request that `grant`
+  is already working on is not pending. A filtered `list` keeps the requests whose keys overlap the filter.
+- `notices` lists the notices this call delivered, each with its `cause`, `target`, `paths`, `at`, and a `summary`
+  sentence. Delivery removes a notice, so read this array when stderr is not captured.
+
+`requests`, `notices`, and `tombstones` are always arrays, never null.
 
 A sub-lease is its own record in `leases/`, with a `parent` field that names the lease it came from. The parent's record
 does not change. Records that use `parent`, and requests and notices, carry record version 1.2. A lease that uses none

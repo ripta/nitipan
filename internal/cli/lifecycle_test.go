@@ -72,11 +72,11 @@ func TestADeadParentLeavesItsSubLeasesAsOrdinaryLeasesWithOneNoticeEach(t *testi
 
 	res = tr.w.run(tr.sibling, "list")
 	wantStatus(t, res, exitcode.OK)
-	wantAbsent(t, "stderr", res.Stderr, "lost its parent")
+	wantContains(t, "stderr", res.Stderr, "your sub-lease "+tr.siblingID, "lost its parent")
 
 	res = tr.w.run(tr.sibling, "release", "--all")
 	wantStatus(t, res, exitcode.OK)
-	wantContains(t, "stderr", res.Stderr, "your sub-lease "+tr.siblingID, "lost its parent")
+	wantAbsent(t, "stderr", res.Stderr, "lost its parent")
 
 	if names := tr.w.fileNames(state.TombstonesDir); len(names) != 0 {
 		t.Errorf("tombstones = %v, want none: a notice is not a tombstone", names)

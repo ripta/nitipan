@@ -14,8 +14,8 @@ its domain (`spec/proposals/NIT-003-sub-leases.md`). Environment: macOS, run fro
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
 | NIT-003 M1 | DONE | `2ee18df` |
-| NIT-003 M2 | IN PROGRESS | |
-| NIT-003 M3 | QUEUED | |
+| NIT-003 M2 | DONE | `344a4e6` |
+| NIT-003 M3 | IN PROGRESS | |
 
 ## Plan-time facts
 
@@ -137,3 +137,44 @@ Review findings:
 - adr-impact: no conflicts. It named "a rewrite drops a record to the lowest minor its fields need" as an uncovered
   decision. Dismissed: writers already stamp the lowest minor their fields need, so the rule is not new to this row and
   fails the Architecture test.
+
+### NIT-003 M3
+
+Code commit for M2: `344a4e6 nitipan: keep sub-leases alive when their parent ends`. The M3 commit is named under the
+row review's section.
+
+Checks: `make ci` passed before and after the review fixes. Lint reported 0 issues. `proposals.py freeze` with both
+row commits returned `[]`. `proposals.py check` reported only that every milestone is finished, so the proposal should
+be `implemented`. The row finish resolves that. The old-binary harness was not rerun, since no record or state-directory
+format changed.
+
+Best guesses the implementer made, each also in the proposal's Decision Log:
+
+1. An unfiltered or resource-filtered `list` omits `owner` and `grantor_of`. A mark is always computed from a query, so
+   an absent mark never means false.
+2. `requests` leaves out requests in the `granting` state and request files this binary cannot use. A filtered `list`
+   keeps only the requests whose keys overlap the filter. Each request carries `id`, `parent`, `requester` with its
+   handle, `liveness`, `keys`, `description`, and `requested_at`.
+3. A locked `list` runs the request and child repairs and reaps dead holders' notices. It then delivers the caller's
+   notices and reports each in a `notices` array with a `summary`. An unlocked `list` does none of this. This settles
+   plan best guess 7, on the reading that "a `list` that reads without the lock delivers no notices" implies a locked
+   one does.
+4. A sub-lease of a dead parent displays as standing alone, since the next locked call makes it so.
+5. A lease with a `parent` link is never a nesting parent, so a planted cycle cannot recurse.
+6. The unlocked-read warnings now say "tombstones and notices are not delivered".
+
+Review findings:
+
+- M3's amended check had no marker. Fixed.
+- The "Display" owner bullet still said "outside the union of its live children's keys". The code tests each part
+  against one child key at a time. Fixed by rewording the bullet to the per-part rule, with a Decision Log entry. The
+  bullet explains why the two agree for path keys.
+- A repair write failure made a locked `list` fail. Traced and confirmed against NIT-001's rule that a failed tombstone
+  removal is reported, not fatal. Fixed: the failure is now a warning, `list` still prints what it read, and that call
+  delivers no notices. A test covers it.
+- `list`'s repair did not reap dead holders' notices, unlike every other locked call. Fixed for parity.
+- The `marks` comment credited ADR-03 with a sentence ADR-03 does not carry. Fixed.
+- The README `requests` bullet omitted `description`. Fixed.
+- adr-impact: no conflicts. It named two uncovered decisions. Both were dismissed. A locked `list` delivering notices
+  extends NIT-001's existing tombstone delivery by `list`, so it does not depart from the past. The `list --json`
+  consumer contract is NIT-001's, whose ADR candidate the user already declined.

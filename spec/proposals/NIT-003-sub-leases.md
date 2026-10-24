@@ -247,19 +247,32 @@ sub-leases nested inside their parent's entry, flat entries with computed annota
 stored `parent` link.
 
 Decision (autonomous): every lease stays a top-level entry, with computed annotations. The `list --json` change is an
-additive minor bump of its schema.
+additive minor bump of its schema, from 1.1 to 1.2. Amended 2026-10-24; see Decision Log.
 
 - A child carries `parent`, its parent's lease ID
 - A parent carries a computed `delegated` list of its live children's IDs and keys. It is computed at read time, never
   stored in the parent's record
-- A filtered query marks each match. A lease is `owner` when the query overlaps its keys outside the union of its live
-  children's keys. A parent is also `grantor_of` the children whose keys match. A parent holding `/repo` with `/repo/src` delegated, filtered by
-  `/repo`, is `owner` and `grantor_of` the child. Filtered by `/repo/src`, it is only `grantor_of`, and the child is
-  `owner`
-- Pending requests appear in a top-level `requests` array, each with its parent lease ID, requester handle, and keys
-- The human table prints children indented under their parent, and pending requests under the lease they target
-- A child whose parent is dangling prints at the top level with no grantor mark. That includes a `list` that reads
-  without the lock
+- A filtered query marks each match. A lease is `owner` when some part of the query that overlaps its keys is held by
+  none of its live children. The part is the deeper of the query key and the lease key, and a child holds it when one of
+  the child's keys contains it. Testing one child key at a time is the same as testing the union, since a part is one
+  path and sibling subtrees are disjoint. A parent is also `grantor_of` the children whose keys match. A parent holding `/repo` with
+  `/repo/src` delegated, filtered by `/repo`, is `owner` and `grantor_of` the child. Filtered by `/repo/src`, it is only
+  `grantor_of`, and the child is `owner`
+- An unfiltered `list` sets neither mark, since there is no path to answer for. A resource filter sets neither. The
+  parent link and the `delegated` list carry the structure there. A mark that is present is always computed from a
+  query, and an absent one never means false
+- Pending requests appear in a top-level `requests` array, each with its parent lease ID, requester holder and handle,
+  liveness, and keys. A request in the `granting` state is not pending and is left out. A filtered query keeps the
+  requests whose keys overlap the filter
+- `list` that takes the lock runs the same repairs of requests and sub-leases as any locked call, then delivers the
+  caller's notices. It reports each delivered notice in a top-level `notices` array with a `summary`, as tombstones are.
+  The array is always present, and empty for a `list` that reads without the lock, which delivers none
+- A sub-lease counts as live, and so as delegated, only while its holder and its parent are alive. A child whose parent
+  is dead is displayed like one whose parent is dangling
+- The human table prints children indented under their parent, and pending requests under the lease they target. A
+  request whose lease is not listed prints in a group of its own
+- A child whose parent is dangling prints at the top level with no grantor mark, showing its stored `parent` link. That
+  includes a `list` that reads without the lock
 
 Requests are visible to every session. That is harmless. Only the parent can grant, only the parent or the requester
 can decline, and a grant binds the recorded identity. Seeing a request lets a third party do nothing.
@@ -496,14 +509,29 @@ None.
 
 ### M3: Display
 
-**Status:** NOT STARTED
+**Status:** DONE
 
-- `list --json` carries `parent`, a computed `delegated` list, `owner` and `grantor_of` marks, and a `requests` array,
-  as an additive minor bump of its schema
+- `list --json` carries `parent`, a computed `delegated` list, `owner` and `grantor_of` marks, a `requests` array, and a
+  `notices` array of what that call delivered, as an additive minor bump of its schema. A `list` that takes the lock
+  repairs and delivers, and one that reads without it delivers none. Amended 2026-10-24; see Decision Log
 - A filter on an ancestor of a delegated key marks the parent `owner` and `grantor_of`. A filter on a delegated key
   marks the child `owner` and the parent only `grantor_of`
 - The human table indents children and pending requests under their parent, and prints a dangling child at the top
   level, including when `list` reads without the lock
+
+**As built:**
+
+- `list` under the lock now runs the request and sub-lease repairs and delivers the caller's notices, which M1 and M2
+  left undone. A test of M2 that expected a locked `list` to leave a notice for the sub-lessee's next call was changed
+  to match. See the Decision Log entries of 2026-10-24 for M3.
+- The owner check takes the deeper of each overlapping query key and lease key, and asks whether one sub-lease key
+  contains it. Tests cover each example in "Display", a full handoff, siblings, a parent whose keys are all delegated,
+  and a shared prefix.
+- The unlocked `list` reads a dead parent's children as standing alone, since that is what the next locked call makes
+  them. A test plants a dangling child and lists with the lock held by another process, as JSON and as text.
+- A request file this binary cannot use is not shown in `requests`.
+- `list --json` goldens moved to schema 1.2. The old-binary harness was not rerun, since no record or state-directory
+  change landed.
 
 ## Decision Log
 
@@ -625,6 +653,34 @@ None.
   its sub-lease names a live parent, and dropped when the sub-lease is gone. A "sub-lease ended" notice is held while
   the sub-lease exists, and dropped when the addressee holds no lease covering its keys. No new field is stored. Amended
   "Liveness and the parent's death".
+- 2026-10-24 (run best guess, NIT-003 M3): `list --json` is schema 1.2, and a lease with sub-leases is described by
+  computed fields only. The text said only "an additive minor bump". Amended "Display".
+- 2026-10-24 (run best guess, NIT-003 M3): An unfiltered `list` omits `owner` and `grantor_of`, and a resource filter
+  omits them too. The text did not say. A mark answers a question about a path, so an unfiltered list has none to
+  answer, and setting `owner` true on every lease would read as a claim nobody checked. If wrong, an unfiltered `list`
+  would set `owner` true everywhere and `grantor_of` from `delegated`. Amended "Display".
+- 2026-10-24 (run best guess, NIT-003 M3): `requests` omits a request in the `granting` state, and a filtered `list`
+  keeps only the requests whose keys overlap the filter. A granting request is never granted again and its repair
+  finishes it, so showing it as pending would invite a second grant. Amended "Display".
+- 2026-10-24 (run best guess, NIT-003 M3): `list` that takes the lock runs the repairs of requests and sub-leases, and
+  delivers the caller's notices, reported in a `notices` array with a `summary`. M1 and M2 left `list` neither
+  repairing nor delivering. "Liveness and the parent's death" says a `list` that reads without the lock delivers no
+  notices, as it skips tombstone cleanup, which implies a locked one does. Delivery removes a notice, so stderr alone
+  would lose it for a guardian that pipes JSON. A `list` that reads without the lock repairs and delivers nothing. A
+  test of M2 that expected a locked `list` to leave the notice was changed to expect delivery. If wrong, drop the
+  repairs and the `notices` array. Amended "Display" and M3.
+- 2026-10-24 (run best guess, NIT-003 M3): A failed repair in a locked `list` is a warning, not an error. `list` still
+  prints what it read, and delivers no notice that call. `list` is the guardians' supported read path, and NIT-001
+  already makes a failed tombstone removal non-fatal. A locked `list` also reaps the notices of dead holders, as every
+  locked call does. Amended "Display".
+- 2026-10-24 (run best guess, NIT-003 M3): Reworded the `owner` rule in "Display". It read "when the query overlaps its
+  keys outside the union of its live children's keys". It now reads "when some part of the query that overlaps its keys
+  is held by none of its live children", with the part and the holding spelled out. The two agree for path keys, since
+  a part is one path and sibling subtrees are disjoint. The old wording hid how a part is found. Amended M3's first
+  check to name the `notices` array, with the earlier entry above.
+- 2026-10-24 (run best guess, NIT-003 M3): A sub-lease whose parent is dead is displayed as standing alone, and a dead
+  parent lists no `delegated`. The text covered a dangling parent only. "Liveness and the parent's death" treats the two
+  alike, and the next locked call makes that so. Amended "Display".
 - 2026-10-24: ADR candidate (cuts across the system): a parent and its sub-lessees are exempt from each other at
   overlap, at the record level and outside ADR-03's key rule. NIT-005, NIT-008, and every later claim check must apply
   it. Undecided. Found in NIT-003 M1.

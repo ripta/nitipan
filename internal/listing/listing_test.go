@@ -262,3 +262,147 @@ func TestListTextMarksARemoteResourceLease(t *testing.T) {
 		t.Errorf("text = %q", buf.String())
 	}
 }
+
+func TestListJSONAlwaysWritesRequestsAndNoticesAsArrays(t *testing.T) {
+	doc := decodeOutput(t, Output{})
+
+	for _, field := range []string{"requests", "notices", "tombstones"} {
+		arr, ok := doc[field].([]any)
+		if !ok || len(arr) != 0 {
+			t.Errorf("%s = %v, want an empty array", field, doc[field])
+		}
+	}
+
+	if doc["schema_version"] != "1.2" {
+		t.Errorf("schema_version = %v", doc["schema_version"])
+	}
+}
+
+func TestListJSONWritesTheSubLeaseFieldsOnlyWhereTheyApply(t *testing.T) {
+	owner := false
+
+	parent := Lease{ID: "P", Usable: true, Owner: &owner, GrantorOf: []string{"C"},
+		Delegated: []Delegation{{ID: "C", Keys: []string{"/repo/src"}}}}
+	child := Lease{ID: "C", Usable: true, Parent: "P"}
+	plain := Lease{ID: "X", Usable: true}
+
+	doc := decodeOutput(t, Output{Leases: []Lease{parent, child, plain}})
+	leases, _ := doc["leases"].([]any)
+
+	p, _ := leases[0].(map[string]any)
+	grantor, _ := p["grantor_of"].([]any)
+	delegated, _ := p["delegated"].([]any)
+
+	if p["owner"] != false || len(grantor) != 1 || len(delegated) != 1 {
+		t.Errorf("parent = %v", p)
+	}
+
+	c, _ := leases[1].(map[string]any)
+	if c["parent"] != "P" {
+		t.Errorf("child = %v", c)
+	}
+
+	x, _ := leases[2].(map[string]any)
+	for _, field := range []string{"parent", "delegated", "owner", "grantor_of"} {
+		if _, ok := x[field]; ok {
+			t.Errorf("a plain lease carries %s: %v", field, x)
+		}
+	}
+}
+
+func TestListJSONShowsAPendingRequestWithItsRequesterHandle(t *testing.T) {
+	doc := decodeOutput(t, Output{Requests: []Request{{
+		ID: "R", Parent: "P", Requester: record.Holder{Agent: "claude", Handle: "quiet-otter", PID: 77},
+		Liveness: Liveness{Status: "alive"}, Keys: []string{"/repo/lib"},
+	}}})
+
+	reqs, _ := doc["requests"].([]any)
+	req, _ := reqs[0].(map[string]any)
+	requester, _ := req["requester"].(map[string]any)
+
+	reqKeys, _ := req["keys"].([]any)
+
+	if req["parent"] != "P" || requester["handle"] != "quiet-otter" || len(reqKeys) != 1 {
+		t.Errorf("request = %v", req)
+	}
+}
+
+func subLeaseOutput() Output {
+	owner := true
+	notOwner := false
+
+	return Output{
+		Leases: []Lease{
+			{ID: "P", Usable: true, Liveness: Liveness{Status: "alive"}, Owner: &notOwner, GrantorOf: []string{"C"},
+				Delegated: []Delegation{{ID: "C", Keys: []string{"/repo/src"}}}},
+			{ID: "C", Usable: true, Liveness: Liveness{Status: "alive"}, Parent: "P", Owner: &owner},
+			{ID: "Z", Usable: true, Liveness: Liveness{Status: "alive"}},
+		},
+		Requests: []Request{
+			{ID: "R", Parent: "P", Requester: record.Holder{Handle: "quiet-otter"}, Liveness: Liveness{Status: "alive"},
+				Keys: []string{"/repo/lib"}},
+			{ID: "Q", Parent: "GONE", Requester: record.Holder{Handle: "loud-owl"}, Liveness: Liveness{Status: "alive"},
+				Keys: []string{"/other"}},
+		},
+	}
+}
+
+func TestListTextIndentsSubLeasesAndRequestsUnderTheirParent(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteText(&buf, subLeaseOutput()); err != nil {
+		t.Fatal(err)
+	}
+
+	want := `P  alive
+  owner of the match: no
+  grantor of: C
+  request R for lease P, alive
+    wants: /repo/lib
+    requester handle: quiet-otter, agent name: (none)
+  C  alive
+    owner of the match: yes
+
+Z  alive
+
+  request Q for lease GONE, alive
+    wants: /other
+    requester handle: loud-owl, agent name: (none)
+`
+
+	if buf.String() != want {
+		t.Errorf("text =\n%s\nwant\n%s", buf.String(), want)
+	}
+}
+
+func TestListTextPrintsASubLeaseWhoseParentIsNotListedAtTheTopLevel(t *testing.T) {
+	out := subLeaseOutput()
+	out.Leases = out.Leases[1:2]
+	out.Leases[0].Owner = nil
+	out.Requests = nil
+
+	var buf bytes.Buffer
+	if err := WriteText(&buf, out); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "C  alive\n  parent link: P\n"
+	if buf.String() != want {
+		t.Errorf("text = %q, want %q", buf.String(), want)
+	}
+}
+
+func TestListTextNeverNestsASubLeaseUnderASubLease(t *testing.T) {
+	out := Output{Leases: []Lease{
+		{ID: "A", Usable: true, Liveness: Liveness{Status: "alive"}, Parent: "B", Delegated: []Delegation{{ID: "B"}}},
+		{ID: "B", Usable: true, Liveness: Liveness{Status: "alive"}, Parent: "A", Delegated: []Delegation{{ID: "A"}}},
+	}}
+
+	var buf bytes.Buffer
+	if err := WriteText(&buf, out); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(buf.String(), "\n  B ") || strings.HasPrefix(buf.String(), "  ") {
+		t.Errorf("text = %q", buf.String())
+	}
+}
