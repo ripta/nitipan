@@ -2,7 +2,7 @@
 
 **Status:** draft
 **Created:** 2026-10-18
-**Updated:** 2026-10-18
+**Updated:** 2026-10-24
 
 ## Dependencies
 
@@ -66,6 +66,27 @@ credential or forwards each session's.
 The research covers identity only. It does not say who may break whose lease, or whether a shared agent may claim in a
 user's scope without that user's approval.
 
+### Shared agents and acting_for
+
+Moved from NIT-004, which deferred it here. Settle it before NIT-006 is accepted.
+
+A shared agent serves several users and holds leases in the requesting user's scope. Its record's `acting_for` differs
+from its `holder` user. Which scope's overlaps such a lease counts against is open:
+
+- The requesting user's scope, named by `acting_for`
+- The agent's own scope, named by its holder's user
+- Both
+
+The answer depends on "What auth authorizes": whether an agent may claim in a user's scope without that user's
+approval. M1's refusal of a record whose `acting_for` does not match the authenticated identity also depends on it.
+Read literally, that check refuses every shared agent's record.
+
+Every CLI before this proposal writes `acting_for` as the OS user name. That value is not an authenticated identity,
+and OS user names differ across one person's machines. Whatever this proposal picks must treat a legacy `acting_for`
+as unauthenticated, for example by mapping it through the node's authenticated user.
+
+Until this lands, NIT-004 runs one user scope per broker, and `acting_for` is carried unchanged and ignored for scope.
+
 ## Risks
 
 - **Auth arrives after callers depend on no-auth behavior** — likelihood: medium, impact: medium.
@@ -95,6 +116,8 @@ user's scope without that user's approval.
 
 - 2026-10-18: Drafted from the lease broker research. Settled decisions are limited to the roadmap the user approved
   that day.
+- 2026-10-24: Added the open question "Shared agents and acting_for", moved from NIT-004's design review at the user's
+  request. It blocks acceptance.
 
 ## References
 
