@@ -15,7 +15,7 @@ its domain (`spec/proposals/NIT-003-sub-leases.md`). Environment: macOS, run fro
 |-----------|------------|--------|
 | NIT-003 M1 | DONE | `2ee18df` |
 | NIT-003 M2 | DONE | `344a4e6` |
-| NIT-003 M3 | IN PROGRESS | |
+| NIT-003 M3 | DONE | `2184fa6` |
 
 ## Plan-time facts
 
@@ -206,3 +206,30 @@ expected "should be implemented".
 
 The implementer chose to put the shared helper in `keys` as `keys.Paths`, since `cli` cannot reach `lease`'s
 unexported helper.
+
+## Row finish and final review
+
+Commits:
+
+1. `2ee18df nitipan: add sub-leases with request and grant`
+2. `344a4e6 nitipan: keep sub-leases alive when their parent ends`
+3. `2184fa6 nitipan: show sub-leases and requests in list`
+4. `7b236e7 nitipan: share sub-lease repairs across every locked call`
+5. `89bfbbc spec: mark NIT-003 implemented`
+6. This report's last amendment, committed on its own.
+
+`89bfbbc` set NIT-003 to `implemented` and updated the index. `queue.md` needed no edit. Every row is finished, and
+`NIT-003 M1-M3` already sits in build order. `proposals.py check` returned `[]`.
+
+The final review ran over `f29ad6d..89bfbbc`, with an ADR review. `freeze` with all five commits returned `[]`. The
+reviewer found nothing. adr-impact found no conflicts or supersessions, and no ADR file changed in the range.
+
+## Open for the user
+
+- ADR candidates in NIT-003's Decision Log:
+  - The 2026-10-18 entry says a sub-lease is its own record with a `parent` link, in `requests/` and `notices/`. It
+    waits on "NIT-001 accepted". NIT-001 is now implemented, so that hook's condition has passed.
+  - The 2026-10-24 entry is `Undecided`: a parent and its sub-lessees are exempt from each other at overlap.
+- The old-binary harnesses live only in the scratchpad `old-binary/` directory. They are not in the repo.
+- No freeze hunk with origin `other` or `unknown` appeared, and no finding had disposition `user`. No row was held or
+  blocked, and nothing was stashed.
