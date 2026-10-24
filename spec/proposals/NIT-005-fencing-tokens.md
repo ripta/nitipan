@@ -546,6 +546,17 @@ depend on the broker, and each refusal pushes the user toward `--no-verify`. A g
 Pruning was rejected. A holder whose lease expired while its laptop was closed would recreate a pruned fence ref with
 its old token and land a stale push, which the newer holder's fence would have refused.
 
+### Local fencing for a `user` lease
+
+The local hook judges only records in the state directory, and NIT-004 never writes broker leases there. Whether two
+sessions on one machine can share a checkout while one holds a `user` lease over it depends on NIT-004's open question
+"Machine leases and user leases on the same path".
+
+Decision (autonomous): defer. The local hook does not judge broker leases. When NIT-004 settles that question, its
+answer says which hook judges such an overlap, or that the case cannot arise.
+
+**Revisit:** when NIT-004 settles "Machine leases and user leases on the same path"
+
 ## Design Decisions (Open)
 
 None.
@@ -580,8 +591,8 @@ None.
 - **A `user` lease on a shared checkout is not fenced locally** — likelihood: medium, impact: medium.
   The local hook judges only records in the state directory, and broker leases are never written there. Two sessions on
   one machine sharing a checkout, one of them holding a `user` lease, are then fenced only at the push. NIT-004's open
-  question "Machine leases and user leases on the same path" decides whether that case exists. Mitigation: deferred.
-  **Revisit:** when NIT-004 settles "Machine leases and user leases on the same path"
+  question "Machine leases and user leases on the same path" decides whether that case exists. Mitigation: deferred
+  under the settled "Local fencing for a `user` lease"
 - **The hook requirement changes existing callers** — likelihood: high, impact: low.
   A path claim in a git checkout that succeeded under NIT-001 fails until the hooks are installed. Accepted: the error
   names the install command, and it is needed once per checkout.
@@ -728,7 +739,7 @@ Fences `machine` leases on one machine. Needs no broker.
   naming the holder, the unchecked third-pass fixes, the hook requirement at `acquire`, and the fence mark blocking the
   broken holder's re-claim. NIT-003's "Fencing" revisit hook was extended to fire when this proposal is accepted.
 - 2026-10-24: ADR candidate (cuts across the system): a path claim inside a git checkout requires nitipan's git hooks
-  in force. Waits on a re-check of "Installing the git hooks", whose tracked-directory fix the proposal loop did not
+  in force. Waits on NIT-005 M1, whose check for a tracked hooks directory exercises the fix the proposal loop did not
   re-check.
 - 2026-10-24: ADR candidate (departs from the past): a fence mark blocks the broken holder's own claim, narrowing
   NIT-001's "a tombstone never blocks a claim". Waits on this proposal reaching `accepted`. Declined on 2026-10-24:
