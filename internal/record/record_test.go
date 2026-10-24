@@ -236,7 +236,7 @@ func TestHigherMinorIsReadWithUnknownFieldsIgnored(t *testing.T) {
 }
 
 func TestHigherMinorIsNeverRewritten(t *testing.T) {
-	rec, err := Decode(mutate(t, func(m map[string]any) { m["version"] = "1.2" }))
+	rec, err := Decode(mutate(t, func(m map[string]any) { m["version"] = "1.3" }))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}

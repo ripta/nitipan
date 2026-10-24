@@ -82,6 +82,10 @@ type Record struct {
 	AcquiredAt     time.Time `json:"acquired_at"`
 	Absorbs        []string  `json:"absorbs,omitempty"`
 
+	// Parent is the ID of the lease this one was delegated from. Only a sub-lease has one. A parent
+	// that names no record is dangling, and a reader treats it like a dead parent.
+	Parent string `json:"parent,omitempty"`
+
 	// BodyKnown is false when the domain kind is one this binary does not understand. Such a record
 	// is judged by its envelope alone.
 	BodyKnown bool `json:"-"`

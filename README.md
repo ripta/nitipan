@@ -15,16 +15,19 @@ fake model server. They need no manual steps and cost no model tokens.
 
 ## First version
 
-The first version runs on one machine, with no daemon. It has six commands:
+The first version runs on one machine, with no daemon. It has nine commands:
 
 - `acquire` claims a domain
 - `release` gives it up
 - `list` shows every lease and whether its holder is alive
 - `break` removes another holder's lease, and needs `--force` when that holder is alive
 - `advertise` updates the caller's name, permission mode, or a lease's description
+- `request` asks the holder of a lease for part of it
+- `grant` hands a requested part to the requester as a sub-lease
+- `decline` refuses a request, or withdraws one
 - `setup` prints the sandbox allowance, hooks, and plugins an agent needs
 
-A seventh command, `hook`, is called only by those agent hooks and plugins.
+A tenth command, `hook`, is called only by those agent hooks and plugins.
 
 A domain is keyed by absolute path, with optional path scopes. A claim against a dead holder succeeds. An overlapping
 claim against a live holder is refused, and the refusal names the holder.
@@ -96,6 +99,45 @@ use every core.
 
 Acquire resources from the parent session only. Subagents share their parent's holder, so two subagents that both claim
 `cpu:heavy` both succeed, and the first to release frees the name while the other still runs.
+
+## Sub-leases
+
+A holder can delegate part of its domain to another session. The other session then works in that part, and the holder
+keeps the rest. The delegated part belongs to the sub-lessee alone while the sub-lease lives. Only path leases can
+delegate. A resource lease cannot, and a sub-lease cannot delegate again.
+
+The sub-lessee asks and the holder grants:
+
+1. The other session runs `nitipan request <lease-id> --checkout <path> --scope <dir>`. The lease is the one that a
+   refused `acquire` names. Request prints a request ID and the holder's handle.
+2. The requester tells the holder out of band, for example through SendMessage.
+3. The holder runs `nitipan grant <request-id>`. The output names the requester's handle and agent name. The holder can
+   run `nitipan decline <request-id>` instead. The requester can run it to withdraw.
+
+A grant binds the requester's exact identity, which is recorded in the request. The sub-lease takes the request's ID as
+its lease ID, and its name, permission mode, and description from the request. The grant is refused when the requester
+is the holder's own session, when the requester has died, when the keys are no longer inside the lease, and when
+another live lease overlaps them.
+
+The requester learns of a grant or a refusal from a notice on its next nitipan call. A notice goes to stderr as
+`nitipan: notice: ...` and is removed once it is delivered. `list` does not deliver notices. Requests wait in
+`requests/` and notices in `notices/`, both in the state directory. Older binaries never read either one.
+
+While a sub-lease lives:
+
+- A claim by anyone else on the delegated part is refused, and the error names both holders.
+- The holder's own claim on the delegated part is refused too. The error names the sub-lessee, and the refusal can be
+  waited out with `--wait`.
+- The sub-lessee's claim inside its sub-lease reports that it is already covered. A claim that reaches outside is
+  refused by the holder's lease.
+- `acquire --replace` is refused on a sub-lease. A holder's `--replace` that would drop the delegated keys, or absorb a
+  lease that has sub-leases, is refused and lists them.
+- The holder that re-runs `acquire` with exactly its own keys exits with status 11 and lists the delegations. Status 11
+  means that the holder still holds the lease, but does not own all of it right now.
+
+A sub-lease is its own record in `leases/`, with a `parent` field that names the lease it came from. The parent's record
+does not change. Records that use `parent`, and requests and notices, carry record version 1.2. A lease that uses none
+of them keeps version 1.0 and stays writable by older binaries.
 
 ## Waiting
 

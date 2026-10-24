@@ -275,6 +275,10 @@ type plantSpec struct {
 
 	// Slots is the count a resource record was admitted under. Zero means 1.
 	Slots int
+
+	// Parent plants a sub-lease that names this lease ID. Its version is 1.2 unless Version says
+	// otherwise.
+	Parent string
 }
 
 // plant writes a record for another holder and returns its ID.
@@ -290,6 +294,10 @@ func (w *world) plant(spec plantSpec) string {
 
 		if spec.Resource != "" {
 			spec.Version = "1.1"
+		}
+
+		if spec.Parent != "" {
+			spec.Version = "1.2"
 		}
 	}
 
@@ -348,6 +356,10 @@ func (w *world) plant(spec plantSpec) string {
 		"domain":      domain,
 		"acting_for":  "someone",
 		"acquired_at": "2026-10-19T12:00:00Z",
+	}
+
+	if spec.Parent != "" {
+		doc["parent"] = spec.Parent
 	}
 
 	data, err := json.Marshal(doc)

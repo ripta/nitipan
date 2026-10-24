@@ -90,7 +90,7 @@ func (a *app) engine() (*lease.Engine, error) {
 	e.Now = a.deps.Now
 	e.Sleep = a.deps.Sleep
 	e.Hooks = a.deps.Hooks
-	e.Notify = lease.Notify{Delivered: a.deliverNotice, Warn: a.warn}
+	e.Notify = lease.Notify{Delivered: a.deliverNotice, Notice: a.deliverRecordNotice, Warn: a.warn}
 	e.Sessions = sessions
 
 	return e, nil
@@ -121,6 +121,12 @@ func (a *app) deliverNotice(t *record.Tombstone) {
 	}
 
 	fmt.Fprintf(a.deps.Stderr, "nitipan: notice: %s. The lease no longer exists.\n", lease.DescribeBroken(t))
+}
+
+// deliverRecordNotice tells a holder what happened to a request or sub-lease of theirs. It goes to
+// stderr next to the tombstones, with the same prefix.
+func (a *app) deliverRecordNotice(n *record.Notice) {
+	fmt.Fprintf(a.deps.Stderr, "nitipan: notice: %s.\n", strings.TrimSuffix(n.Detail, "."))
 }
 
 // warn reports a failure that did not fail the call. A permission failure carries the sandbox text.

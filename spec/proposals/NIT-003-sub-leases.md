@@ -78,7 +78,8 @@ covers all its keys.
 - A V1 binary, or any binary older than a child's minor, never rewrites that child, under NIT-001's writer rules. It
   still treats the child's dead or dangling parent as absent when it checks overlap
 - `parent` passes NIT-001's minor-version rule. A reader that ignores it sees two overlapping live records, so it
-  refuses at least as much as a new reader does
+  refuses at least as much as a new reader does. A sub-lease, a request, and a notice carry record version 1.2. A lease
+  without `parent` keeps version 1.0. Amended 2026-10-24; see Decision Log
 
 NIT-001's per-record mechanisms work unchanged on a child: holder match, tombstones, handle collision, release and
 break by ID, the holder-wide rewrite, and `list`. NIT-001's `--replace` keeps the lease ID so that parent links like
@@ -106,8 +107,8 @@ sub-lease lives, its keys belong to the sub-lessee alone.
   `acquire` on such a key is refused. The error names the sub-lessee and says to coordinate with it or ask the user. A
   parent holding `src` and `docs` that delegated `src/api` and then claims `src` is refused
 - The one exception is the parent's equal-key-set refresh. It is exempt from the parent's own children. When live
-  delegations exist, it exits with its own status, distinct from plain success, and its output lists them. A caller
-  that checks only the exit status is not told it owns everything
+  delegations exist, it exits with status 11, distinct from plain success, and its output lists them. A caller
+  that checks only the exit status is not told it owns everything. Amended 2026-10-24; see Decision Log
 - A sub-lessee's claim whose keys are all covered by its own live sub-lease is "covered by your leases". The parent's
   record does not block it, since those keys belong to the sub-lessee alone. A sub-lessee holding `/repo/src` that
   claims `/repo/src/handlers` gets "covered", not a refusal naming the parent
@@ -145,6 +146,8 @@ identity.
   blocker's own holder
 - `request` refuses keys that the named lease does not cover, and keys that a live child of it already covers or
   overlaps, since `grant` would always refuse them. The error names the sub-lessee where there is one
+- `request` also refuses a resource lease, since a slot has no part to hand over, a lease of the caller's own, and a
+  lease whose holder is dead. Amended 2026-10-24; see Decision Log
 - `nitipan grant <request-id>` turns the request into a sub-lease record under the lock. The sub-lease's lease ID is
   the request ID. Its output names the requester's handle and agent name, so the parent sees whom it granted to
 - A grant first rewrites the request to a `granting` state through `rename(2)`. It then publishes the sub-lease, writes
@@ -198,9 +201,9 @@ handled the same way.
 Notices live in `notices/<id>.json`, published the way tombstones are, with the shared envelope and footprint `none`.
 A notice that reports a loss, such as a parent or sub-lease ending, is published before the write that causes it. The
 overlap check still guards the keys, so an early loss notice is harmless. A grant notice comes after the grant. Every
-notice's ID is derived from its target's ID and its cause, so a retry after a crash finds it already published and the
-holder is told once. A notice is addressed to a holder. It carries a
-cause, and how that cause came about:
+notice's ID is derived from its target's ID and its cause, as `<target-id>-<cause>`. A retry after a crash finds it
+already published, and the holder is told once. Amended 2026-10-24; see Decision Log. A notice is addressed to a
+holder. It carries a cause, and how that cause came about:
 
 - Parent ended, sent to a sub-lessee: the parent's holder died, released, or was broken by a named caller
 - Sub-lease ended, sent to a parent: its sub-lessee released, died, or was broken by a named caller. A revoke sends none,
@@ -369,15 +372,13 @@ None.
 - **The parent dies and the sub-lessee does not notice** — likelihood: medium, impact: low.
   Neither macOS nor nitipan has a push signal on another process's death. The sub-lease survives, so the sub-lessee's
   work is not cut off. Mitigation: the sub-lessee learns from a "parent ended" notice on its next nitipan call.
-- **NIT-003 rests on NIT-001 amendments that NIT-001 does not carry yet** — likelihood: high, impact: high.
-  NIT-001 is in flight and owned by another session. The Decision Log lists eight amendments it needs: the order of the
-  other-holders and coverage checks, `release` on a higher minor, the stale `clear_when_dead` example, a `list --json`
-  evolution rule, the commands that need an adapter, the milestone 3 carve-out, the "breaker can claim at once" text in
-  "Breaking a live lease", and the rationale in "Record evolution and unknown records" about a NIT-003 delegation
-  list. The check order and the `release` rule are one-way doors, since V1 binaries cannot learn them later. Gating
-  NIT-003's milestones does not protect them, since V1 can ship without them. Rated high likelihood because none is
-  requested yet. Mitigation: the amendments went to NIT-001's owner, the nitipan guardian session, on 2026-10-18,
-  before NIT-001 is accepted. Milestone 1 starts only once NIT-001 carries them.
+- **NIT-003 rests on NIT-001 amendments that NIT-001 now carries** — likelihood: low, impact: high.
+  The amendments have landed in NIT-001. Amended 2026-10-24; see Decision Log. The Decision Log lists the eight it
+  needed: the order of the other-holders and coverage checks, `release` on a higher minor, the stale `clear_when_dead`
+  example, a `list --json` evolution rule, the commands that need an adapter, the milestone 3 carve-out, the "breaker
+  can claim at once" text in "Breaking a live lease", and the rationale in "Record evolution and unknown records" about
+  a NIT-003 delegation list. The check order and the `release` rule are one-way doors, since V1 binaries cannot learn
+  them later. Mitigation: the amendments went to NIT-001's owner on 2026-10-18, and NIT-001 took all eight.
 - **Subagents act as their guardian** — likelihood: medium, impact: medium.
   Subagents share the parent's holder. Any subagent of a guardian can grant or revoke, and can consume its notices and
   tombstones. Accepted (autonomous): NIT-001's holder model already accepts that subagents are one holder, and no
@@ -399,7 +400,7 @@ None.
 
 ### M1: Records, overlap, and grants
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - NIT-001's text carries the amendments this proposal's Decision Log lists
 - Table tests cover every overlap case with and without a parent link: parent and child, child and third party,
@@ -418,6 +419,30 @@ None.
 - `--replace` on a sub-lease is refused. A parent `--replace` that drops delegated keys, or absorbs a lease with live
   children, is refused and lists the children
 - A V1 binary refuses at least as much as a new one against a parent and child, and never rewrites a child
+
+**As built:**
+
+- NIT-001 already carried the eight amendments. Its Decision Log entry of 2026-10-18, "Took eight amendments", lists
+  them, so the first check needed no edit. The Risks entry about NIT-001 not carrying them was stale, and was amended.
+  See the Decision Log entry of 2026-10-24.
+- The old-binary check used a binary from the run's base commit `f29ad6d`, extracted with `git archive`. Its own test
+  harness drove it over a temporary state directory, with a parent, a planted version 1.2 child, and a third party.
+  Every claim by the parent, the sub-lessee, and the third party on the delegated or the parent's keys was refused.
+  `advertise` by the sub-lessee was refused, and `break` of the child without `--force` was refused. A dead parent's
+  keys outside the child were claimable and the child's were not. The child record stayed byte-identical in every case.
+  The new binary gave the same refusal in each case but three, where the old binary was stricter.
+  The new one reports "covered" or exits 11 instead, and lets the sub-lessee refresh its own keys. The old binary
+  refused all three. The harness is kept outside the repo for M2 to reuse.
+- Notices are delivered by every locked call that has a holder, after that call's repairs. `list` neither repairs nor
+  delivers them. M3 decides how `list` reports them.
+- The repair of requests also reaps a request whose parent lease no longer exists, with a "request declined" notice. It
+  fell out of the same code, and M2 owns its checks. One test covers it here.
+- `grant` also refuses a requester whose handle another live holder has taken since the request, and any other overlap
+  with the caller's own leases or the parent's other sub-leases.
+- Fixtures that stood for a newer minor moved from 1.2 to 1.3.
+- Decisions amended during the build: resource leases cannot be sub-leased, the exit status of the refresh with
+  delegations is 11, notice IDs are `<target-id>-<cause>`, and the sub-lease, request, and notice records carry version
+  1.2. See the Decision Log entry of 2026-10-24.
 
 ### M2: Parent lifecycle
 
@@ -532,6 +557,27 @@ None.
   an old reader more permissive needs a new major, and a skipped notice to a parent does not. So `parent` stays a minor
   addition. The user kept all eight amendments at NIT-001's review gate.
 - 2026-10-20: Scheduled as NIT-003 M1-M3 in queue.md.
+- 2026-10-24 (run best guess, NIT-003 M1): Resource leases cannot be sub-leased. NIT-002's Impacts left the question to
+  this proposal, and the text was silent. `request` against one is refused. A slot has no part to hand over, and the
+  refusal is additive and reversible. NIT-002 is untouched. Amended "Invocation and consent". `request` also refuses a
+  lease of the caller's own and a lease whose holder is dead, which the text implied.
+- 2026-10-24 (run best guess, NIT-003 M1): The equal-key refresh with live delegations exits 11, the next free status.
+  The text said only "its own status". Amended "Overlap with the parent".
+- 2026-10-24 (run best guess, NIT-003 M1): A sub-lease, a request, and a notice are stamped record version 1.2, and the
+  current minor is 2. A lease without `parent` keeps 1.0, and the parent's record never changes. The text said only "a
+  minor". Amended "Record shape".
+- 2026-10-24 (run best guess, NIT-003 M1): A notice's ID and file name is `<target-id>-<cause>`, with the request ID as
+  the target of a request notice. The text said only that the ID is derived from the target and the cause. Amended
+  "Liveness and the parent's death".
+- 2026-10-24 (correction of a stale risk, NIT-003 M1): Amended the Risks entry "NIT-003 rests on NIT-001 amendments
+  that NIT-001 does not carry yet". It was rated likelihood high, impact high, and said NIT-001 was in flight, that
+  none was requested yet, and that milestone 1 starts only once NIT-001 carries them. NIT-001 took all eight on
+  2026-10-18, so the entry now says the amendments landed, with likelihood low.
+- 2026-10-24 (run best guess, NIT-003 M1): A refusal that names a sub-lessee is waitable under `acquire --wait`, since
+  the sub-lease may end. No text changed.
+- 2026-10-24: ADR candidate (cuts across the system): a parent and its sub-lessees are exempt from each other at
+  overlap, at the record level and outside ADR-03's key rule. NIT-005, NIT-008, and every later claim check must apply
+  it. Undecided. Found in NIT-003 M1.
 
 ## References
 

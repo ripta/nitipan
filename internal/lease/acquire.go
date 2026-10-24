@@ -72,6 +72,10 @@ type AcquireResult struct {
 
 	// Dropped lists the keys a replace released because the new claim does not contain them.
 	Dropped []string
+
+	// Delegated lists the live sub-leases of a lease the caller refreshed. A refresh with delegations
+	// is not plain success, because the caller does not own those keys right now.
+	Delegated []*record.Record
 }
 
 // Acquire claims a domain under the lock.
@@ -131,12 +135,18 @@ func (e *Engine) acquire(req AcquireRequest, lock func() (*state.Locked, error))
 		return nil, err
 	}
 
-	cleared, err := c.checkOthers(record.PathFootprint(domain.Keys), "")
+	cl := &claim{call: c, req: req, domain: domain, handle: handle}
+
+	if err := cl.refuseSubLeaseReplace(); err != nil {
+		return nil, err
+	}
+
+	cleared, err := c.checkOthers(othersCheck{fp: record.PathFootprint(domain.Keys), domain: &domain, exempt: cl.exemptions()})
 	if err != nil {
 		return nil, err
 	}
 
-	cl := &claim{call: c, req: req, domain: domain, handle: handle, cleared: cleared}
+	cl.cleared = cleared
 
 	return cl.decide()
 }
@@ -173,7 +183,7 @@ func (e *Engine) acquireResource(c *call, req AcquireRequest) (*AcquireResult, e
 		return nil, err
 	}
 
-	cleared, err := c.checkOthers(record.ResourceFootprint(name), name)
+	cleared, err := c.checkOthers(othersCheck{fp: record.ResourceFootprint(name), slotted: name})
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +212,9 @@ type claim struct {
 
 	// resource is the name of a resource claim. It is empty for a path claim, which uses domain.
 	resource string
+
+	// delegated holds the live sub-leases of the lease an equal-key refresh targets.
+	delegated []*entry
 }
 
 func (cl *claim) fields() holderFields {
@@ -257,6 +270,85 @@ func (cl *claim) checkSlots() error {
 	return nil
 }
 
+// refuseSubLeaseReplace refuses `--replace` on a sub-lease. A sub-lessee cannot change its keys,
+// because the exemption from its parent's record would then let it widen itself anywhere inside the
+// parent without a grant. This runs before the check against other holders, so the sub-lessee hears
+// why instead of an overlap with its parent.
+func (cl *claim) refuseSubLeaseReplace() error {
+	for _, id := range cl.req.Replace {
+		if en := cl.mineByID(id); en != nil && en.Rec.Parent != "" {
+			return failf(exitcode.ErrRefused, "--replace %s: that lease is a sub-lease, and a sub-lessee cannot change its keys. "+
+				"Release it and ask the lease's grantor for the new part, or ask the user", id)
+		}
+	}
+
+	return nil
+}
+
+// exemptions returns the other holders' records that this claim does not collide with.
+//
+// A sub-lessee's claim that stays inside its own sub-leases is exempt from their parent, because the
+// delegated keys belong to the sub-lessee alone. The parent is exempt whatever its liveness. A claim
+// that reaches outside collides with the parent like any other overlap.
+//
+// A holder that refreshes a lease with exactly its own keys, or replaces leases, is exempt from the
+// live sub-leases of those leases. Those two cases cannot reach the sub-leases' keys by overlap alone.
+// The refresh records the delegations it exempted, and the replace checks them before it writes.
+func (cl *claim) exemptions() map[*entry]bool {
+	exempt := map[*entry]bool{}
+
+	for _, parent := range cl.others {
+		var held []keys.Key
+
+		for _, mine := range cl.mine {
+			if mine.Rec.Parent != parent.ID {
+				continue
+			}
+
+			if ks, ok := mine.keysOf(); ok {
+				held = append(held, ks...)
+			}
+		}
+
+		if len(held) > 0 && cl.allCoveredBy(held) {
+			exempt[parent] = true
+		}
+	}
+
+	if len(cl.req.Replace) > 0 {
+		for _, id := range cl.req.Replace {
+			if target := cl.mineByID(id); target != nil {
+				for _, kid := range cl.liveChildren(target.ID) {
+					exempt[kid] = true
+				}
+			}
+		}
+
+		return exempt
+	}
+
+	if equal := cl.equalKeys(); equal != nil {
+		cl.delegated = cl.liveChildren(equal.ID)
+
+		for _, kid := range cl.delegated {
+			exempt[kid] = true
+		}
+	}
+
+	return exempt
+}
+
+// allCoveredBy reports whether every claimed key is covered by one of the held keys.
+func (cl *claim) allCoveredBy(held []keys.Key) bool {
+	for _, k := range cl.domain.Keys {
+		if !keys.Covered(k, held, cl.e.Finder) {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (cl *claim) decide() (*AcquireResult, error) {
 	if len(cl.req.Replace) > 0 {
 		return cl.replace()
@@ -297,10 +389,11 @@ func (c *call) checkHandle(handle string) error {
 //
 // A live local record of the resource a claim names, given as slotted, does not block here. The
 // claim counts it against the slots instead. Every other overlap blocks as before.
-func (c *call) checkOthers(fp record.Footprint, slotted string) (cleared []*entry, err error) {
+func (c *call) checkOthers(chk othersCheck) (cleared []*entry, err error) {
 	var (
-		blocks []string
-		stuck  bool
+		blocks   []string
+		blockers []*entry
+		stuck    bool
 	)
 
 	for _, en := range c.others {
@@ -308,7 +401,7 @@ func (c *call) checkOthers(fp record.Footprint, slotted string) (cleared []*entr
 			continue
 		}
 
-		if !en.Rec.Footprint.Overlaps(fp, c.e.Finder) {
+		if chk.exempt[en] || !en.Rec.Footprint.Overlaps(chk.fp, c.e.Finder) {
 			continue
 		}
 
@@ -320,10 +413,11 @@ func (c *call) checkOthers(fp record.Footprint, slotted string) (cleared []*entr
 			blocks = append(blocks, fmt.Sprintf("%s on %s is held by %s, which has died, but its record asks that only a "+
 				"newer nitipan clear it (record version %s, this nitipan writes %s)", en.file(), en.domainList(),
 				describeHolder(en.Rec.Holder), en.Rec.Version, record.Current))
-		case slotted != "" && isResourceNamed(en, slotted):
+		case chk.slotted != "" && isResourceNamed(en, chk.slotted):
 			// A live holder of the slotted name takes a slot. The claim counts it after this loop.
 		default:
 			blocks = append(blocks, c.heldBy(en))
+			blockers = append(blockers, en)
 		}
 	}
 
@@ -336,15 +430,85 @@ func (c *call) checkOthers(fp record.Footprint, slotted string) (cleared []*entr
 		next = "Upgrade nitipan, coordinate with the holder, or ask the user."
 	}
 
-	// A dead holder whose record only a newer nitipan may clear never frees itself, so a wait cannot
-	// outlast it.
-	refuse := waitablef
-	if stuck {
-		refuse = func(format string, args ...any) error { return failf(exitcode.ErrRefused, format, args...) }
+	msg := fmt.Sprintf("the claim overlaps %s.\n  %s\n%s", Plural(len(blocks), "a lease", "leases"),
+		strings.Join(blocks, "\n  "), next)
+
+	if hint := c.requestHint(chk.domain, blockers); hint != "" {
+		msg += "\n" + hint
 	}
 
-	return nil, refuse("the claim overlaps %s.\n  %s\n%s",
-		Plural(len(blocks), "a lease", "leases"), strings.Join(blocks, "\n  "), next)
+	// A dead holder whose record only a newer nitipan may clear never frees itself, so a wait cannot
+	// outlast it.
+	if stuck {
+		return nil, failf(exitcode.ErrRefused, "%s", msg)
+	}
+
+	return nil, waitablef("%s", msg)
+}
+
+// othersCheck is what checkOthers judges a claim by.
+type othersCheck struct {
+	fp record.Footprint
+
+	// slotted names the resource whose live holders take a slot instead of blocking.
+	slotted string
+
+	// domain is the path claim's keys. It lets a refusal say which part another lease could grant.
+	domain *keys.Domain
+
+	// exempt holds the records the claim does not collide with: a sub-lessee's own parent while the
+	// claim stays inside its sub-lease, and the sub-leases of a lease the caller refreshes or replaces.
+	exempt map[*entry]bool
+}
+
+// requestHint names `nitipan request` as the way to ask for part of a blocking lease. It speaks only
+// for the refused keys that one blocking lease covers, and only when that lease can delegate: it has
+// no parent, and none of the blockers is a live sub-lease of it, since a grant would refuse those
+// keys. Blockers are other holders' leases, so the hint never goes to a lease's own holder.
+func (c *call) requestHint(domain *keys.Domain, blockers []*entry) string {
+	if domain == nil {
+		return ""
+	}
+
+	var lines []string
+
+	for _, b := range blockers {
+		held, ok := b.keysOf()
+		if !ok || b.Rec.Parent != "" || slices.ContainsFunc(blockers, func(o *entry) bool { return o.Rec.Parent == b.ID }) {
+			continue
+		}
+
+		var scopes []string
+
+		for _, k := range domain.Keys {
+			if !keys.Covered(k, held, c.e.Finder) {
+				continue
+			}
+
+			rel, err := filepath.Rel(domain.Checkout.Path, k.Path)
+			if err != nil {
+				continue
+			}
+
+			scopes = append(scopes, rel)
+		}
+
+		if len(scopes) == 0 {
+			continue
+		}
+
+		cmd := fmt.Sprintf("nitipan request %s --checkout %s", b.ID, shellQuote(domain.Checkout.Path))
+
+		for _, s := range scopes {
+			if s != "." {
+				cmd += " --scope " + shellQuote(s)
+			}
+		}
+
+		lines = append(lines, fmt.Sprintf("To ask %s for part of lease %s, run: %s", describeHolder(b.Rec.Holder), b.ID, cmd))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // isResourceNamed reports whether en is a record of the named resource that this binary understands.
@@ -385,6 +549,13 @@ func (c *call) heldBy(en *entry) string {
 
 	if c.sameProcess[en] {
 		msg += ", another session in this same process"
+	}
+
+	switch {
+	case rec.Parent != "" && c.mineByID(rec.Parent) != nil:
+		msg += fmt.Sprintf(", a sub-lessee of your lease %s", rec.Parent)
+	case rec.Parent != "":
+		msg += fmt.Sprintf(", a sub-lessee of lease %s", rec.Parent)
 	}
 
 	if en.Live.Status != liveness.Alive {
@@ -733,7 +904,13 @@ func (cl *claim) refresh(target *entry) (*AcquireResult, error) {
 
 	cl.reportMoves(cl.req.Holder, w)
 
-	return &AcquireResult{Lease: w.result(target), Outcome: outcome, Cleared: cleared}, nil
+	res := &AcquireResult{Lease: w.result(target), Outcome: outcome, Cleared: cleared}
+
+	for _, kid := range cl.delegated {
+		res.Delegated = append(res.Delegated, kid.Rec)
+	}
+
+	return res, nil
 }
 
 // replace rewrites the first named lease to the new keys and merges the others into it.
@@ -756,6 +933,10 @@ func (cl *claim) replace() (*AcquireResult, error) {
 	}
 
 	if err := cl.noOtherOverlap(targets); err != nil {
+		return nil, err
+	}
+
+	if err := cl.checkDelegations(lead, merged); err != nil {
 		return nil, err
 	}
 
@@ -831,6 +1012,52 @@ func (cl *claim) replace() (*AcquireResult, error) {
 
 	return &AcquireResult{Lease: w.result(lead), Outcome: Replaced, Cleared: cleared, Absorbed: mergedIDs,
 		Dropped: droppedPaths}, nil
+}
+
+// checkDelegations refuses a replace that would strand a sub-lease. The lead keeps its ID, so its
+// sub-leases stay valid only while the new keys still cover every one of theirs. A merged lease
+// disappears, and its sub-leases would dangle and stand alone inside the rewritten lease. The refusal
+// lists the sub-leases in the way.
+func (cl *claim) checkDelegations(lead *entry, merged []*entry) error {
+	var (
+		uncovered []string
+		absorbed  []string
+	)
+
+	for _, kid := range cl.liveChildren(lead.ID) {
+		ks, ok := kid.keysOf()
+		if !ok || !cl.claimCovers(ks) {
+			uncovered = append(uncovered, cl.heldBy(kid))
+		}
+	}
+
+	for _, en := range merged {
+		for _, kid := range cl.liveChildren(en.ID) {
+			absorbed = append(absorbed, cl.heldBy(kid))
+		}
+	}
+
+	switch {
+	case len(uncovered) > 0:
+		return failf(exitcode.ErrRefused, "the new keys would drop part of %s that you delegated:\n  %s\nCoordinate with the "+
+			"holder or ask the user.", lead.ID, strings.Join(uncovered, "\n  "))
+	case len(absorbed) > 0:
+		return failf(exitcode.ErrRefused, "--replace would absorb a lease with sub-leases:\n  %s\nCoordinate with the holder "+
+			"or ask the user.", strings.Join(absorbed, "\n  "))
+	}
+
+	return nil
+}
+
+// claimCovers reports whether every one of the given keys is covered by the claim's keys.
+func (cl *claim) claimCovers(ks []keys.Key) bool {
+	for _, k := range ks {
+		if !keys.Covered(k, cl.domain.Keys, cl.e.Finder) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // replaceTargets resolves the IDs named by --replace to the caller's own leases.

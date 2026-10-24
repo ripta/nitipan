@@ -28,6 +28,15 @@ type Hooks struct {
 	// AfterRewrite runs once `--replace` has rewritten its target and before it removes the leases it
 	// merged. An error aborts the operation there, leaving the disk as a crash would.
 	AfterRewrite func() error
+
+	// AfterGrantMark lets a test crash a grant where no lease exists yet, to check the lapsed repair.
+	AfterGrantMark func() error
+
+	// AfterGrantPublish lets a test crash a grant that has a lease and no notice, to check the granted repair.
+	AfterGrantPublish func() error
+
+	// AfterGrantNotice lets a test crash a grant that has both, to check that the repair tells nobody twice.
+	AfterGrantNotice func() error
 }
 
 // Engine runs lease operations against one state directory.
@@ -239,6 +248,12 @@ func (e *Engine) beginWith(h *adapter.Holder, lock func() (*state.Locked, error)
 		return nil, err
 	}
 
+	if err := c.repairRequests(); err != nil {
+		c.close()
+
+		return nil, err
+	}
+
 	if h != nil {
 		c.classify(*h)
 
@@ -247,6 +262,8 @@ func (e *Engine) beginWith(h *adapter.Holder, lock func() (*state.Locked, error)
 
 			return nil, err
 		}
+
+		c.deliverNotices(*h)
 	}
 
 	return c, nil

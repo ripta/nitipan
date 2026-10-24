@@ -172,5 +172,17 @@ func (a *app) printAcquired(res *lease.AcquireResult) error {
 
 	out := listing.Output{Leases: []listing.Lease{listing.FromRecord(res.Lease, liveness.Result{Status: liveness.Alive})}}
 
-	return listing.WriteText(a.deps.Stdout, out)
+	if err := listing.WriteText(a.deps.Stdout, out); err != nil {
+		return err
+	}
+
+	if len(res.Delegated) == 0 {
+		return nil
+	}
+
+	lines := delegationLines(res.Delegated)
+	fmt.Fprintln(a.deps.Stdout, strings.Join(lines, "\n"))
+
+	return fmt.Errorf("%w: you hold %s, but %s of it %s delegated, so you do not own all of it right now",
+		exitcode.ErrDelegated, res.Lease.ID, lease.Plural(len(lines), "part", "parts"), lease.Plural(len(lines), "is", "are"))
 }

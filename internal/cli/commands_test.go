@@ -22,6 +22,9 @@ var strayTests = []strayTest{
 	{Name: "acquire", Args: []string{"acquire"}},
 	{Name: "advertise", Args: []string{"advertise", "--name", "x"}},
 	{Name: "release", Args: []string{"release", "--all"}},
+	{Name: "request", Args: []string{"request", "01JZZZZZZZZZZZZZZZZZZZZZZZ"}},
+	{Name: "grant", Args: []string{"grant", "01JZZZZZZZZZZZZZZZZZZZZZZZ"}},
+	{Name: "decline", Args: []string{"decline", "01JZZZZZZZZZZZZZZZZZZZZZZZ"}},
 }
 
 func TestStrayAgentVariablesFailHolderCommandsClosed(t *testing.T) {

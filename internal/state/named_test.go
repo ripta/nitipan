@@ -37,6 +37,40 @@ func TestValidName(t *testing.T) {
 	}
 }
 
+func TestRequestsAndNoticesAreCreatedOnDemandInADirectoryThatLacksThem(t *testing.T) {
+	dir, _ := newDir(t, nil)
+
+	for _, sub := range []string{RequestsDir, NoticesDir} {
+		if files, err := dir.Scan(sub); err != nil || len(files) != 0 {
+			t.Fatalf("scanning a missing %s: %v, %v", sub, files, err)
+		}
+
+		if names, err := ListNames(dir.Path(), sub); err != nil || len(names) != 0 {
+			t.Fatalf("listing a missing %s: %v, %v", sub, names, err)
+		}
+	}
+
+	l := mustLock(t, dir)
+
+	if err := l.Publish(RequestsDir, idA, []byte("{}")); err != nil {
+		t.Fatalf("publishing a request: %v", err)
+	}
+
+	// A notice's ID is a derived name, not a lease ID.
+	notice := idA + "-request-granted.json"
+	if err := l.PublishNamed(NoticesDir, notice, []byte("{}")); err != nil {
+		t.Fatalf("publishing a notice: %v", err)
+	}
+
+	if err := l.PublishNamed(NoticesDir, notice, []byte("{}")); !errors.Is(err, ErrExists) {
+		t.Errorf("a retry of the same notice: %v, want ErrExists", err)
+	}
+
+	if names, err := ListNames(dir.Path(), NoticesDir); err != nil || len(names) != 1 || names[0] != notice {
+		t.Errorf("notices = %v, %v", names, err)
+	}
+}
+
 func TestNamedFilesPublishReplaceRemoveAndList(t *testing.T) {
 	dir, _ := newDir(t, nil)
 	l := mustLock(t, dir)
