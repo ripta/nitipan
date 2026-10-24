@@ -169,6 +169,25 @@ func (r *Record) Encode() ([]byte, error) {
 	return encode(r)
 }
 
+// MinimalVersion is the lowest version whose fields the record still uses. A sub-lease that loses its
+// parent drops to it, so an older binary can rewrite the record again. A record never moves up.
+func (r *Record) MinimalVersion() Version {
+	need := PathVersion
+	if r.Domain.Kind == KindResource {
+		need = ResourceVersion
+	}
+
+	if r.Parent != "" {
+		need = ParentVersion
+	}
+
+	if r.Version.Major == need.Major && r.Version.Minor < need.Minor {
+		return r.Version
+	}
+
+	return need
+}
+
 // Clearable reports whether any reader may clear the record once its holder is dead.
 func (r *Record) Clearable() bool {
 	return r.ClearWhenDead

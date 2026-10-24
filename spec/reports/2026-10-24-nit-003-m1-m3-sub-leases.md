@@ -13,8 +13,8 @@ its domain (`spec/proposals/NIT-003-sub-leases.md`). Environment: macOS, run fro
 
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
-| NIT-003 M1 | IN PROGRESS | |
-| NIT-003 M2 | QUEUED | |
+| NIT-003 M1 | DONE | `2ee18df` |
+| NIT-003 M2 | IN PROGRESS | |
 | NIT-003 M3 | QUEUED | |
 
 ## Plan-time facts
@@ -93,3 +93,47 @@ Review findings:
   passes the bar as cutting across the system, and it is recorded as an `Undecided` candidate in the Decision Log. The
   existing candidate for the record shape and directories still reads "waits on NIT-001 accepted". NIT-001 is now
   implemented.
+
+### NIT-003 M2
+
+Code commit for M1: `2ee18df nitipan: add sub-leases with request and grant`. The M2 commit is named under M3's
+section.
+
+Checks: `make ci` passed before and after the review fixes. Lint reported 0 issues. `proposals.py check` and
+`proposals.py freeze --row-commit 2ee18df` both returned `[]`.
+
+The old-binary check passed. It used a second harness, `oldcheck2_test.go`, beside M1's in the scratchpad
+`old-binary/` directory. There were four scenarios: a parent release, a forced break of the parent, a dead parent
+cleared by a third party's claim, and a dead parent with the child refreshing its keys. In all four, the `f29ad6d`
+binary left the child byte-identical and wrote no notice. The new binary did the same against a child stamped 1.3. A
+test covers that `list` without the lock delivers no notices.
+
+Best guesses the implementer made, each also in the proposal's Decision Log:
+
+1. A dead sub-lessee gets no revoke tombstone, and a retried revoke reuses the existing tombstone.
+2. A repair that finds the parent already gone cannot tell how it ended, and its "parent ended" notice says so. Only
+   the call that releases or breaks the parent knows the cause and the breaker. A child whose own holder is dead is not
+   repaired.
+3. A "sub-lease ended" notice goes only to a live parent.
+4. `revoke` refuses a lease that is not a sub-lease, and a child whose parent record is gone, with status Refused.
+5. A parent's release or forced break publishes the children's notices, removes the parent, and then rewrites the
+   children. A crash after the removal is finished by the dangling-parent repair.
+6. Delivery holds a loss notice until the loss it announces has happened. It drops the notice when the loss can no
+   longer happen as announced. Loss notices are written with replace, so a retry or a later loss with another cause
+   leaves the text of the loss that happened. This came from review finding 2 below.
+
+Review findings:
+
+- One `break --force` of a child and its parent, with the child sorting first, recreated the removed child. The
+  parent's repair still saw the child's stale entry, and its `rename(2)` brought the file back. Traced and confirmed.
+  Fixed at the root: every lease removal goes through one helper that marks the entry removed. Lookups and child scans
+  skip removed entries, and the stand-alone rewrite refuses one. A test covers it.
+- A loss notice published before its write could be delivered twice. That happened when the addressee's call consumed
+  it between a crash and the actor's retry. Traced and confirmed against M2's "exactly one notice" check. Fixed by
+  best guess 6, with tests. The check text is unchanged.
+- The `reapNotices` doc named a sibling function. Fixed.
+- A "Parent ended" bullet was edited without its own marker. Dismissed: the amendment's marker and Decision Log entry
+  cover it.
+- adr-impact: no conflicts. It named "a rewrite drops a record to the lowest minor its fields need" as an uncovered
+  decision. Dismissed: writers already stamp the lowest minor their fields need, so the rule is not new to this row and
+  fails the Architecture test.

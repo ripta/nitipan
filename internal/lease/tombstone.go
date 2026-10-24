@@ -201,14 +201,20 @@ func DescribeNotice(t *record.Tombstone) string {
 	return strings.TrimSuffix(t.Detail, ".")
 }
 
-// DescribeBroken says which lease was broken, by whom, and when.
+// DescribeBroken says which lease was broken, by whom, and when. A revoked sub-lease says so.
 func DescribeBroken(t *record.Tombstone) string {
 	msg := fmt.Sprintf("lease %s", t.Lease)
 	if len(t.Paths) > 0 {
 		msg += fmt.Sprintf(" on %s", strings.Join(t.Paths, ", "))
 	}
 
-	return fmt.Sprintf("%s was broken by %s at %s", msg, describeBreaker(t), t.BrokenAt.Format("2006-01-02 15:04:05 MST"))
+	at := t.BrokenAt.Format("2006-01-02 15:04:05 MST")
+
+	if t.Cause == record.CauseRevoked {
+		return fmt.Sprintf("%s was revoked by %s, the holder of its parent lease, at %s", msg, describeBreaker(t), at)
+	}
+
+	return fmt.Sprintf("%s was broken by %s at %s", msg, describeBreaker(t), at)
 }
 
 // describeBreaker names the breaker. A caller with no adapter is an anonymous process, never a

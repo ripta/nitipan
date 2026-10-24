@@ -34,7 +34,15 @@ type Tombstone struct {
 
 	// Detail is the sentence a notice of a kind other than a break carries.
 	Detail string `json:"detail,omitempty"`
+
+	// Cause says how a break came about. Empty means an ordinary break. It is separate from Kind, which
+	// already means a notice that is not a break. A reader that does not know the field delivers the
+	// tombstone as a plain break, which is what a revoke is to the sub-lessee.
+	Cause string `json:"cause,omitempty"`
 }
+
+// CauseRevoked is the tombstone cause of a sub-lease its parent's holder ended.
+const CauseRevoked = "revoked"
 
 // Notice kinds. A break leaves Kind empty.
 const (

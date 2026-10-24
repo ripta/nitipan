@@ -191,6 +191,9 @@ handled the same way.
   notice, then rewrites the child without `parent`, through `rename(2)`. The notice's ID is derived from the child's
   lease ID and the cause, so a retry after a crash finds it already published. The rewritten record's `version` drops
   to the lowest minor its remaining fields need, so a V1 binary can rewrite it again
+- The notice says how the parent ended when the call that ended it knows. A repair that finds the parent already gone
+  cannot tell a release from a break or from an older binary's removal, and the notice says so. A sub-lease whose own
+  holder is dead is left alone, since clearing it removes it. Amended 2026-10-24; see Decision Log
 - A binary older than the child's minor does not rewrite it, and does not write its notice. Only a binary that can
   rewrite the child writes the notice, so the notice is written once, by the call that repairs the child
 - The parent's dead record is cleared as NIT-001 already clears dead leases. Its remaining keys become claimable around
@@ -205,7 +208,8 @@ notice's ID is derived from its target's ID and its cause, as `<target-id>-<caus
 already published, and the holder is told once. Amended 2026-10-24; see Decision Log. A notice is addressed to a
 holder. It carries a cause, and how that cause came about:
 
-- Parent ended, sent to a sub-lessee: the parent's holder died, released, or was broken by a named caller
+- Parent ended, sent to a sub-lessee: the parent's holder died, released, or was broken by a named caller, or the parent
+  is gone with no record of how
 - Sub-lease ended, sent to a parent: its sub-lessee released, died, or was broken by a named caller. A revoke sends none,
   since the parent did it
 - Request granted, sent to a requester
@@ -216,6 +220,11 @@ holder. It carries a cause, and how that cause came about:
 The holder's next nitipan call reports a notice and removes it. Delivery happens only under the lock, after that call's
 repairs of dangling children and granted requests. A `list` that reads without the lock delivers no notices, as it
 skips tombstone cleanup. A lock holder reaps a notice whose holder is dead.
+A loss notice that is published before its write waits for that write. Delivery leaves a "parent ended" notice in place
+while its sub-lease still names a live parent, and a "sub-lease ended" notice while the sub-lease still exists. A retry
+after a crash then replaces the notice with its own account, and the addressee is told once. Delivery drops a "parent
+ended" notice whose sub-lease is gone, and a "sub-lease ended" notice whose addressee holds no lease covering the keys.
+Amended 2026-10-24; see Decision Log.
 Subagents share their parent's holder, so a subagent's call can consume a notice before the main session sees it. The
 same is true of tombstones. Notices do not go in `tombstones/`. NIT-001's `release` reports an ID
 with an undelivered tombstone as "broken", so a V1 `release` would misreport a live lease. V1 binaries never scan
@@ -304,8 +313,11 @@ cascades.
 
 - `nitipan revoke <child-id>` ends a live sub-lease at once. Only the holder of the child's parent lease may run it, and
   it needs no `--force`. Under the lock, it removes the child and writes a tombstone in `tombstones/`, keyed by the
-  sub-lessee and naming the parent as the breaker. The tombstone carries cause `revoked`. Old readers ignore the cause
-  and deliver it as a break, which passes the minor-version rule. NIT-008 extends this act
+  sub-lessee and naming the parent as the breaker. The tombstone carries a new `cause` field set to `revoked`, and is
+  stamped 1.2. Its `kind` field stays empty, since `kind` already means `moved` or `revived`. Old readers ignore the
+  cause and deliver it as a break, which passes the minor-version rule. A sub-lessee that is already dead gets no
+  tombstone, and a retry after a crash reuses the tombstone it finds. NIT-008 extends this act. Amended 2026-10-24; see
+  Decision Log
 - Another caller's `revoke` is refused, and the error names the parent. `break --force` by anyone still works as in
   NIT-001
 - No error names `revoke`. A refused `acquire` on a delegated key names the sub-lessee and says to coordinate with it or
@@ -348,7 +360,8 @@ parent is told.
   refused, naming them
 - When a child ends by any act other than its parent's `revoke`, its keys return to the parent with no rewrite of the
   parent's record. That covers the sub-lessee's `release`, a forced break of the child, and clearing a dead child. The
-  parent gets a "sub-lease ended" notice carrying the child's ID, its keys, and how it ended
+  parent gets a "sub-lease ended" notice carrying the child's ID, its keys, and how it ended. A parent that is dead or
+  gone gets none, since nobody can receive it. Amended 2026-10-24; see Decision Log
 - A V1 `release` of a child reaches the same end state, minus the notice. That rests on NIT-001 saying what `release`
   does on a record of a higher minor
 
@@ -446,7 +459,7 @@ None.
 
 ### M2: Parent lifecycle
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - A child whose parent died, was released, or was broken survives as an ordinary lease. It is rewritten without
   `parent` at the lowest minor its fields need, and its sub-lessee gets a "parent ended" notice saying how
@@ -459,6 +472,27 @@ None.
 - A forced break or release of a parent lists the children that now stand alone
 - A request whose parent lease ends is reaped with a "request declined" notice
 - Notices never appear in `tombstones/`, and a lock holder reaps a dead holder's notices
+
+**As built:**
+
+- The repair of a dead or dangling parent runs in the same phase as the request repair, after it and before any
+  delivery, on every locked call that opens the lock for a write, with or without a holder. `list` does not run it.
+- A parent's `release` and a forced `break` publish every sub-lessee's notice, then remove the parent, then rewrite the
+  sub-leases. A crash after the removal is finished by the dangling-parent repair, and its notice reads "cannot tell".
+  Crash hooks cover a loss notice and a revoke tombstone. Each test runs the call twice and counts one report.
+- A request whose parent ended is reaped by the next locked call, not by the call that ended the parent.
+- A call that removes a lease marks it removed for the rest of the call. A break of a parent and its child in one call
+  once could have rewritten the child after removing it, which recreates the file. The mark and a test close it.
+- A loss notice is held back until its loss happens, so the addressee is not told early and not told twice. A notice
+  left pending by a crash that never retries stays on disk until the sub-lease ends another way or the addressee's
+  holder dies. See the Decision Log entry of 2026-10-24 for M2.
+- Old-binary check, using the harness kept beside M1's, with a binary from `f29ad6d` and the new binary against a
+  child stamped 1.3. A parent release, a forced break of the parent, a dead parent cleared by a third party's claim,
+  and a dead parent with the child refreshing its keys all left the child byte-identical. No `notices/` file appeared,
+  and the only tombstone was the break's own for the parent. With the child at 1.2 the new binary rewrote it and left
+  one notice in the three cases where another holder made the call. `list` without the lock delivers none, which a
+  test covers.
+- Decisions amended during the build: see the Decision Log entries of 2026-10-24 for M2.
 
 ### M3: Display
 
@@ -575,6 +609,22 @@ None.
   2026-10-18, so the entry now says the amendments landed, with likelihood low.
 - 2026-10-24 (run best guess, NIT-003 M1): A refusal that names a sub-lessee is waitable under `acquire --wait`, since
   the sub-lease may end. No text changed.
+- 2026-10-24 (run best guess, NIT-003 M2): The tombstone of a revoke carries a new `cause` field set to `revoked`, is
+  stamped 1.2, and leaves `kind` empty. The text said only "cause `revoked`". `kind` already means `moved` or `revived`,
+  and only a separate field lets an old reader deliver it as a plain break. A sub-lessee that is already dead gets no
+  tombstone, and a retried revoke reuses its tombstone. Amended "Breaks across the tree".
+- 2026-10-24 (run best guess, NIT-003 M2): A repair that finds a parent already gone writes a "parent ended" notice that
+  says nitipan cannot tell how it ended. The text said the notice names how. Only the call that releases or breaks the
+  parent knows. A sub-lease whose own holder is dead is not repaired. Amended "Liveness and the parent's death".
+- 2026-10-24 (run best guess, NIT-003 M2): A "sub-lease ended" notice goes only to a live parent. A dead or gone parent
+  has nobody to receive it, and the sub-lease repair has already made the child ordinary. Amended "Release across the
+  tree".
+- 2026-10-24 (run best guess, NIT-003 M2): Delivery holds a loss notice back until its loss has happened, and a retry
+  replaces the pending notice instead of keeping it. Before, a notice published ahead of a crashed write could be
+  delivered, and then published again by the retry, so the addressee heard twice. A "parent ended" notice is held while
+  its sub-lease names a live parent, and dropped when the sub-lease is gone. A "sub-lease ended" notice is held while
+  the sub-lease exists, and dropped when the addressee holds no lease covering its keys. No new field is stored. Amended
+  "Liveness and the parent's death".
 - 2026-10-24: ADR candidate (cuts across the system): a parent and its sub-lessees are exempt from each other at
   overlap, at the record level and outside ADR-03's key rule. NIT-005, NIT-008, and every later claim check must apply
   it. Undecided. Found in NIT-003 M1.

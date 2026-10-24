@@ -189,6 +189,7 @@ func newRoot(a *app) *cobra.Command {
 		a.requestCmd(),
 		a.grantCmd(),
 		a.declineCmd(),
+		a.revokeCmd(),
 		a.setupCmd(),
 		a.hookCmd(),
 	)

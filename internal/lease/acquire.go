@@ -776,7 +776,7 @@ func (cl *claim) removeCleared() ([]string, error) {
 	var ids []string
 
 	for _, en := range cl.cleared {
-		if err := cl.l.Remove(state.LeasesDir, en.ID); err != nil {
+		if err := cl.clearDead(en); err != nil {
 			return ids, fmt.Errorf("clearing the lease of a dead holder: %w", err)
 		}
 
@@ -992,7 +992,7 @@ func (cl *claim) replace() (*AcquireResult, error) {
 	}
 
 	for _, en := range merged {
-		if err := cl.l.Remove(state.LeasesDir, en.ID); err != nil {
+		if err := cl.removeLease(en); err != nil {
 			return nil, fmt.Errorf("merging %s: %w", en.ID, err)
 		}
 	}

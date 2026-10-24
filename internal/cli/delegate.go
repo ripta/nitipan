@@ -182,6 +182,68 @@ func (a *app) runDecline(requestID string) error {
 	return nil
 }
 
+func (a *app) revokeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "revoke <lease-id>",
+		Short: "End a sub-lease you delegated",
+		Long: `End a sub-lease of a lease you hold, at once. Only the holder of the sub-lease's parent lease can run
+it, and it needs no --force. Anyone else is refused.
+
+The sub-lessee keeps working until its next nitipan call, which reports a tombstone that names you as
+the breaker. Its keys go back to your lease. The tombstone carries the cause "revoked", which an older
+nitipan reports as a plain break.
+
+Subagents share their parent's holder, so any subagent of yours can revoke. Revoking cuts off a live
+session, so name the sub-lease you mean.`,
+		Args: oneArg("lease ID"),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.wrapErr(a.runRevoke(args[0]))
+		},
+	}
+
+	return cmd
+}
+
+func (a *app) runRevoke(id string) error {
+	h, err := a.holder()
+	if err != nil {
+		return err
+	}
+
+	e, err := a.engine()
+	if err != nil {
+		return err
+	}
+
+	res, err := e.Revoke(h, id)
+	if err != nil {
+		return err
+	}
+
+	holder := res.Lease.Holder
+	fmt.Fprintf(a.deps.Stdout, "ended sub-lease %s held by handle %s, agent name %s\n", res.Lease.ID, orNone(holder.Handle),
+		orNone(holder.Name))
+	fmt.Fprintf(a.deps.Stdout, "  its keys went back to lease %s\n", res.Parent.ID)
+
+	if res.Tombstone == nil {
+		fmt.Fprintln(a.deps.Stdout, "  its holder had died, so no tombstone was written")
+	}
+
+	return nil
+}
+
+// standingLines describes the sub-leases that stand alone after their parent ended, one per line.
+func standingLines(recs []*record.Record) []string {
+	lines := make([]string, len(recs))
+
+	for i, r := range recs {
+		lines[i] = fmt.Sprintf("  sub-lease %s on %s now stands alone, held by %s", r.ID, keyList(r),
+			lease.DescribeHolder(r.Holder))
+	}
+
+	return lines
+}
+
 func orNone(s string) string {
 	if s == "" {
 		return "(none)"
@@ -195,13 +257,17 @@ func delegationLines(recs []*record.Record) []string {
 	lines := make([]string, len(recs))
 
 	for i, r := range recs {
-		paths := make([]string, len(r.Domain.Keys))
-		for j, k := range r.Domain.Keys {
-			paths[j] = k.Path
-		}
-
-		lines[i] = fmt.Sprintf("delegated: %s on %s to %s", r.ID, strings.Join(paths, ", "), lease.DescribeHolder(r.Holder))
+		lines[i] = fmt.Sprintf("delegated: %s on %s to %s", r.ID, keyList(r), lease.DescribeHolder(r.Holder))
 	}
 
 	return lines
+}
+
+func keyList(r *record.Record) string {
+	paths := make([]string, len(r.Domain.Keys))
+	for i, k := range r.Domain.Keys {
+		paths[i] = k.Path
+	}
+
+	return strings.Join(paths, ", ")
 }

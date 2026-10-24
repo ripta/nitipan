@@ -72,6 +72,11 @@ const (
 	CauseRequestGranted  = "request-granted"
 	CauseRequestDeclined = "request-declined"
 	CauseRequestLapsed   = "request-lapsed"
+
+	// CauseParentEnded goes to a sub-lessee whose parent lease ended. CauseSubLeaseEnded goes to a parent
+	// whose sub-lease ended by any act but its own revoke.
+	CauseParentEnded   = "parent-ended"
+	CauseSubLeaseEnded = "sub-lease-ended"
 )
 
 // Notice tells a holder about something that happened to a lease or request of theirs. It is

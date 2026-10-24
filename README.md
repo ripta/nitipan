@@ -15,7 +15,7 @@ fake model server. They need no manual steps and cost no model tokens.
 
 ## First version
 
-The first version runs on one machine, with no daemon. It has nine commands:
+The first version runs on one machine, with no daemon. It has ten commands:
 
 - `acquire` claims a domain
 - `release` gives it up
@@ -25,9 +25,10 @@ The first version runs on one machine, with no daemon. It has nine commands:
 - `request` asks the holder of a lease for part of it
 - `grant` hands a requested part to the requester as a sub-lease
 - `decline` refuses a request, or withdraws one
+- `revoke` ends a sub-lease at once, and only the holder of its parent can run it
 - `setup` prints the sandbox allowance, hooks, and plugins an agent needs
 
-A tenth command, `hook`, is called only by those agent hooks and plugins.
+An eleventh command, `hook`, is called only by those agent hooks and plugins.
 
 A domain is keyed by absolute path, with optional path scopes. A claim against a dead holder succeeds. An overlapping
 claim against a live holder is refused, and the refusal names the holder.
@@ -134,6 +135,24 @@ While a sub-lease lives:
   lease that has sub-leases, is refused and lists them.
 - The holder that re-runs `acquire` with exactly its own keys exits with status 11 and lists the delegations. Status 11
   means that the holder still holds the lease, but does not own all of it right now.
+
+When a sub-lease or its parent ends:
+
+- The parent's holder can run `nitipan revoke <lease-id>` to end a sub-lease at once. The sub-lessee gets a tombstone
+  that names the parent's holder, with the cause `revoked`. Anyone else is refused, and the error names the parent.
+  Subagents share their parent's holder, so any subagent of the holder can revoke.
+- A sub-lessee's `release`, a forced `break` of the sub-lease, and a dead sub-lessee that nitipan clears each return the
+  keys to the parent. The parent's record does not change. The parent gets a notice with the sub-lease's ID, its keys,
+  and how it ended. The output of a `break` says the keys went back.
+- A parent that dies, is released, or is broken takes only itself. Each live sub-lease is rewritten without `parent` in
+  the same call, at the lowest record version its fields need. Its sub-lessee gets a notice that says how the parent
+  ended. The output of `release` and `break` lists the sub-leases that now stand alone. A parent that died is handled by
+  the next nitipan call that takes the lock.
+- Releasing the parent ends the grant for good. The former parent cannot revoke a former sub-lease, and cannot claim its
+  old domain while the sub-lease stands.
+- A request whose parent lease ended is declined with a notice. A notice whose holder is dead is removed by the next
+  call that takes the lock.
+- A binary older than a sub-lease's record version never rewrites it and writes no notice for it.
 
 A sub-lease is its own record in `leases/`, with a `parent` field that names the lease it came from. The parent's record
 does not change. Records that use `parent`, and requests and notices, carry record version 1.2. A lease that uses none

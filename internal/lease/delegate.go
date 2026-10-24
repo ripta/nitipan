@@ -179,7 +179,7 @@ func (c *call) children(id string) []*entry {
 	var out []*entry
 
 	for _, en := range c.entries {
-		if en.Rec != nil && en.Rec.Parent == id {
+		if en.Rec != nil && en.Rec.Parent == id && !en.removed {
 			out = append(out, en)
 		}
 	}
@@ -301,7 +301,7 @@ func (e *Engine) Grant(h adapter.Holder, requestID string) (*GrantResult, error)
 	removed := make([]string, 0, len(cleared))
 
 	for _, en := range cleared {
-		if err := c.l.Remove(state.LeasesDir, en.ID); err != nil {
+		if err := c.clearDead(en); err != nil {
 			return nil, fmt.Errorf("clearing the lease of a dead holder: %w", err)
 		}
 

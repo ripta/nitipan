@@ -61,8 +61,10 @@ func (g *crashedGrant) wantSettled(t *testing.T) {
 		t.Errorf("requests = %v, want none pending", names)
 	}
 
-	if names := w.fileNames(state.NoticesDir); len(names) != 0 {
-		t.Errorf("notices = %v, want all delivered", names)
+	for _, cause := range []string{record.CauseRequestGranted, record.CauseRequestDeclined, record.CauseRequestLapsed} {
+		if names := w.noticesOf(cause); len(names) != 0 {
+			t.Errorf("notices = %v, want all delivered", names)
+		}
 	}
 }
 
@@ -140,7 +142,7 @@ func TestACrashAfterThePublishIsRepairedEvenIfTheParentReleasedInBetween(t *test
 
 		wantStatus(t, w.run(g.tr.parent, "release", g.tr.parentID), exitcode.OK)
 
-		if names := w.fileNames(state.NoticesDir); len(names) != 1 || !strings.HasSuffix(names[0], "-request-granted.json") {
+		if names := w.noticesOf(record.CauseRequestGranted); len(names) != 1 {
 			t.Errorf("notices = %v, want one granted notice", names)
 		}
 
@@ -208,7 +210,7 @@ func TestANoticeIsNamedAfterItsTargetAndCause(t *testing.T) {
 
 	wantStatus(t, w.run(g.tr.child, "acquire", "--checkout", g.tr.repo, "--scope", "src"), exitcode.OK)
 
-	names := w.fileNames(state.NoticesDir)
+	names := w.noticesOf(record.CauseRequestGranted)
 	if len(names) != 1 || names[0] != g.requestID+"-request-granted.json" {
 		t.Fatalf("notices = %v, want %s-request-granted.json", names, g.requestID)
 	}

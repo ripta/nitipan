@@ -146,6 +146,21 @@ func (w *world) fileNames(sub string) []string {
 	return out
 }
 
+// noticesOf lists the published notices of one cause, in name order.
+func (w *world) noticesOf(cause string) []string {
+	w.t.Helper()
+
+	var out []string
+
+	for _, name := range w.fileNames(state.NoticesDir) {
+		if strings.HasSuffix(name, "-"+cause+".json") {
+			out = append(out, name)
+		}
+	}
+
+	return out
+}
+
 // tree is a parent that holds a repo, with two sub-leases and a third party.
 type tree struct {
 	w       *world
@@ -419,8 +434,8 @@ func TestADanglingParentCountsAsAbsent(t *testing.T) {
 
 		res := w.run(w.claude(400, "t"), "acquire", "--checkout", repo, "--scope", "src")
 		wantStatus(t, res, exitcode.Refused)
-		wantContains(t, "stderr", res.Stderr, "child-agent", "a sub-lessee of lease "+missingID)
-		wantAbsent(t, "stderr", res.Stderr, "nitipan request")
+		wantContains(t, "stderr", res.Stderr, "child-agent")
+		wantAbsent(t, "stderr", res.Stderr, "a sub-lessee of")
 	})
 
 	t.Run("the rest of the former parent's domain is free", func(t *testing.T) {
@@ -520,7 +535,7 @@ func TestASubLeaseTakesItsIdentityAndAdvertisementFromTheRequest(t *testing.T) {
 	wantStatus(t, res, exitcode.OK)
 	wantContains(t, "stderr", res.Stderr, "nitipan: notice: your request "+id+" was granted")
 
-	if names := w.fileNames(state.NoticesDir); len(names) != 0 {
+	if names := w.noticesOf(record.CauseRequestGranted); len(names) != 0 {
 		t.Errorf("notice left after delivery: %v", names)
 	}
 }
@@ -876,7 +891,7 @@ func TestAnUnrelatedHolderGetsNoNoticeOfSomeoneElsesRequest(t *testing.T) {
 	wantStatus(t, res, exitcode.OK)
 	wantAbsent(t, "stderr", res.Stderr, "notice")
 
-	if names := tr.w.fileNames(state.NoticesDir); len(names) != 1 {
+	if names := tr.w.noticesOf(record.CauseRequestDeclined); len(names) != 1 {
 		t.Errorf("notices = %v, want the third party's still waiting", names)
 	}
 }
@@ -893,7 +908,7 @@ func TestADeadRequestersRequestIsReapedByTheNextLockHolder(t *testing.T) {
 		t.Errorf("requests = %v, want the dead requester's reaped", names)
 	}
 
-	if names := tr.w.fileNames(state.NoticesDir); len(names) != 0 {
+	if names := tr.w.noticesOf(record.CauseRequestDeclined); len(names) != 0 {
 		t.Errorf("notices = %v, want none for a dead requester", names)
 	}
 }

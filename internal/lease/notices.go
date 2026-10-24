@@ -53,6 +53,92 @@ func (c *call) writeNotice(n *record.Notice) error {
 	return nil
 }
 
+// writeLossNotice publishes a notice that announces a write the caller is about to make. An earlier
+// attempt that crashed may have left the same notice behind, still undelivered, with an account of
+// how the loss came about that this attempt may know better. The new notice replaces it, so the
+// addressee reads the account of the loss that happened.
+func (c *call) writeLossNotice(n *record.Notice) error {
+	data, err := n.Encode()
+	if err != nil {
+		return fmt.Errorf("encoding the notice %s: %w", n.ID, err)
+	}
+
+	if err := c.l.ReplaceNamed(state.NoticesDir, n.ID+noticeSuffix, data); err != nil {
+		return fmt.Errorf("publishing the notice %s: %w", n.ID, err)
+	}
+
+	return nil
+}
+
+// noticeVerdict says what delivery does with a notice.
+type noticeVerdict int
+
+const (
+	deliverNotice noticeVerdict = iota
+
+	// keepNotice leaves a loss notice in place until the loss it announces has happened. The actor
+	// published it first and may have crashed, and a retry then finds it and does not tell twice.
+	keepNotice
+
+	// dropNotice removes a loss notice that no longer says anything true.
+	dropNotice
+)
+
+// lossVerdict judges a loss notice against the leases as they stand after this call's repairs.
+//
+// A "parent ended" notice is due once the sub-lease stands alone. While the sub-lease still names a
+// live parent, the loss has not happened. If the sub-lease is gone, its sub-lessee already knows more
+// than the notice would tell it.
+//
+// A "sub-lease ended" notice is due once the sub-lease is gone, and only while the addressee still
+// holds a lease that covers its keys, since the notice says the keys are the addressee's again. A
+// parent that was released since has no keys to get back.
+func (c *call) lossVerdict(n *record.Notice) noticeVerdict {
+	kid := c.entryByID(n.Target)
+
+	switch n.Cause {
+	case record.CauseParentEnded:
+		switch {
+		case kid == nil:
+			return dropNotice
+		case kid.Rec != nil && kid.Rec.Parent == "":
+			return deliverNotice
+		}
+
+		return keepNotice
+	case record.CauseSubLeaseEnded:
+		switch {
+		case kid != nil:
+			return keepNotice
+		case c.holdsCoverOf(n.Paths):
+			return deliverNotice
+		}
+
+		return dropNotice
+	}
+
+	return deliverNotice
+}
+
+// holdsCoverOf reports whether the caller holds a lease that covers every one of the paths.
+func (c *call) holdsCoverOf(paths []string) bool {
+	var held []keys.Key
+
+	for _, en := range c.mine {
+		if ks, ok := en.keysOf(); ok && !en.removed {
+			held = append(held, ks...)
+		}
+	}
+
+	for _, p := range paths {
+		if !keys.Covered(keys.Key{Path: p}, held, c.e.Finder) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // deliverNotices reports every notice addressed to the caller, then removes it. It runs under the
 // lock after the call's repairs, so a notice never describes a state that a repair is about to change.
 // A notice that cannot be used is left alone, and a failed removal is reported without failing the call.
@@ -81,7 +167,43 @@ func (c *call) deliverNotices(h adapter.Holder) {
 			continue
 		}
 
-		c.e.Notify.notice(n)
+		switch c.lossVerdict(n) {
+		case keepNotice:
+			continue
+		case deliverNotice:
+			c.e.Notify.notice(n)
+		}
+
+		if err := c.l.RemoveNamed(state.NoticesDir, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			c.e.Notify.warn(fmt.Errorf("removing the notice %s: %w", filepath.Join(c.e.Dir.Path(), state.NoticesDir, name), err))
+		}
+	}
+}
+
+// reapNotices removes the notices whose holder is dead, since nobody can receive them. Files that
+// cannot be used are left alone, as delivery leaves them.
+func (c *call) reapNotices() {
+	names, err := state.ListNames(c.e.Dir.Path(), state.NoticesDir)
+	if err != nil {
+		c.e.Notify.warn(err)
+
+		return
+	}
+
+	for _, name := range names {
+		data, err := state.ReadName(c.e.Dir.Path(), state.NoticesDir, name)
+		if err != nil {
+			continue
+		}
+
+		n, err := record.DecodeNotice(data)
+		if err != nil || name != n.ID+noticeSuffix || !n.ClearWhenDead {
+			continue
+		}
+
+		if c.e.Checker.Check(n.Envelope).Status != liveness.Dead {
+			continue
+		}
 
 		if err := c.l.RemoveNamed(state.NoticesDir, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			c.e.Notify.warn(fmt.Errorf("removing the notice %s: %w", filepath.Join(c.e.Dir.Path(), state.NoticesDir, name), err))
