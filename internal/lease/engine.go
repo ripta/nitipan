@@ -260,19 +260,11 @@ func (e *Engine) beginWith(h *adapter.Holder, lock func() (*state.Locked, error)
 		return nil, err
 	}
 
-	if err := c.repairRequests(); err != nil {
+	if err := c.runRepairs(); err != nil {
 		c.close()
 
 		return nil, err
 	}
-
-	if err := c.repairChildren(); err != nil {
-		c.close()
-
-		return nil, err
-	}
-
-	c.reapNotices()
 
 	if h != nil {
 		c.classify(*h)

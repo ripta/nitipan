@@ -190,8 +190,11 @@ func (c *call) dueNotices(h adapter.Holder) []dueNotice {
 	return due
 }
 
-// deliverNotices reports every notice addressed to the caller, then removes it. It runs under the
-// lock after the call's repairs, so a notice never describes a state that a repair is about to change.
+// deliverNotices reports every notice addressed to the caller, then removes it.
+//
+// It runs under the lock after the call's repairs, so a notice never describes a state that a repair
+// is about to change.
+//
 // A failed removal is reported without failing the call.
 func (c *call) deliverNotices(h adapter.Holder) {
 	for _, d := range c.dueNotices(h) {
@@ -333,7 +336,7 @@ func (c *call) repairGranting(req *record.Request) error {
 		n = c.e.noticeFor(req.Envelope, req.ID, record.CauseRequestLapsed, fmt.Sprintf("your request %s for %s was "+
 			"interrupted, or its lease was removed before you heard of it, so you hold nothing there. Request again if you "+
 			"still need it",
-			req.ID, strings.Join(keyPaths(req.Domain.Keys), ", ")), keyPaths(req.Domain.Keys))
+			req.ID, strings.Join(keys.Paths(req.Domain.Keys), ", ")), keys.Paths(req.Domain.Keys))
 	}
 
 	if err := c.writeNotice(n); err != nil {
@@ -351,7 +354,7 @@ func (c *call) grantedNotice(req *record.Request, parent *entry) *record.Notice 
 		by = " by " + describeHolder(parent.Rec.Holder)
 	}
 
-	paths := keyPaths(req.Domain.Keys)
+	paths := keys.Paths(req.Domain.Keys)
 
 	return c.e.noticeFor(req.Envelope, req.ID, record.CauseRequestGranted, fmt.Sprintf("your request %s was granted%s. "+
 		"Lease %s now holds %s", req.ID, by, req.ID, strings.Join(paths, ", ")), paths)
@@ -360,7 +363,7 @@ func (c *call) grantedNotice(req *record.Request, parent *entry) *record.Notice 
 // declineRequest leaves the requester a declined notice, then removes the request. The notice goes
 // first, so a crash between the two repeats it harmlessly instead of losing it.
 func (c *call) declineRequest(req *record.Request, why string) error {
-	paths := keyPaths(req.Domain.Keys)
+	paths := keys.Paths(req.Domain.Keys)
 
 	n := c.e.noticeFor(req.Envelope, req.ID, record.CauseRequestDeclined, fmt.Sprintf("your request %s for %s was "+
 		"declined: %s", req.ID, strings.Join(paths, ", "), why), paths)
@@ -379,13 +382,4 @@ func (c *call) removeRequest(id string) error {
 	}
 
 	return nil
-}
-
-func keyPaths(ks []keys.Key) []string {
-	out := make([]string, len(ks))
-	for i, k := range ks {
-		out[i] = k.Path
-	}
-
-	return out
 }

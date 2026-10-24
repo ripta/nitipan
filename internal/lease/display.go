@@ -56,16 +56,7 @@ func delegated(subs []subLease) []listing.Delegation {
 	out := make([]listing.Delegation, len(subs))
 
 	for i, s := range subs {
-		out[i] = listing.Delegation{ID: s.ID, Keys: pathsOf(s.Keys)}
-	}
-
-	return out
-}
-
-func pathsOf(ks []keys.Key) []string {
-	out := make([]string, len(ks))
-	for i, k := range ks {
-		out[i] = k.Path
+		out[i] = listing.Delegation{ID: s.ID, Keys: keys.Paths(s.Keys)}
 	}
 
 	return out
@@ -189,7 +180,7 @@ func (c *call) pendingRequests(query []keys.Key, haveQuery, resource bool) ([]li
 			Parent:      re.Req.Parent,
 			Requester:   re.Req.Holder,
 			Liveness:    listing.Liveness{Status: re.Live.Status.String(), Reason: re.Live.Reason},
-			Keys:        keyPaths(ks),
+			Keys:        keys.Paths(ks),
 			Description: re.Req.Description,
 			RequestedAt: re.Req.RequestedAt,
 		})

@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/space-armada/nitipan/internal/exitcode"
+	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/listing"
 	"github.com/space-armada/nitipan/internal/liveness"
@@ -264,10 +265,5 @@ func delegationLines(recs []*record.Record) []string {
 }
 
 func keyList(r *record.Record) string {
-	paths := make([]string, len(r.Domain.Keys))
-	for i, k := range r.Domain.Keys {
-		paths[i] = k.Path
-	}
-
-	return strings.Join(paths, ", ")
+	return strings.Join(keys.Paths(r.Domain.Keys), ", ")
 }

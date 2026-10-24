@@ -322,6 +322,25 @@ func TestRevokeEndsASubLeaseAtOnceWithATombstone(t *testing.T) {
 	wantStatus(t, tr.w.run(tr.parent, "acquire", "--checkout", tr.repo, "--scope", "src"), exitcode.AlreadyCovered)
 }
 
+func TestRevokeDiscardsASubLeaseEndedNoticeLeftByACrashedRelease(t *testing.T) {
+	tr := newTree(t)
+
+	tr.w.crashAtLossNotice(t, tr.child, "release", tr.childID)
+
+	if tr.w.leaseByID(tr.childID) == nil {
+		t.Fatal("the crash happened after the removal")
+	}
+
+	wantStatus(t, tr.w.run(tr.parent, "revoke", tr.childID), exitcode.OK)
+
+	res := tr.w.poke(tr.parent)
+	wantAbsent(t, "stderr", res.Stderr, "your sub-lease", "released")
+
+	if names := tr.w.noticesOf(record.CauseSubLeaseEnded); len(names) != 0 {
+		t.Errorf("the revoke left notices: %v", names)
+	}
+}
+
 func TestRevokeByAnyoneButTheParentsHolderIsRefused(t *testing.T) {
 	tests := []struct {
 		Name string

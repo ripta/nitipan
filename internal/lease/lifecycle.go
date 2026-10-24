@@ -4,12 +4,32 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"strings"
 
+	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/state"
 )
+
+// runRepairs is the one sequence of repairs that every locked call runs before it delivers
+// anything. Requests come first, since a request in the granting state is finished before any other
+// reaping. Children follow, and the reaping of dead holders' notices comes last, so it judges
+// notices against the leases as the repairs leave them.
+func (c *call) runRepairs() error {
+	if err := c.repairRequests(); err != nil {
+		return err
+	}
+
+	if err := c.repairChildren(); err != nil {
+		return err
+	}
+
+	c.reapNotices()
+
+	return nil
+}
 
 // repairChildren finishes what a parent's death, or an older binary's removal of a parent, left
 // behind. It runs under the lock with the other repairs, before notices are delivered.
@@ -69,7 +89,7 @@ func (c *call) announceParentEnded(kid *entry, how string) (bool, error) {
 		return false, nil
 	}
 
-	paths := keyPaths(kid.Rec.Domain.Keys)
+	paths := keys.Paths(kid.Rec.Domain.Keys)
 
 	n := c.e.noticeFor(kid.Rec.Envelope, kid.ID, record.CauseParentEnded, fmt.Sprintf("your sub-lease %s on %s lost its "+
 		"parent: lease %s %s. It is now an ordinary lease of yours with the same keys", kid.ID, strings.Join(paths, ", "),
@@ -141,7 +161,7 @@ func (c *call) afterRemoval(en *entry, announced []*entry) ([]*record.Record, er
 	out := make([]*record.Record, 0, len(standing))
 
 	for _, kid := range standing {
-		if containsEntry(announced, kid) {
+		if slices.Contains(announced, kid) {
 			if err := c.standAlone(kid); err != nil {
 				return out, err
 			}
@@ -153,16 +173,6 @@ func (c *call) afterRemoval(en *entry, announced []*entry) ([]*record.Record, er
 	return out, nil
 }
 
-func containsEntry(list []*entry, en *entry) bool {
-	for _, x := range list {
-		if x == en {
-			return true
-		}
-	}
-
-	return false
-}
-
 // returnToParent tells a sub-lease's parent that the sub-lease is ending. The keys go back to the
 // parent without a rewrite, since its footprint never stopped covering them. A parent that is gone
 // or dead has nobody to tell.
@@ -172,7 +182,7 @@ func (c *call) returnToParent(kid *entry, how string) error {
 		return nil
 	}
 
-	paths := keyPaths(kid.Rec.Domain.Keys)
+	paths := keys.Paths(kid.Rec.Domain.Keys)
 
 	n := c.e.noticeFor(parent.Rec.Envelope, kid.ID, record.CauseSubLeaseEnded, fmt.Sprintf("your sub-lease %s on %s ended: %s. "+
 		"Its keys are yours again, and your lease %s is unchanged", kid.ID, strings.Join(paths, ", "), how, parent.ID), paths)

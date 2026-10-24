@@ -126,7 +126,13 @@ func (a *app) deliverNotice(t *record.Tombstone) {
 // deliverRecordNotice tells a holder what happened to a request or sub-lease of theirs. It goes to
 // stderr next to the tombstones, with the same prefix.
 func (a *app) deliverRecordNotice(n *record.Notice) {
-	fmt.Fprintf(a.deps.Stderr, "nitipan: notice: %s.\n", strings.TrimSuffix(n.Detail, "."))
+	a.printRecordNotice(n.Detail)
+}
+
+// printRecordNotice writes one notice line. A detail may or may not end in a period already, and the
+// line carries exactly one.
+func (a *app) printRecordNotice(detail string) {
+	fmt.Fprintf(a.deps.Stderr, "nitipan: notice: %s.\n", strings.TrimSuffix(detail, "."))
 }
 
 // warn reports a failure that did not fail the call. A permission failure carries the sandbox text.

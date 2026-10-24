@@ -55,11 +55,21 @@ func (e *Engine) Revoke(h adapter.Holder, id string) (*RevokeResult, error) {
 		}
 	}
 
+	c.dropSubLeaseEnded(kid)
+
 	if err := c.removeLease(kid); err != nil {
 		return nil, err
 	}
 
 	return res, nil
+}
+
+// dropSubLeaseEnded removes a "sub-lease ended" notice that the sub-lessee's own release or break
+// published and then crashed before removing the lease. The parent did this end itself, so that
+// notice would tell it the sub-lessee released a lease it revoked. The notice goes before the lease,
+// so a crash in between leaves a lease that the retry still ends, and never a stale notice.
+func (c *call) dropSubLeaseEnded(kid *entry) {
+	c.removeNotice(record.NoticeID(kid.ID, record.CauseSubLeaseEnded) + noticeSuffix)
 }
 
 // revocable finds the sub-lease and its parent, and refuses anyone but the parent's holder. The

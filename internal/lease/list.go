@@ -172,22 +172,15 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 	return res, nil
 }
 
-// repair runs the repairs and the reaping of dead holders' notices that every locked call runs before
-// it delivers anything. A holder's notices are judged against the leases as the repairs leave them, so
-// the repairs come first. A caller that holds nothing still repairs, as any other locked call does.
+// repair runs the repairs that every locked call runs before it delivers anything, then classifies
+// the caller's holder. A caller that holds nothing still repairs, as any other locked call does.
 //
 // A failure is the caller's to report as a warning. list is the supported way to read leases, so a
 // repair that cannot write must not stop the read.
 func (c *call) repair(caller adapter.Caller) error {
-	if err := c.repairRequests(); err != nil {
+	if err := c.runRepairs(); err != nil {
 		return err
 	}
-
-	if err := c.repairChildren(); err != nil {
-		return err
-	}
-
-	c.reapNotices()
 
 	if caller.Holder != nil {
 		c.classify(*caller.Holder)

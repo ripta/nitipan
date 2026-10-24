@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -83,7 +82,7 @@ func (a *app) runList(cmd *cobra.Command) error {
 		}
 
 		for _, n := range out.Notices {
-			fmt.Fprintf(a.deps.Stderr, "nitipan: notice: %s.\n", strings.TrimSuffix(n.Summary, "."))
+			a.printRecordNotice(n.Summary)
 		}
 
 		if asJSON {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -966,6 +967,30 @@ func TestReplaceOnASubLeaseIsRefused(t *testing.T) {
 
 	if got := tr.w.leaseByID(tr.childID); len(got.Domain.Keys) != 1 || got.Domain.Keys[0].Path != filepath.Join(tr.repo, "src") {
 		t.Errorf("the sub-lease changed: %+v", got.Domain.Keys)
+	}
+}
+
+func TestReplaceThatMergesASubLeaseIsRefusedBeforeAnyWrite(t *testing.T) {
+	tr := newTree(t)
+	other := tr.w.dir("other")
+
+	own := tr.w.acquireOK(tr.child, "--checkout", other)
+	before := tr.w.leaseIDs()
+
+	res := tr.w.run(tr.child, "acquire", "--checkout", other, "--replace", own, "--replace", tr.childID)
+	wantStatus(t, res, exitcode.Refused)
+	wantContains(t, "stderr", res.Stderr, "--replace "+tr.childID, "sub-lease", "cannot change its keys")
+
+	if got := tr.w.leaseIDs(); !slices.Equal(got, before) {
+		t.Errorf("a refused replace changed the leases: %v, was %v", got, before)
+	}
+
+	if got := tr.w.leaseByID(own); got == nil || len(got.Domain.Keys) != 1 || got.Domain.Keys[0].Path != other {
+		t.Errorf("the lead lease changed: %+v", got)
+	}
+
+	if got := tr.w.leaseByID(tr.childID); got == nil || got.Parent != tr.parentID {
+		t.Errorf("the sub-lease changed: %+v", got)
 	}
 }
 

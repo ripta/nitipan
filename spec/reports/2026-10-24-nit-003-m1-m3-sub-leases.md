@@ -178,3 +178,31 @@ Review findings:
 - adr-impact: no conflicts. It named two uncovered decisions. Both were dismissed. A locked `list` delivering notices
   extends NIT-001's existing tombstone delivery by `list`, so it does not depart from the past. The `list --json`
   consumer contract is NIT-001's, whose ADR candidate the user already declined.
+
+## Row review
+
+Code commit for M3: `2184fa6 nitipan: show sub-leases and requests in list`. The review-fix commit and the row finish
+are named in the final review section.
+
+The review ran over `f29ad6d..2184fa6` with a fresh reviewer and adr-impact agent. The reviewer ran `make test` and it
+passed. adr-impact found no conflicts and no new candidates. The reviewer found no correctness or security defect, and
+traced every lease removal and rewrite through the shared bookkeeping. It found the following, each fixed by a fresh
+implementer. `make ci` then passed, `freeze` with the three row commits returned `[]`, and `check` reported only the
+expected "should be implemented".
+
+- "Liveness and the parent's death" carried three amendment markers. They were collapsed to one.
+- M1's and M2's As built blocks said `list` neither repairs nor delivers, which M3 changed. Both were corrected.
+- "Record shape" said a dangling child is handled "tombstone included". That section uses notices. Amended to "notice
+  included", with a Decision Log entry.
+- Three proposal lines ran past 120 columns and were rewrapped.
+- Duplicate helpers were merged into a new `keys.Paths`, and `containsEntry` became `slices.Contains`.
+- `beginWith` and `list` ran the same repair steps separately. Both now call one helper, so every locked call repairs
+  the same way. The two notice printers now share one formatter.
+- A "sub-lease ended" notice left by a crashed release could be delivered after the parent revoked the same sub-lease.
+  Traced and confirmed. Fixed: `revoke` drops that pending notice before removing the child. A crash test covers it,
+  and the notice text and M2's As built say so.
+- No test covered a sub-lease named as a merged `--replace` ID. Added. The code already refused it.
+- The `deliverNotices` doc packed three ideas into one paragraph. Split.
+
+The implementer chose to put the shared helper in `keys` as `keys.Paths`, since `cli` cannot reach `lease`'s
+unexported helper.
