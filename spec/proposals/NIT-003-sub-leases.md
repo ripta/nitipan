@@ -293,8 +293,6 @@ broker, so it cannot issue a token. NIT-005 has not settled "Token scope" or "Lo
 
 Decision (autonomous): defer the token mechanism to NIT-005. NIT-003 fixes the outcomes NIT-005 must keep.
 
-**Revisit:** when NIT-005 settles "Token scope" and "Local fencing for NIT-001"
-
 - A sub-lease is its own grant. A parent and its child never share a token
 - While a sub-lease lives, the parent's token does not pass for the delegated keys
 - After a sub-lease ends, the sub-lessee's token is refused for its keys, and some token the parent holds passes there
@@ -696,6 +694,12 @@ None.
 - 2026-10-24: ADR candidate (cuts across the system): a parent and its sub-lessees are exempt from each other at
   overlap, at the record level and outside ADR-03's key rule. NIT-005, NIT-008, and every later claim check must apply
   it. Undecided. Found in NIT-003 M1.
+- 2026-10-24: Revisit-hook audit for "Fencing": extend. NIT-005 settled "Token scope" and "Local fencing for NIT-001"
+  in design review. It keeps these outcomes through ownership locally and leaves broker sub-lease reissue to a later
+  proposal. NIT-005 is still `designing`, so its decisions can change. The hook now fires when NIT-005 is accepted.
+- 2026-10-24: Revisit-hook audit for "Fencing": act. NIT-005 is accepted. Its local hook keeps every outcome above
+  through NIT-003's `owner` rule, an older binary ending a child included, and it leaves the reissue for broker
+  sub-leases to the first proposal that creates them. The hook line is removed.
 
 ## References
 
