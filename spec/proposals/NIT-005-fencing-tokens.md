@@ -26,6 +26,9 @@
 - NIT-008 — "Token scope" leaves the token reissue on a sub-lease's end to the first proposal that creates broker
   sub-leases. If NIT-008's "Sub-leases at machine reach" brings sub-leases to the broker, it owns that rule under
   NIT-003's outcomes
+- NIT-008 — "Local fencing for NIT-001" and "Refused mid-task". A recall past its deadline ends the child for the hook,
+  which then refuses the ex-sub-lessee with its own refusal kind and passes the parent. Before the deadline the hook
+  warns on stderr. NIT-008 M2 builds this. Amended 2026-10-24; see Decision Log
 
 ## Summary
 
@@ -138,7 +141,8 @@ The paths a ref update touches are defined in "Touched set for a ref update". Th
 reconciles with keys that name paths, as NIT-003 "Fencing" requires. Amended 2026-10-24; see Decision Log.
 
 Each touched key is judged on its own. Ownership follows NIT-003's `owner` rule: a parent does not own a key inside
-one of its live sub-leases, and the sub-lessee does.
+one of its live sub-leases, and the sub-lessee does. A sub-lease past an in-force NIT-008 recall deadline is not live
+for this rule. Amended 2026-10-24; see Decision Log.
 
 - A key owned by another holder's live record, or covered by a record whose holder's liveness is unknown or by an
   unusable record, is refused
@@ -745,6 +749,9 @@ Fences `machine` leases on one machine. Needs no broker.
   NIT-001's "a tombstone never blocks a claim". Waits on this proposal reaching `accepted`. Declined on 2026-10-24:
   on recheck it fails Architecture, since it shapes only the claim path, and NIT-001's "Superseded in part" marker
   records it where a reader of that rule looks.
+- 2026-10-24: NIT-008's review settled that the hook honors a recall. A sub-lease past its in-force deadline is not live
+  for the ownership rule, and the hook has a refusal kind for a recalled sub-lessee that quotes the recall and names no
+  command. Before, the rule knew no recall. NIT-008 M2 builds it.
 
 ## References
 

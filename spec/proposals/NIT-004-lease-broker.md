@@ -25,9 +25,9 @@
   "Broker lifecycle and store" persists queued mail and its stage and bounce state, "Node lifecycle" puts the codex
   path and `CODEX_HOME` in the plist, and "Version skew" gates mail events on the node's version. "Qualified names"
   and "Discovery queries" gain a mail address keyed by session ID
-- NIT-008 — "Expiring leases". Recall with a deadline needs the broker's lease terms. "Lease term and renewal" stores an
-  absolute expiry per lease, which a recall can lower, and never revives a recalled lease. "Source of truth for machine
-  leases": NIT-003 sub-leases are `machine` leases with no broker term, so recall for them needs the node
+- NIT-008 — "Source of truth for machine leases". Recall applies only to NIT-003's local sub-leases, which have no
+  broker term, and needs no broker. The node applies a recall's deadline when it mirrors `leases/`. Amended
+  2026-10-24; see Decision Log
 - NIT-002 — "Name syntax", which reserved the `repo` namespace at `machine` reach. "Name syntax for wider reach" uses
   it
 - NIT-001 — "Lease record fields" and the open question "Wider-reach lease names". This proposal answers that question.
@@ -139,6 +139,8 @@ Decision (autonomous): the state directory is authoritative at `machine` reach, 
   footprint on its machine. Every local claim refuses it, so discovery must not answer "nobody" for its keys
 - Mirrored facts are scoped by machine identity. The broker matches a mirrored path only against queries about the same
   machine. Two machines that both have `/Users/ripta/projects/nitipan` never meet through their mirrors
+- The node reads NIT-008's `recalls/` when it mirrors, and reports a child past its recall deadline as ended, with the
+  parent as owner. Amended 2026-10-24; see Decision Log
 - A node whose stream has had no heartbeat for longer than a grace period has its facts marked stale in every query
   answer, whether or not the connection has closed. They are replaced when it reconnects with a new snapshot
 - Nothing the broker holds is ever written into a state directory that V1 scans. Amended 2026-10-24; see Decision Log.
@@ -324,7 +326,7 @@ stopped can be revived by its holder while nobody else has claimed its keys, and
 - The node writes a notice to the holder in both cases. One says the lease was unprotected for a stated interval and
   nobody claimed it. The other says it was lost to a named holder. The holder's next nitipan call reports it. A notice
   ID carries the revision it reports, so two lapses before the holder's next call give two notices
-- Revival never applies to a lease that ended by release, `revoke`, `break`, a reported death, or a NIT-008 recall
+- Revival never applies to a lease that ended by release, `revoke`, `break`, or a reported death
 - A lapsed lease stays until the holder's node sends a snapshot that omits its holder or its anchor, or until its
   label has not been seen for 30 days. An overlapping grant turns it into a "taken" marker that names the new holder.
   The marker is an unacked end fact, so the next snapshot carries it and it is dropped when the holder's node acks
@@ -952,6 +954,10 @@ Amended 2026-10-24; see Decision Log.
   executable. "Version skew" gained the mail event kinds. "Qualified names" and "Discovery queries" gained NIT-007's
   mail address, keyed by session ID. They had named only the handle, which changes on a Claude Code resume. Each
   change is why the NIT-007 text gives it.
+- 2026-10-24: NIT-008's review settled recall for local sub-leases only, enforced by every reader when it reads, with no
+  broker term. The NIT-008 Impacts entry said recall lowers a broker lease's expiry and needs the node for local
+  sub-leases. It now names only the node's mirror, which applies a recall's deadline. "Lease term and renewal" said
+  revival never applies to a NIT-008 recall. No broker lease is recalled, so that clause is dropped.
 
 ## References
 

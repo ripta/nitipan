@@ -21,6 +21,9 @@
   changes "Losing the key never changes the label". "Version skew": mail, stage updates, and bounces are new event
   kinds gated on the node's registered version. "Node lifecycle": the LaunchAgent plist `setup` prints also carries
   the codex path and `CODEX_HOME`, since the plist is the one node input no agent sandbox can write
+- NIT-008 — "Wake paths ring, and only a read consumes" and "Agents without a wake path". Rings also cover pending
+  NIT-003 notices and requests. The ring ledger holds their keys and lives in the state directory. NIT-008 M3 builds
+  this. Amended 2026-10-24; see Decision Log
 - NIT-006 — "Node credential": its credential replaces or wraps the pinned bearer key "Auth" sets, and never runs
   beside it. Mail across users waits on NIT-006
 
@@ -234,11 +237,15 @@ removes it from the mailbox. It only rings: it tells the session that N messages
 `nitipan mail read`. Only `nitipan mail read` consumes mail. It prints each message to stdout, framed with its sender
 and verification, then removes it, the way NIT-001 delivers notices.
 
-A wake rings once per message. The node keeps, per registered identity, the message IDs some path already rang for.
-A refreshed registration for the same identity keeps that ledger. A waiter
+A wake rings once per message. A ledger per registered identity holds the message IDs some path already rang for.
+Amended 2026-10-24; see Decision Log. A refreshed registration for the same identity keeps that ledger. A waiter
 exits to wake, and the node pushes, only for an ID not yet rung. Unread mail that was already rung keeps showing in the
 non-waking rings of "Agents without a wake path", but never wakes the session again. A session that ignores its ring
 cannot wake forever.
+
+The ledger is a file beside the registration in the state directory, so a waiter with no node running reads it too.
+NIT-008's "Telling the sub-lessee" sets its format, and adds keys for pending notices and requests, which every wake
+path rings for.
 
 A message body is capped at a fixed size, refused at send. The cap keeps queued and bounced mail small in NIT-004's
 whole-file store, and keeps one message within what an agent shows as tool output.
@@ -328,7 +335,7 @@ session's next tool call through a hook or a nitipan call.
 Decision (autonomous): every path the session already runs rings, and `nitipan mail read` reads.
 
 - Every nitipan call on the identified-holder path, the one that delivers NIT-001 notices, rings when mail is pending.
-  The `hook` subcommands do not, since nobody reads their output
+  The agent `hook` subcommands do not, since nobody reads their output. NIT-008's git hook warning is not a mail ring
 - Turn hooks ring through `additionalContext`: Claude Code `UserPromptSubmit` and `PostToolUse` hooks that `setup`
   prints, the matching Codex hooks, and the opencode plugin. A ring is one directory read
 - An agent with no wake path and no hooks still gets the ring on its next nitipan call, and can always run
@@ -565,6 +572,9 @@ Amended 2026-10-24; see Decision Log.
 - 2026-10-24: ADR candidate (hard to reverse): mail addresses keyed on the session ID. Declined: ADR-05 already states
   the principle, and the derivation is implementation.
 - 2026-10-24: Accepted.
+- 2026-10-24: NIT-008's review extended the rings to pending NIT-003 notices and requests. The ledger was the node's,
+  and is now a state-directory file every waking path shares, so it holds with no node. The rule that `hook`
+  subcommands do not ring now names the agent hooks, since NIT-005's git hook prints a recall's deadline.
 
 ## References
 
