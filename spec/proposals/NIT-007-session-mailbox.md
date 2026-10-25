@@ -24,8 +24,9 @@
 - NIT-008 — "Wake paths ring, and only a read consumes" and "Agents without a wake path". Rings also cover pending
   NIT-003 notices and requests. The ring ledger holds their keys and lives in the state directory. NIT-008 M3 builds
   this. Amended 2026-10-24; see Decision Log
-- NIT-006 — "Node credential": its credential replaces or wraps the pinned bearer key "Auth" sets, and never runs
-  beside it. Mail across users waits on NIT-006
+- NIT-006 — "Node credential": NIT-006, now accepted, keeps the pinned bearer key "Auth" sets and binds its label to
+  one user, and never runs a second credential beside it. "Cross-user mail authorization" opens mail across users
+  under the recipient user's grant. Amended 2026-10-24; see Decision Log
 
 ## Summary
 
@@ -33,7 +34,8 @@ The broker carries mail between sessions on a user's machines. Any session can l
 mail address on any machine. The address is keyed by the session ID, so it survives a resume. That acts as a
 cross-machine SendMessage. A message reaches a machine over the stream that machine's node opened to the broker. The
 node stores it in a local mailbox, then rings the session through a path its agent supports, which wakes an idle
-session where the agent allows it. The session reads its mail with `nitipan mail read`. Mail flows only between nodes the user enrolled, over verified HTTPS.
+session where the agent allows it. The session reads its mail with `nitipan mail read`. Mail flows only between nodes
+the user enrolled, over verified HTTPS. Under NIT-006, mail also crosses users, only under the recipient user's grant.
 
 ## Motivation
 
@@ -198,20 +200,26 @@ verified HTTPS. Mail across users waits on NIT-006.
   Labels the broker saw before mail shipped are not pinned automatically. Each needs the same approval
 - A reinstalled or wiped machine is recovered with a broker-side "forget label" command. Mail queued for a forgotten
   label is kept for the label's next approved key, never handed to an unapproved one. Mail already stored on the
-  forgotten machine and never read bounces to its senders without its body, since the broker no longer holds it
+  forgotten machine and never read bounces to its senders without its body, since the broker no longer holds it.
+  Under NIT-006, when the next key binds the label to a different user, the queued mail bounces instead. Amended
+  2026-10-24; see Decision Log
 - A node sends and accepts mail only when its broker address is HTTPS with a certificate it verifies. A node on plain
   HTTP gets leases but no mail, and its error says why
 - The broker stamps each message's sender from the authenticated connection and ignores any sender field the client
   sets. It sets `sender_verified` to true for an enrolled node. The field's absence means unverified, under ADR-04's
   minor rule, so an older node or broker never passes an unverified message off as verified
 - The receiver frames the sender and its verification outside the message body, so the body cannot forge them
+- Under NIT-006, approval also binds the label to a user. Approval on the broker host binds it to the broker owner,
+  and a coworker binds through NIT-006's sign-in page. `sender_verified` keeps the meaning above: the sender is one of
+  the recipient user's own enrolled nodes. Mail from another user carries the sender's user label in a new field and
+  no `sender_verified`. The broker stores a hash of each pinned key. Amended 2026-10-24; see Decision Log
 
 NIT-007 places these as requirements on NIT-004, whose "Broker protocol" and "The machine part of a qualified name" are
 under their own review. Pinning changes NIT-004's "Losing the key never changes the label": losing the key then locks
 the label until the user forgets it. It also replaces NIT-004's rule that a different key is refused only while the
 old stream is live. NIT-007 M1 builds the pinning, approval, and forget commands in the broker, since NIT-004's leases
-do not need them. NIT-006's node credential replaces or wraps this key, and never runs beside it. See Impacts and
-Risks.
+do not need them. NIT-006 keeps this key and wraps it in a user binding, and never runs a second credential beside
+it. See Impacts and Risks.
 
 The requirement is on the hop the node makes. The node sends mail only to an HTTPS broker address whose certificate it
 verifies, from the system roots or a CA file in the node config. TLS may terminate at an ingress in front of the
@@ -220,7 +228,7 @@ confirmed at the review gate that deployments will have certificates, most likel
 temporary CA.
 
 Within one user's machines, the guardian-reply case needs only proof that a message came from one of the user's own
-nodes. User identity adds nothing there, and NIT-006 has not designed a node credential yet.
+nodes. User identity adds nothing there. NIT-006, accepted later, keeps this key as the node credential.
 
 Shipping with only a marker was rejected. On NIT-004's open broker, a host on the LAN can register as a sleeping
 laptop, or `POST` a send as a label it has seen. An idle Codex or opencode session, which has no approval hold, then
@@ -362,7 +370,9 @@ read is returned to the sender with the reason.
 - A bounce returns the message, body included, to the sender's mailbox with its reason, so it rings like mail. The
   reasons are: the broker held it 7 days without sending it, the recipient was not running and no resume read it within
   7 days, two live registrations made the address ambiguous, the recipient node is too old, the recipient's label is
-  pending or forgotten past 7 days, or the recipient's label was forgotten with the mail stored but unread
+  pending or forgotten past 7 days, or the recipient's label was forgotten with the mail stored but unread. NIT-006
+  adds "sender no longer allowed", "recipient holds no `shared` lease", and a label rebound to a different user, for
+  cross-user mail. Amended 2026-10-24; see Decision Log
 - 7 days matches NIT-004's retention of request outcomes, and outlasts a laptop shut over a weekend. It is a constant,
   not a field
 - A bounce or a stage update never produces a stage update or a bounce of its own. A bounce that cannot reach its
@@ -405,8 +415,10 @@ None.
   Amended 2026-10-24; see Decision Log. A sender puts text in front of the receiving session, and a woken Codex or
   opencode session runs a turn with nobody watching. Mitigation: mail flows only between nodes the user enrolled, with
   the sender stamped by the broker and framed outside the body. Content arrives as tool output and is treated as data.
-  A compromised enrolled machine, or a hostile session on one, can still send. That stays within one user's machines
-  until NIT-006.
+  A compromised enrolled machine, or a hostile session on one, can still send. Within one user that stays as is.
+  Across users, NIT-006 lets mail through only under the recipient user's grant, sends a conversation's first message
+  only to a session holding a `shared` lease, and re-checks the grant before delivery. A granted coworker's
+  compromised session can still reach those sessions. Amended 2026-10-24; see Decision Log.
 - **NIT-004 drifts from what NIT-007 requires of it** — likelihood: low, impact: high.
   NIT-007 needs NIT-004's store to persist queued mail, its key rule to refuse a second key for a pinned label, and
   its plist to carry the codex path. Amended 2026-10-24; see Decision Log. Mitigation: NIT-004 was amended in place
@@ -575,6 +587,12 @@ Amended 2026-10-24; see Decision Log.
 - 2026-10-24: NIT-008's review extended the rings to pending NIT-003 notices and requests. The ledger was the node's,
   and is now a state-directory file every waking path shares, so it holds with no node. The rule that `hook`
   subcommands do not ring now names the agent hooks, since NIT-005's git hook prints a recall's deadline.
+- 2026-10-24: NIT-006's review settled broker auth, and NIT-006 was accepted. Amended in place, with markers: Impacts
+  and "Auth" said NIT-006's credential replaces or wraps the pinned key. NIT-006 keeps it and binds its label to a
+  user. "Auth" said NIT-006 had not designed a node credential, which is now stale. It gains how approval binds a user,
+  that `sender_verified` keeps its same-user meaning, and that a label rebound to a different user bounces its queued
+  mail. "Delivery guarantees" gains NIT-006's bounce reasons. The Summary and the prompt-injection risk said mail
+  stays within one user until NIT-006. They now cite NIT-006's grant and reach rule.
 
 ## References
 
@@ -587,3 +605,5 @@ Amended 2026-10-24; see Decision Log.
 - ADR-06: wake paths signal, and only a read consumes
 - ADR-07: the node runs only input sandboxes cannot write
 - NIT-004: the broker that holds the mailboxes
+- NIT-006: broker auth, which binds each label to a user and opens mail across users
+- ADR-08: broker authority needs a proof no session can make

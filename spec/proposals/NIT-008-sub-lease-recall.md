@@ -194,7 +194,10 @@ NIT-007's rings point at it, and the parent is told to send word out of band. Am
 NIT-007's rings cover pending notices and pending requests, not only mail:
 
 - A ring fires for a notice addressed to the session that delivery would deliver now, judged read-only by delivery's own
-  verdict. A notice delivery keeps, such as a "parent ended" notice waiting on its repair, never rings
+  verdict. A notice delivery keeps, such as a "parent ended" notice waiting on its repair, never rings. NIT-006's
+  notice that a coworker's `shared` claim was refused by the session's lease never rings either, turn hooks included.
+  A refused claim costs the coworker nothing, so a ringing notice would let them wake the session's agent with no
+  mail grant. Amended 2026-10-24; see Decision Log
 - A ring also fires for a pending request whose target lease the session holds. That is the idle parent in NIT-003's
   accepted risk, whose requester waits on it. The notices with a waiting reader are the `recalled` notice and NIT-003's
   request granted, declined, and lapsed
@@ -355,6 +358,10 @@ None.
   reads, from a record beside the lease, never by a timer process. Declined: the user chose not to write it.
   (autonomous)
 - 2026-10-24: Accepted.
+- 2026-10-24: NIT-006's review, which accepted NIT-006, amended "Telling the sub-lessee" in place. The ring rule said a
+  ring fires for every notice delivery would deliver now. NIT-006 adds a notice to the holder of a lease that refused
+  a coworker's `shared` claim. That notice never rings, since a refused claim is free to make and would otherwise
+  wake the holder's agent with no mail grant.
 
 ## References
 
@@ -364,3 +371,4 @@ None.
 - ADR-04: the envelope and minor-version rule the recall record and new causes follow
 - ADR-06: rings only signal, and only a read consumes
 - `spec/reports/2026-10-18-sub-lease-prior-art.md`: "Hierarchical and delegated leases", on NFSv4 recall
+- NIT-006: the refused-claim notice that never rings

@@ -14,9 +14,12 @@
   lease keeps its token, and the CLI can ask for a synchronous renew for NIT-005's pre-push lease check. "Source of
   truth for machine leases": `machine` leases get no broker grant, so no broker token
 - NIT-006 — "Broker protocol", since auth wraps every broker call. "How sessions reach the broker", since the node
-  attests each session's identity. "The machine part of a qualified name", since its node credential decides whether
-  it replaces the instance key. "Which user a user-reach lease belongs to" and "Shared agents and acting_for", which
-  move the scope and `acting_for` questions to NIT-006
+  attests each session's identity. "The machine part of a qualified name", since NIT-006 wraps the pinned key in a
+  user binding. "Which user a user-reach lease belongs to" and "Shared agents and acting_for", which moved the scope
+  and `acting_for` questions to NIT-006. Amended 2026-10-24; see Decision Log. NIT-006, now accepted, amends eight
+  decisions here: "Broker protocol", "The machine part of a qualified name", "Lease term and renewal", "Which user a
+  user-reach lease belongs to", "Machine leases and user leases on the same path", "Discovery queries", "Broker
+  lifecycle and store", and "Shared agents and acting_for", plus "Version skew" and two risks
 - NIT-007 — "Per-machine node", "Machines connect out", and "Qualified names". A mailbox lives on the broker, reaches
   a machine over the stream the machine opened, and is addressed by qualified name. "The machine part of a qualified
   name" fixes the address as `<handle>@<label>` and refuses a label the broker never saw. "Broker protocol" acks each
@@ -177,9 +180,12 @@ server-sent events. Requests go as separate `POST`s. The standard library covers
 - The stream sends periodic keepalive comments and `Cache-Control: no-cache`, so an HTTP/1.1 proxy neither buffers it
   nor drops it as idle
 - The auth slot is the `Authorization` header on every request, the stream's `GET` included. NIT-006 fills it. Before
-  NIT-006, it carries the node key NIT-007 pins, and NIT-006's node credential replaces or wraps that key. A
-  credential checked when the stream opens is enforced for the stream's lifetime: the broker closes the stream when the
-  credential expires
+  NIT-006, it carries the node key NIT-007 pins. NIT-006 keeps that key and binds its label to a user, so the slot
+  carries the same key after NIT-006. A credential checked when the stream opens is enforced for the stream's
+  lifetime: the broker closes the stream when the credential expires, and when NIT-006's "forget label" or "revoke
+  user" revokes it. Amended 2026-10-24; see Decision Log
+- Under NIT-006, features that cross users need the broker's own listener on loopback or serving TLS itself, and a
+  node refuses plain HTTP to a broker that reported them on. See NIT-006's "Node credential"
 - The schema is JSON under a versioned path prefix. Skew between nodes and the broker follows "Version skew"
 - The broker serves HTTPS when its config names a certificate and key, through the standard library. A node verifies
   it against the system roots, or a CA file named in the node config. Without a certificate, the broker refuses to
@@ -312,7 +318,8 @@ stopped can be revived by its holder while nobody else has claimed its keys, and
   values, at a third of the term, so a node never runs on a term the broker does not use
 - The node renews every local holder's leases in one heartbeat. It renews at once on wake and on reconnect
 - A holder whose liveness reads unknown under NIT-001 counts as alive, as it does for local claims, so the node keeps
-  renewing its leases. Discovery shows it as unknown, and a `break` from any machine can end it
+  renewing its leases. Discovery shows it as unknown, and a `break` from any machine can end it. Under NIT-006 that
+  break must come from the lease's own user or the broker owner. Amended 2026-10-24; see Decision Log
 - The node counts a lease's remaining life from when it sent the renewal the broker acked, not from when the ack
   arrived. The broker started the term on receipt, so the node's deadline is never later than the broker's
 - Time is measured with `CLOCK_MONOTONIC` through `golang.org/x/sys`. On macOS it keeps counting while the machine
@@ -450,7 +457,8 @@ people type is `<handle>@<label>`.
 A label derived from the identity can never pass to another machine, and needs no registry to allocate. The instance
 key narrows takeover before NIT-006 lands: taking a node's stream also needs a file in the user's 0700 state
 directory. It is not auth, and it does not catch a disk clone made after the node first ran, since that copies the key
-too. NIT-006's "Node credential" decides whether its credential replaces the key.
+too. NIT-006's "Node credential" keeps the key and binds its label to one user, and never replaces it. A label
+rebound to a different user starts clean. Amended 2026-10-24; see Decision Log.
 
 The host name was rejected. Host names collide, and a laptop's changes with the network. A broker-assigned name was
 rejected. A reinstall or a wiped store gets a new name and strands stored addresses. The raw machine ID was rejected as
@@ -474,8 +482,11 @@ every other `user` lease on overlapping names, whatever its `holder.user`.
 - When NIT-006 splits the scope by authenticated user, leases only get narrower, which matches what callers asked for.
   Stored `repo:` names and `<handle>@<label>` addresses carry no user, so nothing stored changes meaning
 
-**Revisit:** when NIT-006 is accepted, to scope `user` leases by authenticated identity. Amended 2026-10-24; see
-Decision Log
+Amended 2026-10-24; see Decision Log. NIT-006 is accepted and scopes `user` leases by authenticated identity. Each
+bound user is one user scope, named by a lease's `acting_for`, under NIT-006's "Session credential" and "Shared
+agents and acting_for". A `user` lease and another user's `shared` lease on overlapping names still conflict, with
+the refusal detail NIT-006's "`user` and `shared` leases across users" sets. The one-scope rule above holds until a
+broker turns NIT-006's cross-user features on.
 
 Merging two people into one scope gives a visible refusal that names the holder and its OS user. Splitting one person
 into two scopes gives silent non-coordination, which is the bug in Motivation. A broker per user scope fails the first
@@ -526,7 +537,9 @@ Neither kind refuses the other through the broker. Overlaps between them are rep
 - A `user` or `shared` lease is broken the way NIT-001 breaks a lease. `break` from any machine in the scope refuses
   without `--force` while the holder is alive or unknown. With `--force`, the broker ends the lease, and the holder's
   node writes it a tombstone-like notice that names the breaker. The anchor stays as an ordinary lease, and the notice
-  says so. Who may break whom after NIT-006 is part of its "What auth authorizes"
+  says so. Under NIT-006's "What auth authorizes", a user may break only their own leases, and the broker owner any.
+  Overlap reports between `user` leases and mirrored `machine` leases go only between leases of one user. Amended
+  2026-10-24; see Decision Log
 - The broker never refuses a `user` claim because of a mirrored `machine` lease. No `machine` claim consults the
   broker. Mirrored machine leases carry derived entries in their sidecar, from the CLI or, for a record a V1 binary
   wrote, from the node. A derivation that fails shows as unknown in discovery, never as no overlap
@@ -572,6 +585,9 @@ review gate.
 - Names are never forced unique. The lookup returns every match and flags a name shared by more than one holder. It
   never picks one. The guardian protocol already says to stop and ask the user then
 - A session that holds no lease cannot be found by either query
+- Under NIT-006, another user's `user` leases and mirrored `machine` leases are hidden, unless the asker's label holds
+  that user's delegation, and a name lookup across users matches only `shared` leases. See NIT-006's "What auth
+  authorizes". Amended 2026-10-24; see Decision Log
 
 The guardian protocol finds a guardian by domain and by name. These two queries serve both routes. Its leading example,
 a defect in an installed plugin copy, has no checkout to derive a repo name from, so only the name route reaches it.
@@ -616,6 +632,9 @@ versioned JSON file, rewritten whole through a temp file, fsync, and `rename(2)`
   Decision Log
 - Before migrating the store to a new major, the broker keeps the previous file beside it, so an older broker can start
   from it after a rollback
+- NIT-006 adds its state to the file as a new major: a hash of each pinned key in place of the key, the owner ID,
+  admissions, user bindings, delegations, mail grants, and cross-user conversations. Its "Node credential" sets how
+  the kept previous file is treated after forget and revoke. Amended 2026-10-24; see Decision Log
 
 One file means one atomic write covers a grant, its request outcome, and its counter bump together. It reuses the
 temp-file pattern `internal/state` already uses, and ADR-04's evolution rule for JSON. The scale is a handful of
@@ -672,6 +691,11 @@ Mail, under NIT-007:
   them. For an older node it keeps the message and tells the sender "recipient node too old". A newer node facing an
   older broker reports "broker too old" for mail. Amended 2026-10-24; see Decision Log
 
+Auth, under NIT-006:
+
+- NIT-006's "Version skew" covers its contracts: bindings, claims for another user, cross-user mail and replies, and
+  its store major. Amended 2026-10-24; see Decision Log
+
 A node's own versions never overlap. One node runs per machine and OS user under its flock, and it exits when its
 executable changes, so launchd restarts it on the new binary.
 
@@ -692,7 +716,9 @@ Decision (autonomous): a decision to defer. Before NIT-006, every option gives t
 user scope. The question moves to NIT-006, beside "What auth authorizes", as an open question that blocks NIT-006's
 acceptance.
 
-**Revisit:** when NIT-006 reaches design review, before it is accepted
+Amended 2026-10-24; see Decision Log. NIT-006 settled the deferred question: a shared agent's lease counts in the
+requesting user's scope, named by `acting_for`, and only under that user's standing delegation. A legacy `acting_for`
+is replaced by the node's bound user. See NIT-006's "What auth authorizes" and "Shared agents and acting_for".
 
 - The real choice needs an authorization rule: whether an agent may claim in a user's scope without that user's
   approval. NIT-006 owns that rule
@@ -730,9 +756,9 @@ None.
   register as a sleeping laptop's machine and uid once that laptop's stream is no longer live, and send an empty
   snapshot. Mitigation: the broker serves HTTPS when given a certificate, plain HTTP only on a loopback or private
   address, and the node warns on plain HTTP. The instance key makes a takeover need a file in the user's 0700 state
-  directory. The environment is high-trust, which the research and NIT-006's "No auth at first" accept. NIT-006 closes
-  it.
-  **Revisit:** when NIT-006 is accepted
+  directory. The environment is high-trust, which the research and NIT-006's "No auth at first" accept. NIT-006, now
+  accepted, closes it once built: labels bind to users, unbound labels are refused once cross-user features are on,
+  and authority needs a proof no session can make, under ADR-08. Amended 2026-10-24; see Decision Log.
 - **Wider-reach names are a contract** — likelihood: high, impact: medium.
   Once guardians and scripts store `repo:` names, changing the identity breaks them. "Name syntax for wider reach" is
   settled. Mitigation: the stored form carries the whole root set, the request carries a derivation version that the
@@ -747,8 +773,9 @@ None.
   Grants made after the migration are lost on rollback, and the restart grace lets every node renew.
 - **The design depends on NIT-005 and NIT-006, which are still in design** — likelihood: medium, impact: medium.
   NIT-005 relies on revival keeping the token, on the synchronous renew, and on the store keeping its counter. Its
-  counter floor after a restore stays open there. NIT-006 receives the `acting_for` scope question and the node
-  credential. A change there can reopen a decision here. Mitigation: each reliance is written in this proposal's
+  counter floor after a restore stays open there. NIT-006, accepted on 2026-10-24, settled the `acting_for` scope
+  question and the node credential, and amended the decisions its Impacts entry here names. A change there can reopen
+  a decision here. Mitigation: each reliance is written in this proposal's
   Impacts and in the decision it rests on. NIT-005's working copy still says NIT-004 has not settled the term, which
   needs a fix in NIT-005.
 - **Unchanged callers get no cross-machine protection** — likelihood: high, impact: medium.
@@ -958,6 +985,21 @@ Amended 2026-10-24; see Decision Log.
   broker term. The NIT-008 Impacts entry said recall lowers a broker lease's expiry and needs the node for local
   sub-leases. It now names only the node's mirror, which applies a recall's deadline. "Lease term and renewal" said
   revival never applies to a NIT-008 recall. No broker lease is recalled, so that clause is dropped.
+- 2026-10-24: NIT-006's review settled broker auth, and NIT-006 was accepted. Amended in place, with markers:
+  "Broker protocol" said NIT-006's credential replaces or wraps the pinned key. NIT-006 wraps it in a user binding,
+  forget and revoke close the stream, and cross-user features need a loopback or TLS listener. "The machine part of a
+  qualified name" said NIT-006 decides whether its credential replaces the key. It never does, and a rebound label
+  starts clean. "Lease term and renewal" let a `break` from any machine end an unknown holder's lease. Under NIT-006
+  it must come from the lease's user or the broker owner. "Machine leases and user leases on the same path" left who
+  may break whom to NIT-006, which settled it, and overlap reports now stay within one user. "Discovery queries" gains
+  NIT-006's cross-user visibility. "Broker lifecycle and store" gains NIT-006's state as a new major. "Version skew"
+  points at NIT-006's own analysis. The Impacts entry and the dependency risk were brought in line.
+- 2026-10-24: Revisit audits for three hooks that NIT-006's acceptance fired. The user picked Act for each. "Which
+  user a user-reach lease belongs to": the scope is now each bound user, under NIT-006, and the hook line is removed.
+  The one-scope rule still holds until a broker turns cross-user features on. "Shared agents and acting_for": NIT-006
+  settled the requesting user's scope under a standing delegation, and the hook line is removed. The risk "The broker
+  is open before NIT-006": its mitigation now cites NIT-006 and ADR-08, and the hook line is removed. The risk stays
+  until NIT-006 is built.
 
 ## References
 
@@ -965,3 +1007,4 @@ Amended 2026-10-24; see Decision Log.
 - ADR-01: machines connect out to the broker
 - ADR-05: cross-machine identities use stable identifiers
 - NIT-001: the lease record and liveness check this proposal extends
+- ADR-08: broker authority needs a proof no session can make, from NIT-006
