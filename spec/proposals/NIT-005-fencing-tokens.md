@@ -553,13 +553,14 @@ its old token and land a stale push, which the newer holder's fence would have r
 ### Local fencing for a `user` lease
 
 The local hook judges only records in the state directory, and NIT-004 never writes broker leases there. Whether two
-sessions on one machine can share a checkout while one holds a `user` lease over it depends on NIT-004's open question
+sessions on one machine can share a checkout while one holds a `user` lease over it depended on NIT-004's question
 "Machine leases and user leases on the same path".
 
-Decision (autonomous): defer. The local hook does not judge broker leases. When NIT-004 settles that question, its
-answer says which hook judges such an overlap, or that the case cannot arise.
+Decision: the local hook judges the anchor. NIT-004 settled that a `user` claim made from a checkout takes or reuses an
+ordinary `machine` lease there. The local hook judges that anchor like any other `machine` lease. It never judges
+broker leases.
 
-**Revisit:** when NIT-004 settles "Machine leases and user leases on the same path"
+Amended 2026-10-24; see Decision Log.
 
 ## Design Decisions (Open)
 
@@ -752,6 +753,11 @@ Fences `machine` leases on one machine. Needs no broker.
 - 2026-10-24: NIT-008's review settled that the hook honors a recall. A sub-lease past its in-force deadline is not live
   for the ownership rule, and the hook has a refusal kind for a recalled sub-lessee that quotes the recall and names no
   command. Before, the rule knew no recall. NIT-008 M2 builds it.
+- 2026-10-24: Revisit-hook audit for "Local fencing for a `user` lease": act. NIT-004 settled "Machine leases and
+  user leases on the same path": a `user` claim made from a checkout takes or reuses an ordinary `machine` anchor
+  lease there. The local hook judges that anchor like any `machine` lease, and never judges broker leases. The
+  decision said the question was deferred until NIT-004 answered it. The hook line was removed.
+- 2026-10-24: Scheduled as NIT-005 M1, NIT-005 M2, and NIT-005 M3 in queue.md. M1 needs no broker and lands first.
 
 ## References
 

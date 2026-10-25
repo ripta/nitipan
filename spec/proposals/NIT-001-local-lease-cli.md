@@ -2,7 +2,7 @@
 
 **Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-10-23
+**Updated:** 2026-10-24
 
 ## Dependencies
 
@@ -322,9 +322,6 @@ record is never ambiguous about what its name means.
 
 Decision (autonomous): defer the name syntax, and make the domain typed now. `domain.kind` says what the name is. V1
 writes only kind `path` at reach `machine`.
-
-**Revisit:** when NIT-002 settles machine-reach resource names such as `cpu:heavy`; when NIT-004 settles the syntax for
-`user` and `shared` names
 
 Amended 2026-10-18; see Decision Log.
 
@@ -1701,6 +1698,8 @@ Live facts that change the design's assumptions:
   Each scan also reads `sessions/executing` for marks under the plugin's own PID. A session with such a mark and no
   owner, whose wait returns at once, lost its end event while an earlier instance was torn down, so the plugin marks it
   off.
+- 2026-10-24: Revisit-hook audit for "Wider-reach lease names": act. NIT-002 settled machine-reach resource
+  names such as `cpu:heavy`, and NIT-004 settled the syntax for `user` and `shared` names. The hook line was removed.
 
 ## References
 

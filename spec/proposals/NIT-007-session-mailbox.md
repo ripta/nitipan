@@ -593,6 +593,7 @@ Amended 2026-10-24; see Decision Log.
   that `sender_verified` keeps its same-user meaning, and that a label rebound to a different user bounces its queued
   mail. "Delivery guarantees" gains NIT-006's bounce reasons. The Summary and the prompt-injection risk said mail
   stays within one user until NIT-006. They now cite NIT-006's grant and reach rule.
+- 2026-10-24: Scheduled as NIT-007 M1 and NIT-007 M2 in queue.md. NIT-005 M3 goes between them.
 
 ## References
 

@@ -362,6 +362,7 @@ None.
   ring fires for every notice delivery would deliver now. NIT-006 adds a notice to the holder of a lease that refused
   a coworker's `shared` claim. That notice never rings, since a refused claim is free to make and would otherwise
   wake the holder's agent with no mail grant.
+- 2026-10-24: Scheduled as NIT-008 M1-M4 in queue.md.
 
 ## References
 

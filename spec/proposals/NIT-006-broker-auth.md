@@ -773,6 +773,7 @@ Amended 2026-10-24; see Decision Log.
 - 2026-10-24: ADR candidate (cuts across the system): a machine has exactly one broker credential. Declined: it shapes
   only the broker and node contract, so it fails the Architecture test.
 - 2026-10-24: Accepted. NIT-004, NIT-007, and NIT-008 were amended in place for its decisions.
+- 2026-10-24: Scheduled as NIT-006 M1-M3 in queue.md.
 
 ## References
 

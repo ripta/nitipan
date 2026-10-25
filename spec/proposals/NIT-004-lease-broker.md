@@ -1000,6 +1000,8 @@ Amended 2026-10-24; see Decision Log.
   settled the requesting user's scope under a standing delegation, and the hook line is removed. The risk "The broker
   is open before NIT-006": its mitigation now cites NIT-006 and ADR-08, and the hook line is removed. The risk stays
   until NIT-006 is built.
+- 2026-10-24: Scheduled as NIT-004 M1-M2 and NIT-004 M3 in queue.md. The split lets NIT-005 M2 land on the new
+  grant path first.
 
 ## References
 
