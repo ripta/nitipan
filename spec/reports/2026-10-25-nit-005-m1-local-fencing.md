@@ -13,7 +13,21 @@ macOS, run from Claude Code's sandboxed Bash in `/Users/ripta/projects/nitipan`.
 
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
-| NIT-005 M1 | DONE | the commit whose subject is `nitipan: fence local ref updates against broken and foreign leases` |
+| NIT-005 M1 | DONE | `cabd387` |
+
+Commits, in order:
+
+1. `cabd387` nitipan: fence local ref updates against broken and foreign leases
+2. `81a629c` nitipan: keep global hooks and fence marks intact on edge paths
+3. The `spec:` commit that carries this amendment, which moves the finished rows to `history.md`
+
+The first two were committed as `0dc89ee` and `46322f9`. Their bodies opened with a recap of the prior state, which
+`commit-style.md` forbids. Neither was pushed, so both were reworded with `git commit-tree`. The trees, authors, and
+dates are unchanged.
+
+The row is finished. NIT-005 stays `accepted`, since M2 and M3 remain. `NIT-005 M1` moved from `queue.md` to the new
+`history.md`. The three finished rows that earlier runs left in `queue.md` moved ahead of it, in build order: NIT-001
+M1-M4, NIT-002 M1-M3, and NIT-003 M1-M3. `proposals.py check` then returned `[]`.
 
 ## Row and final review
 
