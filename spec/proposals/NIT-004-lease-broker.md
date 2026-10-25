@@ -20,7 +20,11 @@
 - NIT-007 — "Per-machine node", "Machines connect out", and "Qualified names". A mailbox lives on the broker, reaches
   a machine over the stream the machine opened, and is addressed by qualified name. "The machine part of a qualified
   name" fixes the address as `<handle>@<label>` and refuses a label the broker never saw. "Broker protocol" acks each
-  event, which mail delivery can reuse
+  event, which mail delivery can reuse. NIT-007 amends seven decisions here: "The machine part of a qualified name"
+  pins a label's key once the user approves it, "Broker protocol" carries that key in the auth slot before NIT-006,
+  "Broker lifecycle and store" persists queued mail and its stage and bounce state, "Node lifecycle" puts the codex
+  path and `CODEX_HOME` in the plist, and "Version skew" gates mail events on the node's version. "Qualified names"
+  and "Discovery queries" gain a mail address keyed by session ID
 - NIT-008 — "Expiring leases". Recall with a deadline needs the broker's lease terms. "Lease term and renewal" stores an
   absolute expiry per lease, which a recall can lower, and never revives a recalled lease. "Source of truth for machine
   leases": NIT-003 sub-leases are `machine` leases with no broker term, so recall for them needs the node
@@ -111,6 +115,11 @@ the name a local socket or MCP server exposes. The broker qualifies it with a ma
 The local part is NIT-001's handle, and the machine part is the label in "The machine part of a qualified name". A
 handle is unique within one state directory, and the label covers the machine and OS user.
 
+Amended 2026-10-24; see Decision Log. A mail address under NIT-007 uses a mail name as its local part, keyed by the
+session ID and derived only by the broker. It equals the handle for Codex and opencode. A Claude Code handle changes
+on every resume, so a Claude Code session's mail name differs from its handle, as ADR-05 requires for stored
+identities.
+
 ### Source of truth for machine leases
 
 A `machine` lease lives in NIT-001's state directory. The broker also needs to know about it to answer queries.
@@ -165,7 +174,8 @@ server-sent events. Requests go as separate `POST`s. The standard library covers
   rather than replaying from `Last-Event-ID`. Event IDs serve only for ordering and deduplication
 - The stream sends periodic keepalive comments and `Cache-Control: no-cache`, so an HTTP/1.1 proxy neither buffers it
   nor drops it as idle
-- The auth slot is the `Authorization` header on every request, the stream's `GET` included. NIT-006 fills it. A
+- The auth slot is the `Authorization` header on every request, the stream's `GET` included. NIT-006 fills it. Before
+  NIT-006, it carries the node key NIT-007 pins, and NIT-006's node credential replaces or wraps that key. A
   credential checked when the stream opens is enforced for the stream's lifetime: the broker closes the stream when the
   credential expires
 - The schema is JSON under a versioned path prefix. Skew between nodes and the broker follows "Version skew"
@@ -173,6 +183,9 @@ server-sent events. Requests go as separate `POST`s. The standard library covers
   it against the system roots, or a CA file named in the node config. Without a certificate, the broker refuses to
   listen on any address that is not loopback or private, a wildcard bind included. The node also refuses plain HTTP to
   a public address, and warns when it uses plain HTTP at all. Amended 2026-10-24; see Decision Log
+- TLS may terminate at an ingress in front of the broker. The broker then listens on plain HTTP on a loopback or
+  private address, and the node verifies the ingress's certificate at the address in its config. NIT-007 sends mail
+  only when that address is HTTPS and verified
 
 JSON lets the protocol follow the same evolution rule ADR-04 sets for records, so the project keeps one schema
 discipline. go.mod has no networking dependency today, and this adds none. It also works through ordinary HTTP/1.1
@@ -268,6 +281,9 @@ macOS-only, which matches the platforms the user runs.
 - The broker address and proxy settings come from a node config file in the state directory, beside NIT-002's
   `slots.json`. A LaunchAgent does not inherit the user's shell environment, and Go's default proxy lookup reads only
   the environment
+- The plist also carries the codex path and `CODEX_HOME` that `setup` resolves, for NIT-007's Codex rings. No agent
+  sandbox can write the plist, while the state directory is writable from inside them, so anything the node runs comes
+  from the plist. Amended 2026-10-24; see Decision Log
 
 `machine` leases keep working with no node. Commands that need the broker fail at once when it is absent, as "How
 sessions reach the broker" says.
@@ -419,6 +435,10 @@ people type is `<handle>@<label>`.
   machine ID, uid, and key replaces the broker's old stream for that node, which covers a half-open stream after sleep.
   A different key while the old stream is live is refused and reported. A stream counts as live while the broker has
   had a heartbeat on it within one term. Losing the key never changes the label
+- Once the user approves a label for mail under NIT-007's "Auth", its key is pinned. A different key is then refused
+  whether or not the old stream is live, for leases as well as mail. Losing a pinned key locks the label until the
+  user runs "forget label" on the broker host and approves the new key. The label itself still never changes. Amended
+  2026-10-24; see Decision Log
 - A collision between two labels the broker has seen is refused, and the error names both machines
 - When the OS gives no machine ID, the node refuses to start. Its error says the hardware UUID could not be read, and to
   retry or report it
@@ -544,6 +564,9 @@ review gate.
   lookup
 - "Who is named N" matches `holder.name` or `holder.handle` exactly, across every live, stale, and lapsed lease on
   every machine. A name lookup is not a path query, so it crosses the per-machine scoping of mirrored paths
+- Both queries also accept a NIT-007 mail address, and every answer carries each holder's mail address beside its
+  qualified name. A Claude Code holder whose record has no `session_id` shows as not mailable. Amended 2026-10-24; see
+  Decision Log
 - Names are never forced unique. The lookup returns every match and flags a name shared by more than one holder. It
   never picks one. The guardian protocol already says to stop and ask the user then
 - A session that holds no lease cannot be found by either query
@@ -585,6 +608,10 @@ versioned JSON file, rewritten whole through a temp file, fsync, and `rename(2)`
   finds its outcome
 - No general event queue is persisted. A reconnecting node resyncs from a snapshot, and the snapshot carries the
   unacked end facts, so "lost to X" and "ended by break" survive a restart
+- NIT-007's mail is the exception. The file also holds each message queued for a node until that node acks it, the
+  stage and bounce state of each message, each label's pinned key and approval, and the handle list each node last
+  reported. A message body has a fixed size cap, so the whole-file rewrite stays small. Amended 2026-10-24; see
+  Decision Log
 - Before migrating the store to a new major, the broker keeps the previous file beside it, so an older broker can start
   from it after a rollback
 
@@ -636,6 +663,12 @@ Derivation:
   carries the derivation version, and the broker refuses one below its floor. Raising the floor locks older CLIs out
   of `user` claims. That fails closed, and an upgrade fixes it
 - Machine labels are derived only by the broker, so nodes on different versions cannot disagree
+
+Mail, under NIT-007:
+
+- Mail, stage updates, and bounces are event kinds the broker sends only to a node whose registered version supports
+  them. For an older node it keeps the message and tells the sender "recipient node too old". A newer node facing an
+  older broker reports "broker too old" for mail. Amended 2026-10-24; see Decision Log
 
 A node's own versions never overlap. One node runs per machine and OS user under its flock, and it exits when its
 executable changes, so launchd restarts it on the new binary.
@@ -910,6 +943,15 @@ Amended 2026-10-24; see Decision Log.
 - 2026-10-24: ADR candidate (cuts across the system): the state directory decides `machine` leases, and nothing the
   broker holds lands in a directory V1 scans. Declined: the user did not pick it, and it is an implementation rule.
 - 2026-10-24: Accepted. ADR-01 moved from proposed to accepted with it.
+- 2026-10-24: Amended for NIT-007's design review, at the user's direction. "The machine part of a qualified name"
+  gained key pinning for labels approved for mail. It had refused a different key only while the old stream was live,
+  and that rule still holds for unapproved labels. "Broker protocol" now says the auth slot carries the pinned node key
+  before NIT-006, and that TLS may terminate at an ingress. It had left the slot unused until NIT-006. "Broker
+  lifecycle and store" now persists mail queued for a node and its stage, bounce, key, and handle-list state. It had
+  persisted no event queue. "Node lifecycle" puts the codex path and `CODEX_HOME` in the plist. It had named only the
+  executable. "Version skew" gained the mail event kinds. "Qualified names" and "Discovery queries" gained NIT-007's
+  mail address, keyed by session ID. They had named only the handle, which changes on a Claude Code resume. Each
+  change is why the NIT-007 text gives it.
 
 ## References
 
