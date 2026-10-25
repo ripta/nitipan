@@ -64,13 +64,15 @@ func cleanEnv(env []string) []string {
 	return out
 }
 
+// run asks git for its untranslated messages. Callers classify some failures by the English text
+// on standard error, such as "not a git repository". Nothing else about git's environment changes.
 func run(timeout time.Duration, env []string, dir string, stdin []byte, args []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = append(slices.Clone(env), "LC_ALL=C", "LANGUAGE=C")
 
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)

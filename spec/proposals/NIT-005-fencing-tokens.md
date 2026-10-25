@@ -455,9 +455,12 @@ fails closed until they are in force. Codex `acquire` already fails closed the s
   tracks, such as husky's `.husky`, and one that other repositories share, such as a global `core.hooksPath`. The
   install puts nitipan's hooks in a directory under the git directory, sets the checkout's local `core.hooksPath` to
   it, and chains every hook name git documents to the directory it replaced. Nothing nitipan writes can then be
-  committed or reach another repository, and a collaborator without nitipan never meets its hooks. Amended 2026-10-25;
-  see Decision Log. A hook manager that later resets `core.hooksPath` is caught at the
-  next `acquire`. A hook name git adds later is not chained until nitipan learns it
+  committed or reach another repository, and a collaborator without nitipan never meets its hooks. The directory it
+  chains to is the last `core.hooksPath` that any config scope sets apart from nitipan's own, with a leading `~`
+  expanded the way git does. A relative value stays relative to each worktree. A re-install reads it from the scopes
+  again, and the checkout's local value from before the first install stays recorded as written, so an uninstall
+  restores it unchanged. A hook manager that later resets `core.hooksPath` is caught at the next `acquire`. A hook name
+  git adds later is not chained until nitipan learns it. Amended 2026-10-25; see Decision Log
 - `setup git --uninstall <checkout>` removes them and restores what they chained to
 - The hooks bake the stable PATH location of `nitipan`, not the symlink-resolved path. A Homebrew upgrade deletes the
   versioned Cellar path. The script falls back to `command -v nitipan`
@@ -489,15 +492,17 @@ accepted.
 
 Decision (autonomous): the mark guards the marked holder's claims, and is written at break time.
 
-- `break --force` writes the fence mark for the broken lease's keys in the same locked call as the tombstone. An older
+- `break --force` writes the fence mark for the broken lease's keys in the same locked call as the tombstone, and
+  writes the mark first. A mark that cannot be written then leaves no tombstone, and the lease stays. A tombstone that
+  cannot be written takes its mark back. An older
   binary that later delivers the tombstone never scans the marks directory, so it cannot lift the mark. A new binary
   that delivers a tombstone with no mark, because an older binary did the break, writes the mark then. A break that
   handles its mark marks its tombstone `fenced`, and delivery writes nothing for it, so a mark that a user removed or
-  that lifted does not return. Amended 2026-10-25; see Decision Log
+  that lifted does not return
 - The mark refuses every path that would create a record for the marked holder over its keys: `acquire`, `--replace`,
   and NIT-003 `request`. A parent's `grant` to the marked holder lifts it, since that is the owner's consent. The
   parent's live record covers the granted keys, so the cover rule below lifts the mark, and `grant` has no code of its
-  own for it. Other holders are unaffected. Amended 2026-10-25; see Decision Log
+  own for it. Other holders are unaffected
 - The mark lifts per key. A key lifts when another holder's live record covers it, or when a grant covers it. The whole
   mark lifts when the user runs `break <mark-id>`, or when a lock holder finds the marked holder dead
 - Marks live in their own directory, which V1 binaries never scan. Each mark carries NIT-001's envelope with
@@ -519,6 +524,8 @@ A `format` bump would close both. It was rejected, since it locks every older bi
 `session-start` hook included, which is out of proportion to two mixed-binary gaps. A mark that does not guard claims
 was rejected. NIT-001 says a broken holder learns of the break by re-acquiring, so its next `acquire` delivers the
 tombstone, succeeds, and lifts the mark in one call. That is the main path, not a corner case.
+
+Amended 2026-10-25; see Decision Log.
 
 ### Tokenless pushers and fence cleanup
 
@@ -657,12 +664,8 @@ Fences `machine` leases on one machine. Needs no broker.
   channel check was amended to say so.
 - A grant to the marked holder is lifted by the cover rule, and no `grant` code exists for it. A request over a marked
   key reaches the mark check only when a mark of a newer minor, which repairs never rewrite, is still in place.
-- Cost on a long rebase, measured on one macOS machine with git 2.50.1 and the test binary as nitipan. A rebase of 60
-  commits took 0.37 s with no hook and 7.0 s with it, about 110 ms per replayed commit. The rebase ran the hook about
-  800 times, and 61 of those reached nitipan at about 40 ms each. The other runs end in the shell script, and its fast
-  path cut the total from 10 s to 7 s. With an opencode session-kind lease whose host died mid-turn, which runs
-  `sqlite3` on each judged update, the median was 9.3 s. `NITIPAN_MEASURE_REBASE=1 go test ./internal/cli -run
-  MeasureTheHook -v` repeats it. A Claude Code lease costs nothing extra beyond reading the records.
+- Cost on a long rebase is measured on one macOS machine, and the numbers are in the 2026-10-25 Decision Log entry on
+  the hook's cost.
 - After review: a mark-aware break marks its tombstone `fenced`, so delivery never brings back a removed or lifted mark.
   The install treats any hooks directory outside the git directory as shared and chains to it. The hook opens the state
   directory read-only, and the acquire check asks git before the lock.
@@ -879,7 +882,27 @@ Fences `machine` leases on one machine. Needs no broker.
 - 2026-10-25: Cost of the hook on a long rebase, for the risk "The hook runs on every branch and HEAD update". A rebase
   of 60 commits took 0.37 s without the hook and 7.0 s with it, and 9.3 s with an opencode session lease that runs
   `sqlite3` on each update. The script's fast path, which starts no program for a ref nitipan does not judge, cut 10 s
-  to 7 s. The risk's low-impact rating is left unchanged for the user to review.
+  to 7 s. Per replayed commit that is about 110 ms. The rebase ran the hook about 800 times, and 61 of those reached
+  nitipan at about 40 ms each, since the other runs end in the shell script. With an opencode session-kind lease
+  whose host died mid-turn, which runs `sqlite3` on each judged update, the median was 9.3 s. A Claude Code lease costs
+  nothing extra beyond reading the records. `NITIPAN_MEASURE_REBASE=1 go test ./internal/cli -run MeasureTheHook -v`
+  repeats it. The risk's low-impact rating is left unchanged for the user to review.
+- 2026-10-25: Amended "Installing the git hooks", after row review. The chain stubs quote the directory they chain to,
+  and the shell does not expand a `~` inside quotes. A `core.hooksPath` of `~/.config/git/hooks` was read as written, so
+  every hook in it was skipped silently, and a local `set ~/...` replayed from `prior-hooks-path` did the same. The
+  install now reads the values with `--type=path`, and expands a replayed value the same way. The recorded local value
+  stays raw, so an uninstall restores the user's own text. The section's re-install bullet text was added in the earlier
+  fix and never stated, so it now says how the chained directory is found.
+- 2026-10-25: Amended "The fence mark", after row review. The break published its `fenced` tombstone and then wrote the
+  mark. A mark that failed to write left the tombstone with the lease standing, so the holder was told its lease broke,
+  and a retry wrote a second tombstone. The text said only "in the same locked call as the tombstone". The break now
+  writes the mark first and then the tombstone, and takes the mark back when the tombstone fails. Both exist before the
+  lease is removed, so the lock-free reader, which reads records, then tombstones, then marks, still finds the broken
+  holder refused by one of them at every point after the lease is gone.
+- 2026-10-25 (run best guess): Every git call that nitipan classifies by stderr, or that runs from the hook, sets
+  `LC_ALL=C` and `LANGUAGE=C`. "Not a git repository" is matched in English, and a translated git would turn a claim
+  outside a checkout into a refusal. Whether this git ships translations could not be checked here, so the guard is
+  unconditional. Nothing else about git's environment changes, and the hook runner keeps `GIT_DIR`.
 - 2026-10-25: ADR candidate (departs from the past): a new kind of state-directory file that older binaries never scan
   may leave stated mixed-binary gaps instead of a `format` bump. ADR-04's minor rule says an old reader is never more
   permissive, and the fence mark's two gaps make older `acquire` and `break` more permissive. Undecided. Found in

@@ -1228,3 +1228,30 @@ func TestAFailureToAskGitRefusesTheClaimAndSaysWhatFailed(t *testing.T) {
 		})
 	}
 }
+
+func TestAForceBreakWhoseFenceMarkCannotBeWrittenLeavesTheLeaseAndNoTombstone(t *testing.T) {
+	w := newWorld(t)
+	repo := w.dir("repo")
+	w.dir("repo", "src")
+	holder := w.claude(200, "s1")
+
+	id := w.acquireOK(holder, "--checkout", repo, "--scope", "src", "--name", "alpha")
+
+	w.hooks = lease.Hooks{BeforeBreakMark: func() error { return errKilled }}
+	wantStatus(t, w.run(w.terminal(900), "break", "--force", id), exitcode.Error)
+	w.hooks = lease.Hooks{}
+
+	if ids := w.leaseIDs(); len(ids) != 1 || ids[0] != id {
+		t.Errorf("leases = %v, want the lease to stand", ids)
+	}
+
+	if tombs, marks := w.tombIDs(), w.markIDs(); len(tombs) != 0 || len(marks) != 0 {
+		t.Errorf("tombstones = %v, marks = %v, want none of either", tombs, marks)
+	}
+
+	wantStatus(t, w.run(w.terminal(900), "break", "--force", id), exitcode.OK)
+
+	if len(w.tombIDs()) != 1 || len(w.markIDs()) != 1 {
+		t.Errorf("tombstones = %v, marks = %v, want one of each after the retry", w.tombIDs(), w.markIDs())
+	}
+}

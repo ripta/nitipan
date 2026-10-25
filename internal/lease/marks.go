@@ -78,8 +78,9 @@ func (c *call) markFor(t *record.Tombstone, held []keys.Key) *record.Mark {
 }
 
 // publishMark writes the fence mark of a break. A key that another holder's live record already
-// covers is left out, and a mark with no key left is not written.
-func (c *call) publishMark(t *record.Tombstone, held []keys.Key) error {
+// covers is left out, and a mark with no key left is not written. It returns the mark's ID, or an
+// empty string when none was written.
+func (c *call) publishMark(t *record.Tombstone, held []keys.Key) (string, error) {
 	var guarded []keys.Key
 
 	for _, k := range held {
@@ -89,21 +90,21 @@ func (c *call) publishMark(t *record.Tombstone, held []keys.Key) error {
 	}
 
 	if len(guarded) == 0 {
-		return nil
+		return "", nil
 	}
 
 	m := c.markFor(t, guarded)
 
 	data, err := m.Encode()
 	if err != nil {
-		return fmt.Errorf("encoding the fence mark for %s: %w", t.Lease, err)
+		return "", fmt.Errorf("encoding the fence mark for %s: %w", t.Lease, err)
 	}
 
 	if err := c.l.Publish(state.MarksDir, m.ID, data); err != nil {
-		return fmt.Errorf("publishing the fence mark for %s: %w", t.Lease, err)
+		return "", fmt.Errorf("publishing the fence mark for %s: %w", t.Lease, err)
 	}
 
-	return nil
+	return m.ID, nil
 }
 
 // markDelivered writes the mark of a break that an older binary did without one. It runs when the
@@ -130,7 +131,9 @@ func (c *call) markDelivered(t *record.Tombstone, marks []*markEntry) error {
 		}
 	}
 
-	return c.publishMark(t, held)
+	_, err := c.publishMark(t, held)
+
+	return err
 }
 
 // coveredByOther reports whether a live record of some other holder covers the key.

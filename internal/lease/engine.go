@@ -45,6 +45,10 @@ type Hooks struct {
 	// AfterRevokeTombstone lets a test crash a revoke that published its tombstone and has not yet
 	// removed the sub-lease.
 	AfterRevokeTombstone func() error
+
+	// BeforeBreakMark lets a test fail the write of a break's fence mark, to check that the break
+	// leaves nothing of the broken holder's notice behind.
+	BeforeBreakMark func() error
 }
 
 // Engine runs lease operations against one state directory.

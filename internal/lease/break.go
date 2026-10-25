@@ -8,6 +8,7 @@ import (
 
 	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/exitcode"
+	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/state"
@@ -322,15 +323,17 @@ func (c *call) execute(p breakPlan, req BreakRequest) (BrokenLease, error) {
 	}
 
 	if tomb != nil {
-		if err := c.publishTombstone(tomb); err != nil {
+		held, markID, err := c.fence(p.lease, tomb)
+		if err != nil {
 			return done, err
+		}
+
+		if err := c.publishTombstone(tomb); err != nil {
+			return done, c.unfence(markID, err)
 		}
 
 		done.Tombstone = tomb
-
-		if err := c.fence(p.lease, tomb, &done); err != nil {
-			return done, err
-		}
+		done.Hooks = c.hooksOf(held)
 	}
 
 	if err := c.removeLeaseFile(p.lease); err != nil {
@@ -349,17 +352,48 @@ func (c *call) execute(p breakPlan, req BreakRequest) (BrokenLease, error) {
 	return done, nil
 }
 
-// fence guards the keys of a broken path lease with a mark, and records whether the git hooks that
-// enforce the mark are in force where the keys lie. The mark is written in the same locked call as
-// the tombstone.
-func (c *call) fence(en *entry, tomb *record.Tombstone, done *BrokenLease) error {
+// fence guards the keys of a broken path lease with a mark, and returns the keys it guards and the
+// mark's ID. The mark is written in the same locked call as the tombstone, and before it. A mark
+// that fails to write then leaves no tombstone behind to tell a holder whose lease still stands
+// that it was broken. Both exist before the lease is removed, so a reader that finds the lease gone
+// finds the tombstone and the mark.
+func (c *call) fence(en *entry, tomb *record.Tombstone) ([]keys.Key, string, error) {
 	held, ok := en.keysOf()
 	if !ok {
-		return nil
+		return nil, "", nil
 	}
 
-	if err := c.publishMark(tomb, held); err != nil {
-		return err
+	if err := runHook(c.e.Hooks.BeforeBreakMark); err != nil {
+		return nil, "", err
+	}
+
+	markID, err := c.publishMark(tomb, held)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return held, markID, nil
+}
+
+// unfence takes back a mark whose tombstone could not be written, so the lease the break left
+// standing does not stay fenced against its own holder. It returns cause, joined with the failure
+// to take the mark back.
+func (c *call) unfence(markID string, cause error) error {
+	if markID == "" {
+		return cause
+	}
+
+	if err := c.removeFile(state.MarksDir, markID); err != nil {
+		return errors.Join(cause, err)
+	}
+
+	return cause
+}
+
+// hooksOf records whether the git hooks that enforce the mark are in force where the keys lie.
+func (c *call) hooksOf(held []keys.Key) []GitHooks {
+	if held == nil {
+		return nil
 	}
 
 	hooks, err := c.e.hooksFor(held)
@@ -367,9 +401,7 @@ func (c *call) fence(en *entry, tomb *record.Tombstone, done *BrokenLease) error
 		c.e.Notify.warn(err)
 	}
 
-	done.Hooks = hooks
-
-	return nil
+	return hooks
 }
 
 // removeLeaseFile is removeLease for a break, which treats a file that is already gone as removed.

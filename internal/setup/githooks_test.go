@@ -663,3 +663,60 @@ func TestOnlyANonRepositoryOrNoGitCountsAsOutsideACheckout(t *testing.T) {
 		})
 	}
 }
+
+func TestATildeHooksPathIsExpandedTheWayGitExpandsIt(t *testing.T) {
+	requireGit(t)
+
+	tests := []struct {
+		Name  string
+		Local bool
+	}{
+		{Name: "from global config"},
+		{Name: "from local config", Local: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			repo := newRepo(t)
+			exe, _ := fakeNitipan(t, "0")
+			home := filepath.Dir(repo)
+			ran := filepath.Join(home, "tilde-ran")
+
+			t.Setenv("HOME", home)
+			writeScript(t, filepath.Join(home, "tilde-hooks", "pre-commit"), "#!/bin/sh\necho tilde >> '"+ran+"'\n")
+
+			if test.Local {
+				git(t, repo, "config", "--local", "core.hooksPath", "~/tilde-hooks")
+			} else {
+				global := filepath.Join(home, "gitconfig")
+				if err := os.WriteFile(global, []byte("[core]\n\thooksPath = ~/tilde-hooks\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+
+				t.Setenv("GIT_CONFIG_GLOBAL", global)
+			}
+
+			install(t, repo, exe)
+
+			writeScript(t, filepath.Join(repo, "b.txt"), "two\n")
+			git(t, repo, "add", "-A")
+			git(t, repo, "commit", "-qm", "two")
+
+			if !strings.Contains(read(t, ran), "tilde") {
+				t.Error("the hook in the home directory was skipped")
+			}
+
+			if _, err := UninstallGit(gitfence.ExecClean, repo); err != nil {
+				t.Fatal(err)
+			}
+
+			if !test.Local {
+				return
+			}
+
+			if got := read(t, filepath.Join(repo, ".git", "config")); !strings.Contains(got, "hooksPath = ~/tilde-hooks\n") {
+				t.Errorf("uninstall did not restore the raw core.hooksPath:\n%s", got)
+			}
+		})
+	}
+}

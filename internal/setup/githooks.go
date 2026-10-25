@@ -280,17 +280,33 @@ func installCheckout(run gitfence.Runner, top, executable string) ([]Installed, 
 // directory.
 func priorTracked(run gitfence.Runner, top, own, common, content string) string {
 	if value, set := strings.CutPrefix(strings.TrimSpace(content), "set "); set {
-		return value
+		return expandPath(run, top, value)
 	}
 
 	return configuredHooksPath(run, top, own, filepath.Join(common, "hooks"))
 }
 
-// configuredHooksPath returns the core.hooksPath that applies apart from nitipan's own, as written.
-// A relative value is relative to each worktree and must stay that way. Without one it returns
-// fallback.
+// expandPath expands a leading tilde the way git does for a path-typed value, which the shell does
+// not do inside the quotes of a chain stub. A relative value stays relative. When git cannot
+// expand it, the value is returned as written.
+func expandPath(run gitfence.Runner, top, value string) string {
+	out, err := run(top, nil, "config", "--type=path", "--default", value, "--get", "nitipan.unset")
+	if err != nil {
+		return value
+	}
+
+	if expanded := strings.TrimSuffix(string(out), "\n"); expanded != "" {
+		return expanded
+	}
+
+	return value
+}
+
+// configuredHooksPath returns the core.hooksPath that applies apart from nitipan's own, with a
+// leading tilde expanded. A relative value is relative to each worktree and must stay that way.
+// Without one it returns fallback.
 func configuredHooksPath(run gitfence.Runner, top, own, fallback string) string {
-	out, err := run(top, nil, "config", "--show-scope", "--get-all", "core.hooksPath")
+	out, err := run(top, nil, "config", "--type=path", "--show-scope", "--get-all", "core.hooksPath")
 	if err != nil {
 		return fallback
 	}

@@ -15,6 +15,44 @@ macOS, run from Claude Code's sandboxed Bash in `/Users/ripta/projects/nitipan`.
 |-----------|------------|--------|
 | NIT-005 M1 | DONE | the commit whose subject is `nitipan: fence local ref updates against broken and foreign leases` |
 
+## Row and final review
+
+The row has one milestone, so the row review and the run's final review cover the same range, `247eba5..0dc89ee`.
+One reviewer pass served as both, and included the final ADR review. An `adr-impact` agent ran beside it.
+
+Findings and dispositions:
+
+1. Chain scripts baked a raw `~/...` from a global `core.hooksPath`, which the shell never expands. Every global hook
+   was skipped. CONFIRMED with a scratch repo. Sent to fix.
+2. "Outside a checkout" matches git's English stderr, and nothing sets `LC_ALL=C`. PLAUSIBLE. Sent to trace.
+3. `break` publishes a fenced tombstone before the mark. If the mark write fails, a fenced tombstone with no mark
+   remains. PLAUSIBLE. Sent to trace.
+4. "The fence mark" carried two amendment markers. Sent to fix.
+5. A mid-bullet marker in "Installing the git hooks", and a log entry claiming an amendment with no text change. Sent
+   to fix.
+6. Rebase cost numbers appeared in both the As built block and the Decision Log. Sent to fix.
+7. ADR-04 against the mark directory's mixed-binary gaps. Left for the user. It is already an Undecided candidate.
+
+Fix round results, from a fresh implementer:
+
+1. Fixed. `core.hooksPath` is read with `--type=path`, and a replayed prior value is expanded through git. The raw
+   value is still what uninstall restores. A regression test with a temp `HOME` failed before the fix.
+2. Uncheckable here, since the sandbox denied the probe of git's translations. Fixed anyway: `gitfence` pins
+   `LC_ALL=C` and `LANGUAGE=C` for every git call. A fake-git test failed before the fix. This is a run best guess.
+3. Confirmed with an injected failure. `break` now writes the mark first and the tombstone second, and removes the
+   mark if the tombstone write fails. The lease goes only after both exist. A regression test failed before the fix.
+   The mark-rollback path has no test. "The fence mark" is amended to say the mark comes first.
+4. Fixed. "The fence mark" has one marker.
+5. Fixed. "Installing the git hooks" now states the scope-value and `~` behavior, with the marker at the end of the
+   bullet.
+6. Fixed. The cost numbers live only in the Decision Log, and the As built block points there.
+
+Checks after the fix round: `make ci` passed. `proposals.py freeze --row-commit 0dc89ee` returned `[]`.
+`proposals.py check` reported only the four finished queue rows. The coordinator's `go build ./...` passed.
+
+The `adr-impact` pass found the `fenced` field consistent with ADR-04, since leaving it out changes no old reader's
+decision. It found the same PLAUSIBLE ADR-04 point as before. It raised no new conflict.
+
 ## Plan-time facts
 
 - Session reports go in `spec/reports/`. The preference file under `~/.config` is denied by the sandbox. Prior runs
