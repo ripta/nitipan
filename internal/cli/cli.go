@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/exitcode"
+	"github.com/space-armada/nitipan/internal/gitfence"
 	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/machine"
@@ -73,6 +75,14 @@ type Deps struct {
 	// Hooks stop an operation between two writes. Only tests set them.
 	Hooks lease.Hooks
 
+	// Git runs git for setup and for the check that a path claim makes. It runs without the
+	// variables that point git at another repository. Default: the git binary on PATH.
+	Git gitfence.Runner
+
+	// LookPath finds nitipan on PATH, so the git hooks can bake the stable location and not the
+	// symlink-resolved one. Default: exec.LookPath.
+	LookPath func(string) (string, error)
+
 	// Executable returns the absolute path of this nitipan with symlinks resolved. Hook entries and
 	// plugins run nitipan by that path. Default: os.Executable.
 	Executable func() (string, error)
@@ -89,6 +99,14 @@ type Deps struct {
 func (d Deps) withDefaults() Deps {
 	if d.Executable == nil {
 		d.Executable = executablePath
+	}
+
+	if d.Git == nil {
+		d.Git = gitfence.ExecClean
+	}
+
+	if d.LookPath == nil {
+		d.LookPath = exec.LookPath
 	}
 
 	if d.UserHome == nil {

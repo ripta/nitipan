@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/gitfence"
 	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/proc/proctest"
 	"github.com/space-armada/nitipan/internal/record"
@@ -81,6 +82,9 @@ type world struct {
 
 	// exe is the nitipan path the hook entries name.
 	exe string
+
+	// git replaces the git runner of the acquire check and setup. Nil runs the real git.
+	git gitfence.Runner
 
 	// db answers opencode's time_suspended. Nil makes every read fail.
 	db session.OpencodeDB
@@ -166,6 +170,7 @@ func (w *world) deps(c caller, stdout, stderr *bytes.Buffer) Deps {
 		Now:          func() time.Time { return w.now },
 		Sleep:        w.sleep,
 		Finder:       w.finder,
+		Git:          w.git,
 		StateOptions: state.Options{LockBudget: w.budget, LockPoll: 10 * time.Millisecond, Sleep: w.lockSleep},
 		Hooks:        w.hooks,
 	}

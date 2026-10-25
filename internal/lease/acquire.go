@@ -95,6 +95,10 @@ func (e *Engine) acquire(req AcquireRequest, lock func() (*state.Locked, error))
 		return nil, ErrMissingSession
 	}
 
+	// git runs before the lock is taken, since a slow git must not hold every other command up. The
+	// answer is judged after begin, so a broken holder still hears of its tombstone.
+	hooks := e.hooksBeforeLock(req)
+
 	c, err := e.beginWith(&h, lock)
 	if err != nil {
 		return nil, err
@@ -123,6 +127,14 @@ func (e *Engine) acquire(req AcquireRequest, lock func() (*state.Locked, error))
 	domain, err := e.Canon.Domain(req.Domain.Checkout, req.Domain.Scopes)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", exitcode.ErrUsage, err)
+	}
+
+	if err := c.refuseMarked(h, domain.Keys); err != nil {
+		return nil, err
+	}
+
+	if err := hooks.verdict(); err != nil {
+		return nil, err
 	}
 
 	if err := c.firstUnusable(); err != nil {
@@ -856,6 +868,10 @@ func (cl *claim) create() (*AcquireResult, error) {
 		return nil, fmt.Errorf("publishing the new lease: %w", err)
 	}
 
+	if err := cl.liftMarks(rec); err != nil {
+		return nil, err
+	}
+
 	if err := cl.flush(w); err != nil {
 		return nil, err
 	}
@@ -989,6 +1005,10 @@ func (cl *claim) replace() (*AcquireResult, error) {
 		if err := hook(); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := cl.liftMarks(w.result(lead)); err != nil {
+		return nil, err
 	}
 
 	for _, en := range merged {

@@ -326,7 +326,7 @@ func (l *Locked) syncDir(sub string) error {
 // sweepTemp removes temp files left by a writer that crashed. Every write happens under the lock,
 // so a temp file seen by the lock holder cannot belong to a live writer.
 func (l *Locked) sweepTemp() error {
-	subs := []string{LeasesDir, TombstonesDir, RequestsDir, NoticesDir, RegisteredDir, PresenceDir, ExecutingDir, ConfigDir}
+	subs := []string{LeasesDir, TombstonesDir, RequestsDir, NoticesDir, MarksDir, RegisteredDir, PresenceDir, ExecutingDir, ConfigDir}
 
 	for _, sub := range subs {
 		entries, err := os.ReadDir(filepath.Join(l.dir.path, sub))

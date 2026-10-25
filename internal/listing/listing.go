@@ -18,8 +18,9 @@ import (
 // SchemaVersion is the version of the output schema. Minor 1 adds the domain kind "resource", the
 // remote flag, and the effective count and live holders of a local resource lease. Minor 2 adds
 // sub-leases: the parent link, the computed delegated list, the owner and grantor_of marks of a
-// filtered query, and the top-level requests and notices arrays.
-const SchemaVersion = "1.2"
+// filtered query, and the top-level requests and notices arrays. Minor 3 adds the top-level marks
+// array of fence marks.
+const SchemaVersion = "1.3"
 
 // Output is the whole `list --json` document.
 type Output struct {
@@ -41,6 +42,11 @@ type Output struct {
 	// array, and empty when the call delivered none, which includes every call that read without
 	// the lock.
 	Notices []Notice `json:"notices"`
+
+	// Marks are the fence marks that guard keys against the holders of broken leases. A filtered
+	// query lists the marks whose keys overlap the filter. A mark nitipan cannot use is listed as
+	// unusable. It is always an array.
+	Marks []Mark `json:"marks"`
 
 	// SlotConfigPath is where the slot counts are configured. The text output prints it. The JSON
 	// document leaves it out, since a consumer has no use for it.
@@ -69,6 +75,22 @@ type Tombstone struct {
 	// Summary is the sentence `list` also writes to stderr, so a consumer that discards the array
 	// can still show a person what happened.
 	Summary string `json:"summary,omitempty"`
+}
+
+// Mark is one fence mark. The holder is the one the mark guards against, and the liveness is its.
+// A mark nitipan cannot use carries its file name only.
+type Mark struct {
+	ID        string         `json:"id,omitempty"`
+	File      string         `json:"file,omitempty"`
+	Usable    bool           `json:"usable"`
+	Lease     string         `json:"lease,omitempty"`
+	Holder    *record.Holder `json:"holder,omitempty"`
+	Liveness  *Liveness      `json:"liveness,omitempty"`
+	Keys      []string       `json:"keys,omitempty"`
+	BrokenBy  *record.Holder `json:"broken_by,omitempty"`
+	Anonymous bool           `json:"anonymous,omitempty"`
+	BrokenAt  *time.Time     `json:"broken_at,omitempty"`
+	Summary   string         `json:"summary"`
 }
 
 // Request is one pending sub-lease request.
@@ -234,6 +256,10 @@ func Encode(w io.Writer, out Output) error {
 
 	if out.Notices == nil {
 		out.Notices = []Notice{}
+	}
+
+	if out.Marks == nil {
+		out.Marks = []Mark{}
 	}
 
 	enc := json.NewEncoder(w)

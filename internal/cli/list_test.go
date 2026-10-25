@@ -48,10 +48,10 @@ func TestListJSONEmitsALeaseOfAnUnknownKindWithLivenessAndFootprint(t *testing.T
 	w := newWorld(t)
 	w.table.Add(77, proctest.Process{Start: startOf(77)})
 
-	id := w.plant(plantSpec{PID: 77, Paths: []string{w.dir("repo")}, Version: "1.3", Kind: "future"})
+	id := w.plant(plantSpec{PID: 77, Paths: []string{w.dir("repo")}, Version: "1.4", Kind: "future"})
 
 	doc := w.listJSON(w.terminal(900))
-	if doc["schema_version"] != "1.2" {
+	if doc["schema_version"] != "1.3" {
 		t.Errorf("schema_version = %v", doc["schema_version"])
 	}
 

@@ -87,6 +87,9 @@ type tombSpec struct {
 
 	// KeepAfterDeath is true to write clear_when_dead false.
 	KeepAfterDeath bool
+
+	// Paths are the paths the tombstone lists.
+	Paths []string
 }
 
 func (w *world) plantTombstone(spec tombSpec) string {
@@ -109,6 +112,10 @@ func (w *world) plantTombstone(spec tombSpec) string {
 		"lease":     spec.Lease,
 		"broken_by": map[string]any{"agent": "claude", "pid": 300},
 		"broken_at": "2026-10-20T11:00:00Z",
+	}
+
+	if len(spec.Paths) > 0 {
+		doc["paths"] = spec.Paths
 	}
 
 	data, err := json.Marshal(doc)

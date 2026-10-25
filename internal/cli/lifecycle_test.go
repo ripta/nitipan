@@ -117,7 +117,7 @@ func TestASubLeaseOfANewerMinorIsNeitherRewrittenNorAnnounced(t *testing.T) {
 	repo := w.dir("repo")
 	w.dir("repo", "src")
 
-	id := w.plant(plantSpec{PID: 300, Paths: []string{filepath.Join(repo, "src")}, Parent: missingID, Version: "1.3"})
+	id := w.plant(plantSpec{PID: 300, Paths: []string{filepath.Join(repo, "src")}, Parent: missingID, Version: "1.4"})
 	before, err := os.ReadFile(filepath.Join(w.leasesDir(), id+".json"))
 	if err != nil {
 		t.Fatal(err)
@@ -437,7 +437,7 @@ func TestALockHolderReapsADeadHoldersNotices(t *testing.T) {
 func TestABinaryThatCannotRewriteTheChildWritesNoNotice(t *testing.T) {
 	tr := newTree(t)
 
-	tr.w.editJSON(filepath.Join(tr.w.leasesDir(), tr.childID+".json"), func(doc map[string]any) { doc["version"] = "1.3" })
+	tr.w.editJSON(filepath.Join(tr.w.leasesDir(), tr.childID+".json"), func(doc map[string]any) { doc["version"] = "1.4" })
 	tr.w.kill(200)
 
 	wantStatus(t, tr.w.run(tr.third, "acquire", "--checkout", tr.w.dir("other")), exitcode.OK)
@@ -446,7 +446,7 @@ func TestABinaryThatCannotRewriteTheChildWritesNoNotice(t *testing.T) {
 		t.Errorf("notices = %v, want only the sibling's", names)
 	}
 
-	if rec := tr.w.leaseByID(tr.childID); rec.Parent != tr.parentID || rec.Version.String() != "1.3" {
+	if rec := tr.w.leaseByID(tr.childID); rec.Parent != tr.parentID || rec.Version.String() != "1.4" {
 		t.Errorf("the child was rewritten: %+v", rec)
 	}
 }

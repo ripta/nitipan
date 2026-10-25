@@ -136,7 +136,12 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 
 	query := queryKeys(filter, filtered)
 
-	out.Requests, err = c.pendingRequests(query, len(query) > 0, req.Resource != "")
+	out.Requests, err = c.pendingRequests(query, haveQuery(query), req.Resource != "")
+	if err != nil {
+		return nil, err
+	}
+
+	out.Marks, err = c.markReport(query, haveQuery(query), req.Resource != "")
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +167,7 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 	}
 
 	for _, te := range remove {
+		c.markDeliveredBy(te, req.Caller)
 		c.removeTombstone(te)
 	}
 
@@ -309,4 +315,68 @@ func slotFields(view *slotView) (limit *int, holders []string) {
 	}
 
 	return &count, holders
+}
+
+func haveQuery(query []keys.Key) bool {
+	return len(query) > 0
+}
+
+// markDeliveredBy writes the fence mark of a break that an older binary did without one, when list
+// delivers its tombstone to the holder it was addressed to. The listing is already written, so a
+// failure here is a warning.
+func (c *call) markDeliveredBy(te *tombEntry, caller adapter.Caller) {
+	if te.Tomb == nil || caller.Holder == nil || !c.e.addressedTo(*caller.Holder, te.Tomb) || c.l == nil {
+		return
+	}
+
+	marks, err := c.e.loadMarks()
+	if err == nil {
+		err = c.markDelivered(te.Tomb, marks)
+	}
+
+	if err != nil {
+		c.e.Notify.warn(err)
+	}
+}
+
+// markReport lists the fence marks. A path query keeps the marks whose keys overlap it, and a
+// resource query keeps none, since a mark guards paths. A mark that cannot be used is always shown.
+func (c *call) markReport(query []keys.Key, filtered, resource bool) ([]listing.Mark, error) {
+	marks, err := c.e.loadMarks()
+	if err != nil {
+		return nil, err
+	}
+
+	out := []listing.Mark{}
+
+	for _, me := range marks {
+		if me.Mark == nil {
+			out = append(out, listing.Mark{File: me.Path, Summary: fmt.Sprintf("fence mark %s cannot be used by this "+
+				"nitipan (%s)", me.Path, me.Bad.Reason)})
+
+			continue
+		}
+
+		if resource || (filtered && !anyOverlap(query, me.Mark.Keys, c.e.Finder)) {
+			continue
+		}
+
+		m := me.Mark
+		holder, by, at := m.Holder, m.BrokenBy, m.BrokenAt
+
+		out = append(out, listing.Mark{
+			ID:        me.ID,
+			Usable:    true,
+			Lease:     m.Lease,
+			Holder:    &holder,
+			Liveness:  &listing.Liveness{Status: me.Live.Status.String(), Reason: me.Live.Reason},
+			Keys:      keys.Paths(m.Keys),
+			BrokenBy:  &by,
+			Anonymous: m.Anonymous,
+			BrokenAt:  &at,
+			Summary:   fmt.Sprintf("%s (holder: %s)", DescribeBroken(m.AsTombstone()), describeHolder(m.Holder)),
+		})
+	}
+
+	return out, nil
 }

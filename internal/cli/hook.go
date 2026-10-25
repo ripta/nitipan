@@ -31,12 +31,14 @@ type hookInput struct {
 	Executing *bool  `json:"executing"`
 }
 
-// hookCmd registers the commands that agent hooks and plugins call. They stay out of help and out
-// of every error message, because only the entries `setup` prints should ever invoke them.
+// hookCmd registers the commands that agent hooks and plugins call, and the one that the git hook
+// calls. They stay out of help and out of every error message, because only the entries `setup`
+// prints, and the script `setup git` installs, should ever invoke them.
 //
-// Each reads its session ID from its input and never from its environment. Each finds its host with
-// the process walk and fails closed when the walk finds no matching agent. None delivers or removes a
-// tombstone, because nobody reads a hook's output.
+// Each but the git one reads its session ID from its input and never from its environment. Each
+// finds its host with the process walk and fails closed when the walk finds no matching agent. None
+// delivers or removes a tombstone, because nobody reads a hook's output. The git one walks only when
+// agent variables are set, and passes the user's own terminal.
 func (a *app) hookCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "hook",
@@ -55,6 +57,7 @@ func (a *app) hookCmd() *cobra.Command {
 		a.hookSub("session-end", a.runSessionEnd),
 		a.hookSub("presence", a.runPresence),
 		a.hookSub("execution", a.runExecution),
+		a.hookRefTransaction(),
 	)
 
 	return cmd

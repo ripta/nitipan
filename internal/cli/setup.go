@@ -14,7 +14,7 @@ import (
 func (a *app) setupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "setup [agent]",
-		Short: "Print the entries an agent needs, or install the opencode plugins",
+		Short: "Print the entries an agent needs, or install the opencode plugins and the git fence",
 		Long: `Print the entries an agent needs before it can claim leases: the sandbox allowance for the state
 directory, and the hooks or plugins that report when a session ends.
 
@@ -23,7 +23,16 @@ text appears whenever a write to the state directory is blocked.
 
 For opencode, --install-plugins <dir> writes nitipan's two plugins into <dir>/nitipan, with this
 nitipan's absolute path baked in. It writes plugin files and nothing else. It refuses to overwrite a
-file that differs from the one nitipan ships, unless --replace is given.`,
+file that differs from the one nitipan ships, unless --replace is given.
+
+setup git --install <checkout> installs a git hook that refuses a branch or HEAD update touching
+paths another session holds, or that a broken lease used to cover. A path claim inside a git checkout
+is refused until the hook is in force there. The hook goes into the directory git uses for hooks, in
+every initialized submodule too, and an existing reference-transaction hook is kept and chained. A
+hooks directory that git tracks is never written. The hook goes under the git directory instead, the
+checkout's local core.hooksPath points at it, and every hook chains to the tracked directory.
+setup git --uninstall <checkout> removes the hook, puts back what it chained, and restores the
+previous core.hooksPath. A caller that is no agent, such as the user's own terminal, is never refused.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return fmt.Errorf("%w: %s takes at most one agent, got %q", exitcode.ErrUsage, cmd.Name(), args)
@@ -38,11 +47,17 @@ file that differs from the one nitipan ships, unless --replace is given.`,
 
 	cmd.Flags().String("install-plugins", "", "write the opencode plugins into this plugins directory")
 	cmd.Flags().Bool("replace", false, "overwrite a plugin file that differs from the one nitipan ships")
+	cmd.Flags().String("install", "", "with git: install the git hook in this checkout")
+	cmd.Flags().String("uninstall", "", "with git: remove the git hook from this checkout")
 
 	return cmd
 }
 
 func (a *app) runSetup(cmd *cobra.Command, args []string) error {
+	if len(args) == 1 && args[0] == setup.Git {
+		return a.runSetupGit(cmd)
+	}
+
 	agent, err := a.setupAgent(args)
 	if err != nil {
 		return err
@@ -147,4 +162,112 @@ func (a *app) setupAgent(args []string) (string, error) {
 	}
 
 	return res.Holder.Adapter.Name, nil
+}
+
+// runSetupGit installs or removes the git hook.
+func (a *app) runSetupGit(cmd *cobra.Command) error {
+	install, err := cmd.Flags().GetString("install")
+	if err != nil {
+		return fmt.Errorf("reading --install: %w", err)
+	}
+
+	uninstall, err := cmd.Flags().GetString("uninstall")
+	if err != nil {
+		return fmt.Errorf("reading --uninstall: %w", err)
+	}
+
+	changed := cmd.Flags().Changed("install")
+
+	switch {
+	case changed && cmd.Flags().Changed("uninstall"):
+		return fmt.Errorf("%w: give --install or --uninstall, not both", exitcode.ErrUsage)
+	case !changed && !cmd.Flags().Changed("uninstall"):
+		_, err := fmt.Fprint(a.deps.Stdout, setup.GitText())
+
+		return err
+	case changed && install == "", !changed && uninstall == "":
+		return fmt.Errorf("%w: --install and --uninstall need the checkout to act on", exitcode.ErrUsage)
+	}
+
+	if changed {
+		return a.installGit(install)
+	}
+
+	abs, err := a.absPath(uninstall)
+	if err != nil {
+		return err
+	}
+
+	done, err := setup.UninstallGit(a.deps.Git, abs)
+	a.printInstalled(done)
+
+	if err != nil {
+		return err
+	}
+
+	if len(done) == 0 {
+		fmt.Fprintf(a.deps.Stdout, "nitipan's git hook was not installed in %s\n", abs)
+	}
+
+	return nil
+}
+
+func (a *app) installGit(dir string) error {
+	abs, err := a.absPath(dir)
+	if err != nil {
+		return err
+	}
+
+	exe, err := a.stableExecutable()
+	if err != nil {
+		return err
+	}
+
+	done, err := setup.InstallGit(a.deps.Git, abs, exe)
+	a.printInstalled(done)
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(a.deps.Stdout, "\nThe hook runs %s, or the nitipan on PATH when that path is gone.\n", exe)
+
+	return nil
+}
+
+func (a *app) printInstalled(done []setup.Installed) {
+	for _, f := range done {
+		line := fmt.Sprintf("%s %s", f.Action, f.Path)
+		if f.Note != "" {
+			line += " (" + f.Note + ")"
+		}
+
+		fmt.Fprintln(a.deps.Stdout, line)
+	}
+}
+
+// stableExecutable is the path the git hook bakes in. A symlink-resolved path can name a versioned
+// directory that an upgrade deletes, so the location on PATH wins when it leads to this nitipan.
+func (a *app) stableExecutable() (string, error) {
+	exe, err := a.deps.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	found, err := a.deps.LookPath("nitipan")
+	if err != nil {
+		return exe, nil
+	}
+
+	found, err = filepath.Abs(found)
+	if err != nil {
+		return exe, nil
+	}
+
+	resolved, err := filepath.EvalSymlinks(found)
+	if err != nil || resolved != exe {
+		return exe, nil
+	}
+
+	return found, nil
 }

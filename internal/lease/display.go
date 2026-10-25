@@ -130,9 +130,7 @@ func heldBySubLease(part keys.Key, subs []subLease, finder keys.BoundaryFinder) 
 // A lease whose footprint is not made of path entries is the owner of what it matches, because
 // nothing here can say what part of it a sub-lease holds.
 func (c *call) annotate(lease *listing.Lease, en *entry, query []keys.Key, haveQuery bool) {
-	subs := c.delegations(en)
-
-	if len(subs) > 0 {
+	if subs := c.delegations(en); len(subs) > 0 {
 		lease.Delegated = delegated(subs)
 	}
 
@@ -140,14 +138,22 @@ func (c *call) annotate(lease *listing.Lease, en *entry, query []keys.Key, haveQ
 		return
 	}
 
+	owner, grantorOf := c.ownerOf(en, query)
+	lease.Owner = &owner
+	lease.GrantorOf = grantorOf
+}
+
+// ownerOf answers "who owns this path" for one lease: whether it owns some part of the query that
+// none of its live sub-leases holds.
+func (c *call) ownerOf(en *entry, query []keys.Key) (owner bool, grantorOf []string) {
+	subs := c.delegations(en)
+
 	own, ok := pathKeys(en.Rec.Footprint)
 	if !ok {
 		subs = nil
 	}
 
-	owner, grantorOf := marks(query, own, subs, c.e.Finder)
-	lease.Owner = &owner
-	lease.GrantorOf = grantorOf
+	return marks(query, own, subs, c.e.Finder)
 }
 
 // pendingRequests lists the requests a grant has not started on. A request in the granting state is

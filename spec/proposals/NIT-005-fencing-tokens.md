@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-24
+**Updated:** 2026-10-25
 
 ## Dependencies
 
@@ -192,7 +192,8 @@ preserves the work, so the hook stays read-only.
   `git update-ref refs/nitipan/salvage/<id> <sha>`. The pin writes outside `refs/heads/*`, so the hook lets it through.
   A salvage ref is never part of the baseline in "Touched set for a ref update", so a pinned commit landed later on a
   branch is still checked.
-  Without it, a refused commit survives only as a dangling object that `git gc` prunes
+  Without it, a refused commit survives only as a dangling object that `git gc` prunes. A refused deletion has no new
+  SHA, so it prints no pin, and the ref stays where it was. Amended 2026-10-25; see Decision Log
 - On the remote path nothing extra happens. The unlanded commits already sit on the stale clone's branch
 - The holder stops protected actions in that domain and reports to the user. It does not run `rebase --abort`, `reset`,
   or `checkout` in a tree it no longer owns
@@ -368,6 +369,10 @@ same rule runs locally and at the remote, which has no worktrees, so the remote 
 - The old value of each ref comes from `git rev-parse <ref>` in the `prepared` state, never from the hook's stdin. git
   passes the caller's expected old value there, so `update-ref refs/heads/main HEAD~1` and `branch -f` arrive as
   creations with an all-zero old value
+- A transaction line whose new value is the value the ref already holds passes, and so does a symbolic update, whose
+  new value is `ref:<name>`. `git pack-refs` and `git gc` send lines of both shapes. They also delete the loose copy of
+  each packed ref. That deletion passes when `packed-refs` holds the ref at the same value and `packed-refs.lock` is
+  absent. A real deletion of a packed ref holds the lock while the hook runs. Amended 2026-10-25; see Decision Log
 - The baseline is the refs a rule may trust. Locally it is `--branches` across every worktree and `--remotes`, so a
   pull, a rebase onto upstream, or a checkout of `origin/main` does not count fetched commits as the caller's own. HEAD,
   tags, and salvage refs are never baseline. A hand-written remote-tracking ref can launder a commit locally, under the
@@ -446,10 +451,12 @@ fails closed until they are in force. Codex `acquire` already fails closed the s
 - The hooks go into the directory git actually uses, `git rev-parse --git-path hooks`, which honors a local
   `core.hooksPath` such as husky's. They chain to any hook already there and keep it. They also go into every
   initialized submodule's git directory, since a claim inside a submodule is fenced through the submodule's own remote
-- A hooks directory that holds files git tracks, such as husky's `.husky`, is never written. The install puts
-  nitipan's hooks in a directory under the git directory, sets the checkout's local `core.hooksPath` to it, and chains
-  every hook name git documents to the tracked directory. Nothing nitipan writes can then be committed, and a
-  collaborator without nitipan never meets its hooks. A hook manager that later resets `core.hooksPath` is caught at the
+- A hooks directory outside the repository's git directory is never written. That covers one that holds files git
+  tracks, such as husky's `.husky`, and one that other repositories share, such as a global `core.hooksPath`. The
+  install puts nitipan's hooks in a directory under the git directory, sets the checkout's local `core.hooksPath` to
+  it, and chains every hook name git documents to the directory it replaced. Nothing nitipan writes can then be
+  committed or reach another repository, and a collaborator without nitipan never meets its hooks. Amended 2026-10-25;
+  see Decision Log. A hook manager that later resets `core.hooksPath` is caught at the
   next `acquire`. A hook name git adds later is not chained until nitipan learns it
 - `setup git --uninstall <checkout>` removes them and restores what they chained to
 - The hooks bake the stable PATH location of `nitipan`, not the symlink-resolved path. A Homebrew upgrade deletes the
@@ -484,10 +491,13 @@ Decision (autonomous): the mark guards the marked holder's claims, and is writte
 
 - `break --force` writes the fence mark for the broken lease's keys in the same locked call as the tombstone. An older
   binary that later delivers the tombstone never scans the marks directory, so it cannot lift the mark. A new binary
-  that delivers a tombstone with no mark, because an older binary did the break, writes the mark then
+  that delivers a tombstone with no mark, because an older binary did the break, writes the mark then. A break that
+  handles its mark marks its tombstone `fenced`, and delivery writes nothing for it, so a mark that a user removed or
+  that lifted does not return. Amended 2026-10-25; see Decision Log
 - The mark refuses every path that would create a record for the marked holder over its keys: `acquire`, `--replace`,
-  and NIT-003 `request`. A parent's `grant` to the marked holder may lift it, since that is the owner's consent. Other
-  holders are unaffected
+  and NIT-003 `request`. A parent's `grant` to the marked holder lifts it, since that is the owner's consent. The
+  parent's live record covers the granted keys, so the cover rule below lifts the mark, and `grant` has no code of its
+  own for it. Other holders are unaffected. Amended 2026-10-25; see Decision Log
 - The mark lifts per key. A key lifts when another holder's live record covers it, or when a grant covers it. The whole
   mark lifts when the user runs `break <mark-id>`, or when a lock holder finds the marked holder dead
 - Marks live in their own directory, which V1 binaries never scan. Each mark carries NIT-001's envelope with
@@ -612,7 +622,7 @@ None.
 
 ### M1: Local fencing
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 Fences `machine` leases on one machine. Needs no broker.
 
@@ -621,9 +631,10 @@ Fences `machine` leases on one machine. Needs no broker.
 - A path claim in a git checkout without the hooks in force is refused, and the error names the install command
 - The `reference-transaction` hook refuses a ref update that touches a key another holder owns, a key in an
   undelivered tombstone addressed to the caller, or a key in a fence mark. It passes the user's own terminal
-- A test per channel shows the touched set catches a commit, a finished rebase, `reset --hard`, `update-ref` and
-  `branch -f` on a branch checked out in a sibling worktree, `update-ref` and `reset --soft` in the same worktree, a
-  detached-HEAD commit, a deletion, and a pinned salvage commit landed on a branch
+- A test per channel shows the touched set catches a commit, a finished rebase, `reset --hard`, `update-ref` on a branch
+  checked out in a sibling worktree, `branch -f` off a branch's unique commits, `update-ref` and `reset --soft` in the
+  same worktree, a detached-HEAD commit, a deletion, and a pinned salvage commit landed on a branch. Amended 2026-10-25;
+  see Decision Log
 - A pull, a rebase onto upstream, and a checkout of `origin/main` pass when the upstream commits touch others' keys
 - A checkout whose hooks directory is tracked gets nitipan's hooks through a local `core.hooksPath` under the git
   directory, and no tracked file changes
@@ -634,6 +645,29 @@ Fences `machine` leases on one machine. Needs no broker.
 - Each refusal kind prints its own message, and a local refusal prints the refused SHA and a pin command that works
 - A missing `nitipan` binary fails closed for branch and HEAD updates only
 - The hook's cost on a long rebase is recorded in the As built block
+
+**As built:**
+
+- Probes of git 2.50.1 shaped the touched set. `git gc` and `git pack-refs --prune` run the hook with a transaction of
+  packed creations and then a deletion per loose ref, which "Touched set for a ref update" now covers. A commit on an
+  attached branch updates only the branch, and a detached commit updates HEAD. The hook runs from the worktree's root.
+  In a linked worktree `GIT_DIR` is `<common>/worktrees/<name>`, and one install in the common hooks directory covers
+  every worktree. Decision Log entries of 2026-10-25 record each guess.
+- git refuses `branch -f` on a checked-out branch, so that channel is open only off a branch's unique commits. The M1
+  channel check was amended to say so.
+- A grant to the marked holder is lifted by the cover rule, and no `grant` code exists for it. A request over a marked
+  key reaches the mark check only when a mark of a newer minor, which repairs never rewrite, is still in place.
+- Cost on a long rebase, measured on one macOS machine with git 2.50.1 and the test binary as nitipan. A rebase of 60
+  commits took 0.37 s with no hook and 7.0 s with it, about 110 ms per replayed commit. The rebase ran the hook about
+  800 times, and 61 of those reached nitipan at about 40 ms each. The other runs end in the shell script, and its fast
+  path cut the total from 10 s to 7 s. With an opencode session-kind lease whose host died mid-turn, which runs
+  `sqlite3` on each judged update, the median was 9.3 s. `NITIPAN_MEASURE_REBASE=1 go test ./internal/cli -run
+  MeasureTheHook -v` repeats it. A Claude Code lease costs nothing extra beyond reading the records.
+- After review: a mark-aware break marks its tombstone `fenced`, so delivery never brings back a removed or lifted mark.
+  The install treats any hooks directory outside the git directory as shared and chains to it. The hook opens the state
+  directory read-only, and the acquire check asks git before the lock.
+- Left undone, as the settled text says: a refused `reset --hard` has already rewritten the tree, a hook name git adds
+  later is not chained, and an older binary's break or `acquire` leaves the two mixed-binary gaps.
 
 ### M2: Token issue
 
@@ -758,6 +792,98 @@ Fences `machine` leases on one machine. Needs no broker.
   lease there. The local hook judges that anchor like any `machine` lease, and never judges broker leases. The
   decision said the question was deferred until NIT-004 answered it. The hook line was removed.
 - 2026-10-24: Scheduled as NIT-005 M1, NIT-005 M2, and NIT-005 M3 in queue.md. M1 needs no broker and lands first.
+- 2026-10-25 (run best guess): The git hook calls `nitipan hook reference-transaction <state>` and reads git's input.
+  It exits 0 to pass, 3 to refuse, and 1 for any failure that fails closed. The script reads exit 2, which an older
+  nitipan returns for an unknown `hook` subcommand, as "too old". The text said only "a read-only `hook` subcommand".
+  If the name changes, the script and the subcommand change together.
+- 2026-10-25 (run best guess): Fence marks are stamped 1.3, the lowest version that needs them, as 1.2 was for
+  sub-leases. `CurrentMinor` moves to 3 so this binary may rewrite them, and `list --json` moves to schema 1.3 with a
+  `marks` array. Test fixtures that stood for "a record of a newer minor" moved from 1.3 to 1.4.
+- 2026-10-25 (run best guess): A mark has its own ULID and records the broken lease's ID. `break <mark-id>` needs no
+  `--force`, since a mark is not a lease and lifting it is the user's act. The holder a mark guards against cannot
+  remove it, and gets exit 6, so the fence cannot be undone by the session it guards against. A mark nitipan cannot use
+  needs `--force`, as an unusable tombstone does.
+- 2026-10-25 (run best guess): Marks cover path keys only, since a resource has no checkout for a ref update to collide
+  in. A key that another holder's live record already covers is left out when the mark is written, and a mark with no
+  key left is not written. A revoked sub-lease, and a sub-lease whose keys return to a live parent, therefore leave
+  none.
+- 2026-10-25 (run best guess): HEAD counts added commits only, and removed commits count for `refs/heads/*` only.
+  Counting removed commits for HEAD would refuse a checkout of a branch from a detached commit. "Touched set for a ref
+  update" says HEAD gets "the commit rule only".
+- 2026-10-25 (run best guess): Touched paths map against the worktree that has the branch checked out, else the worktree
+  the hook runs in. A bare repository has no worktree, so its updates pass.
+- 2026-10-25 (run best guess): A mark refusing `acquire`, `--replace`, or `request` exits 7, "broken", and cannot be
+  waited out. If it should exit 12 instead, the refusal and the exit table change.
+- 2026-10-25 (run best guess): A mark written when a tombstone is delivered, because an older binary did the break,
+  takes its keys from the tombstone's absolute `paths`, with default key flags. A tombstone with a `kind` or a `cause`,
+  and a resource name, gives none. A `list` that delivers the tombstone writes the mark too.
+- 2026-10-25 (run best guess): NIT-001's "Breaking a live lease" takes its "Superseded in part by NIT-005" marker with
+  M1, though "The fence mark" says "when this proposal ships". The narrowing is live once M1 merges. That section
+  said "a tombstone never blocks a claim". It still holds for every holder but the broken one. The mark now refuses the
+  broken holder's own `acquire`, `--replace`, and `request` over the broken keys, until another holder's live record
+  covers them, the holder dies, or a user removes the mark. NIT-001 is implemented and frozen, so this entry carries the
+  account and the marker points here.
+- 2026-10-25 (run best guess): A lease record nitipan cannot use covers a touched path by its raw footprint when that
+  decodes, and covers every path otherwise. A live record of another holder wins over it in the message. An unusable
+  mark whose keys decode refuses those keys for any agent caller. One whose keys do not decode is reported as a warning
+  and ignored.
+- 2026-10-25 (run best guess): M1 installs only `reference-transaction`. The pre-push hook belongs to M3, and the
+  `acquire` check will then need both.
+- 2026-10-25: Amended "Touched set for a ref update". Probing git 2.50.1 showed that `git pack-refs --prune` and
+  `git gc` send a transaction that creates every packed ref, then delete each loose ref, and that a ref update can be
+  symbolic. The text had no rule for any of them, so `gc` would have refused a branch with commits on another holder's
+  keys. A line whose new value is the value the ref holds passes, as does a symbolic update. A deletion passes when
+  `packed-refs` holds the ref at the same value and `packed-refs.lock` is absent, since a real deletion of a packed ref
+  holds the lock. It looked at old values only through `rev-parse`, as before.
+- 2026-10-25: Amended "Refused mid-task". The refusal printed "each refused ref's new SHA", and a deletion has none. It
+  prints a pin only when the update has a new commit. The refused ref stays where it was.
+- 2026-10-25: Amended "The fence mark". It said a parent's `grant` to the marked holder "may lift" the mark. The grant's
+  parent holds a live record over the granted keys, so the rule that lifts a key when another holder's live record
+  covers it already does it, on the grant's own locked call. `grant` has no code for it. Acquire lifts eagerly after
+  it writes, and every locked call lifts and reaps in its repairs.
+- 2026-10-25: Amended M1. The channel check said `branch -f` on a branch checked out in a sibling worktree. git refuses
+  `branch -f` on a checked-out branch, so that channel never reaches the hook. The check now says `branch -f` off a
+  branch's unique commits, which the removed-commit rule catches.
+- 2026-10-25 (run best guess): `acquire` checks the hooks on every call, a refresh included, through a git runner that
+  `Deps` injects. A failure is a plain error with exit 1 that names `nitipan setup git --install <checkout>`, not a
+  session gate with the setup text.
+- 2026-10-25 (run best guess): The hook script bakes the `nitipan` that `PATH` finds when it resolves to the running
+  binary, and the resolved executable otherwise. The script falls back to `command -v nitipan`.
+- 2026-10-25 (run best guess): An existing `reference-transaction` hook is kept beside nitipan's as
+  `reference-transaction.nitipan-orig`. A tracked hooks directory gets nitipan's hooks under `<git-dir>/nitipan-hooks`,
+  and the checkout's previous local `core.hooksPath` is recorded in `prior-hooks-path` there. `setup git` takes the
+  checkout as the flag's value, and with neither flag it prints what the hook does.
+- 2026-10-25: Amended "The fence mark" and its delivery rule, after review. Delivery wrote a mark for any tombstone with
+  no mark beside it, so `break <mark-id>` before delivery, or a lift followed by a release or a death, brought the mark
+  back. A tombstone that a mark-aware break writes now carries `fenced: true`, and delivery writes a mark only for a
+  tombstone without it, which an older binary wrote. A reader that does not know the field delivers and removes the
+  tombstone as before, so the field makes no old reader more permissive. The tombstone keeps version 1.0.
+- 2026-10-25: Amended "Installing the git hooks", after review. A re-install over a tracked hooks directory chained
+  every hook to `unset/<name>` when the local `core.hooksPath` had been unset and another scope, such as a global
+  relative path, named the directory. The install now asks git for the `core.hooksPath` values with their scopes,
+  drops nitipan's own, and uses the last one as written.
+- 2026-10-25 (run best guess): A hooks directory outside the repository's git directory counts as shared or tracked,
+  whether or not git tracks files in it. The install writes there nothing, uses the nitipan directory under the git
+  directory, and chains. A global `core.hooksPath` such as `~/.config/git/hooks` would otherwise take nitipan's script
+  for every repository, and one `--uninstall` would remove it for all. The tracked-files test is gone. An untracked
+  directory inside the worktree, such as husky 9's generated `.husky/_`, is chained too.
+- 2026-10-25 (run best guess): The hook opens the state directory for reading. An absent directory reads as empty and
+  is not created, and a denied mkdir no longer fails closed on every judged update. The format marker gates writes only
+  and the hook never takes the lock, so a newer marker never stopped it. A directory owned by another user, and
+  records the hook cannot read, still fail closed.
+- 2026-10-25 (run best guess): The acquire check asks git before the lock is taken, and judges the answer after begin,
+  so a broken holder still hears its tombstone. It asks once for each directory a claim names. Only "not a git
+  repository" and a missing git binary count as outside a checkout. Any other failure, such as an unsafe directory or a
+  timeout, refuses the claim with exit 1 and says what failed. This replaces the earlier guess that a failure to ask git
+  means outside.
+- 2026-10-25: Cost of the hook on a long rebase, for the risk "The hook runs on every branch and HEAD update". A rebase
+  of 60 commits took 0.37 s without the hook and 7.0 s with it, and 9.3 s with an opencode session lease that runs
+  `sqlite3` on each update. The script's fast path, which starts no program for a ref nitipan does not judge, cut 10 s
+  to 7 s. The risk's low-impact rating is left unchanged for the user to review.
+- 2026-10-25: ADR candidate (departs from the past): a new kind of state-directory file that older binaries never scan
+  may leave stated mixed-binary gaps instead of a `format` bump. ADR-04's minor rule says an old reader is never more
+  permissive, and the fence mark's two gaps make older `acquire` and `break` more permissive. Undecided. Found in
+  NIT-005 M1.
 
 ## References
 

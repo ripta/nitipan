@@ -35,6 +35,12 @@ type Tombstone struct {
 	// Detail is the sentence a notice of a kind other than a break carries.
 	Detail string `json:"detail,omitempty"`
 
+	// Fenced is true on a break that handled its fence mark when it was written: it wrote the mark, or
+	// found every key already covered. A tombstone without it comes from a binary that predates marks,
+	// and delivery then writes the mark. A reader that does not know the field loses nothing, since it
+	// delivers the tombstone and removes it as it always did.
+	Fenced bool `json:"fenced,omitempty"`
+
 	// Cause says how a break came about. Empty means an ordinary break. It is separate from Kind, which
 	// already means a notice that is not a break. A reader that does not know the field delivers the
 	// tombstone as a plain break, which is what a revoke is to the sub-lessee.

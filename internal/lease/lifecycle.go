@@ -15,14 +15,18 @@ import (
 
 // runRepairs is the one sequence of repairs that every locked call runs before it delivers
 // anything. Requests come first, since a request in the granting state is finished before any other
-// reaping. Children follow, and the reaping of dead holders' notices comes last, so it judges
-// notices against the leases as the repairs leave them.
+// reaping. Children follow, then the fence marks. The reaping of dead holders' notices comes last.
+// Marks and notices are judged against the leases as the earlier repairs leave them.
 func (c *call) runRepairs() error {
 	if err := c.repairRequests(); err != nil {
 		return err
 	}
 
 	if err := c.repairChildren(); err != nil {
+		return err
+	}
+
+	if err := c.repairMarks(); err != nil {
 		return err
 	}
 

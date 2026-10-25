@@ -60,6 +60,8 @@ var hookMistakes = [][]string{
 	{"hook", "session-start", "--nope"},
 	{"hook", "session-start"},
 	{"hook", "presence"},
+	{"hook", "reference-transaction"},
+	{"hook", "reference-transaction", "prepared", "extra"},
 }
 
 func TestHookMistakesDoNotNameHook(t *testing.T) {

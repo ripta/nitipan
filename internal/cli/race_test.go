@@ -35,10 +35,15 @@ const (
 )
 
 // TestMain doubles as the entry point of the processes TestAcquireRace starts. The child blocks
-// until its stdin closes, so every child begins its acquire at about the same moment.
+// until its stdin closes, so every child begins its acquire at about the same moment. It is also
+// the nitipan that the git hook tests install, when the environment says so.
 func TestMain(m *testing.M) {
 	if idx := os.Getenv(childEnv); idx != "" {
 		os.Exit(runRaceChild(idx))
+	}
+
+	if os.Getenv(asNitipanEnv) != "" {
+		os.Exit(runAsNitipan())
 	}
 
 	os.Exit(m.Run())
