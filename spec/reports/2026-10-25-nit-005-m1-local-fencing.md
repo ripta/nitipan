@@ -20,7 +20,16 @@ Commits, in order:
 1. `cabd387` nitipan: fence local ref updates against broken and foreign leases
 2. `81a629c` nitipan: keep global hooks and fence marks intact on edge paths
 3. `74d228a` spec: move finished queue rows through NIT-005 M1 to history
-4. The `spec:` commit that carries this report's last amendment
+4. `2bf3d07` spec: finish the NIT-005 M1 work-queue session report
+5. The `spec:` commit that carries this report's last amendment and the ADR candidate flip
+
+`proposals.py freeze` with row commits `cabd387`, `81a629c`, `74d228a`, and `2bf3d07` returned `[]`. The row-fix
+commit `81a629c` had no reviewer pass of its own. The combined row and final review ran on `cabd387` alone.
+
+The NIT-005 ADR candidate "a path claim inside a git checkout requires nitipan's git hooks in force" waited on M1. It
+is now marked Undecided in place, dated 2026-10-25.
+
+The `proposals.md` marker gap went to the `cas_guardian` session as a request. No reply was asked for.
 
 The first two were committed as `0dc89ee` and `46322f9`. Their bodies opened with a recap of the prior state, which
 `commit-style.md` forbids. Neither was pushed, so both were reworded with `git commit-tree`. The trees, authors, and

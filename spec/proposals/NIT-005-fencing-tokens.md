@@ -781,8 +781,8 @@ Fences `machine` leases on one machine. Needs no broker.
   naming the holder, the unchecked third-pass fixes, the hook requirement at `acquire`, and the fence mark blocking the
   broken holder's re-claim. NIT-003's "Fencing" revisit hook was extended to fire when this proposal is accepted.
 - 2026-10-24: ADR candidate (cuts across the system): a path claim inside a git checkout requires nitipan's git hooks
-  in force. Waits on NIT-005 M1, whose check for a tracked hooks directory exercises the fix the proposal loop did not
-  re-check.
+  in force. Undecided on 2026-10-25: NIT-005 M1 landed, and its tracked hooks directory test exercises the fix the
+  proposal loop did not re-check.
 - 2026-10-24: ADR candidate (departs from the past): a fence mark blocks the broken holder's own claim, narrowing
   NIT-001's "a tombstone never blocks a claim". Waits on this proposal reaching `accepted`. Declined on 2026-10-24:
   on recheck it fails Architecture, since it shapes only the claim path, and NIT-001's "Superseded in part" marker
