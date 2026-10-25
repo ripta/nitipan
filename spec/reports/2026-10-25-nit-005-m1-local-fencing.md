@@ -19,7 +19,8 @@ Commits, in order:
 
 1. `cabd387` nitipan: fence local ref updates against broken and foreign leases
 2. `81a629c` nitipan: keep global hooks and fence marks intact on edge paths
-3. The `spec:` commit that carries this amendment, which moves the finished rows to `history.md`
+3. `74d228a` spec: move finished queue rows through NIT-005 M1 to history
+4. The `spec:` commit that carries this report's last amendment
 
 The first two were committed as `0dc89ee` and `46322f9`. Their bodies opened with a recap of the prior state, which
 `commit-style.md` forbids. Neither was pushed, so both were reworded with `git commit-tree`. The trees, authors, and
