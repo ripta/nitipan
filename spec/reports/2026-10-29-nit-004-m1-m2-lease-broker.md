@@ -21,8 +21,16 @@ Commits, in order:
 
 1. `f81c349` nitipan: add the per-user node, the broker, and machine lease mirrors
 2. `70cb3b7` nitipan: grant user and shared leases through the node and broker
-3. `687fd7c` nitipan: refuse broker redirects and forged handoff replies
-4. The `spec:` commit that moves the row to `history.md` and carries this report's last amendment
+3. `2df37a4` nitipan: refuse broker redirects and forged handoff replies
+4. `024dec2` spec: move NIT-004 M1-M2 to history and finish its session report
+5. The `spec:` commit that carries this report's last amendment
+
+Commit 3 was first made as `687fd7c`. Its body opened with a recap of the prior state, which `commit-style.md`
+forbids. It was not pushed, so it was reworded with `git commit-tree`. Commit 4 was re-parented onto it as
+`024dec2`, from `aac41ca`. The trees, authors, and dates are unchanged.
+
+`internal/cli` tests now take 290 to 340 seconds under `-race`, and `make ci` takes over 5 minutes. It took about
+1 minute at the start of the run. Nothing here addressed that.
 
 The row is finished. NIT-004 stays `accepted`, since M3 remains queued. `NIT-004 M1-M2` moved from `queue.md` to the
 end of `history.md`, and `proposals.py check` then returned `[]`. The next row in the queue is `NIT-005 M2`.
