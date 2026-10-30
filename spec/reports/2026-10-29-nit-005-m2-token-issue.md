@@ -93,3 +93,24 @@ Reviewer findings and dispositions:
 
 Checks after fixes: `make ci` passed. `proposals.py check` reports only the row move. `proposals.py freeze` returned
 `[]`.
+
+## Row and final review
+
+The row has one milestone. One reviewer pass over `09bab3f..8f0dd70` served as both the row review and the run's
+final review, with the ADR review. An `adr-impact` agent ran beside it. `proposals.py freeze --row-commit 8f0dd70`
+returned `[]`.
+
+The reviewer had no findings. `adr-impact` found no conflicts and no supersessions. It named two uncovered decisions:
+
+1. Fence tokens never go backwards across broker state loss. NIT-005's Decision Log already holds it as `Undecided`.
+2. The handoff sidecar follows ADR-04's minor rule, though ADR-04's scope names only records, tombstones, and session
+   files. Not recorded as a candidate: it is a possible clarification of ADR-04's scope, not a decision this run made.
+   It is left for the user.
+
+The row is finished. NIT-005 stays `accepted`, since M3 remains queued. `NIT-005 M2` moved from `queue.md` to the end
+of `history.md`. The next row in the queue is `NIT-004 M3`.
+
+## Commits
+
+1. `8f0dd70` nitipan: issue fencing tokens floored at the broker's clock
+2. The `spec:` commit that moves the row to history and carries this report's amendment
