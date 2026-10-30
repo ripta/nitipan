@@ -146,6 +146,10 @@ func (a *app) runAcquire(cmd *cobra.Command) error {
 
 	a.reportRisk(h)
 
+	if resource == "" {
+		a.recordDerived(res.Lease)
+	}
+
 	return a.printAcquired(res)
 }
 

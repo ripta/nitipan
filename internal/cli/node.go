@@ -90,6 +90,7 @@ func (a *app) runNode() error {
 	n, err := node.New(node.Options{
 		Checker: checker,
 		Finder:  a.deps.Finder,
+		Roots:   a.deriver(stateDir),
 		StateOptions: state.Options{
 			Checker: checker, Procs: a.deps.Procs, Machine: local, SelfPID: self, SelfStart: start, Command: "nitipan node",
 			Warn: func(err error) { fmt.Fprintf(a.deps.Stderr, "nitipan: node: %v\n", err) },

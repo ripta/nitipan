@@ -28,6 +28,10 @@ const (
 	KindRenew   = "renew"
 	KindList    = "list"
 	KindFence   = "fence"
+
+	// KindWhoHolds and KindWhoIs are the discovery queries.
+	KindWhoHolds = "who-holds"
+	KindWhoIs    = "who-is"
 )
 
 // Directories beside the request directories. A V1 binary never scans broker/.
@@ -400,8 +404,11 @@ type ReleaseReply struct {
 // KindSince is the request version that introduced a kind. A request older than that is refused, since
 // no CLI of that version could have written it.
 func KindSince(kind string) int {
-	if kind == "ping" {
+	switch kind {
+	case "ping":
 		return 1
+	case KindWhoHolds, KindWhoIs:
+		return 3
 	}
 
 	return 2

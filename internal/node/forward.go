@@ -19,6 +19,8 @@ func (n *Node) registerLeaseKinds() {
 	n.forwrd[handoff.KindRenew] = n.forwardRenew
 	n.forwrd[handoff.KindList] = n.forwardList
 	n.forwrd[handoff.KindFence] = n.forwardFence
+	n.forwrd[handoff.KindWhoHolds] = n.forwardWhoHolds
+	n.forwrd[handoff.KindWhoIs] = n.forwardWhoIs
 }
 
 func decodeBodyOf(req handoff.Request, into any) error {
@@ -78,6 +80,12 @@ func (n *Node) forwardClaim(ctx context.Context, req handoff.Request) (json.RawM
 
 		n.book.apply(*res.Lease, sent, true)
 		n.publishDeadlinesNow()
+
+		// The claimant sees these overlaps as warnings in the claim's own output, so the snapshot answer
+		// that repeats them later writes no notice to the grant's holder.
+		for _, o := range res.Overlaps {
+			n.book.once(overlapKey(o, sideGrant))
+		}
 	}
 
 	return json.Marshal(res)
@@ -188,6 +196,38 @@ func (n *Node) forwardRenew(ctx context.Context, req handoff.Request) (json.RawM
 func (n *Node) forwardList(ctx context.Context, _ handoff.Request) (json.RawMessage, error) {
 	var out wire.Listed
 	if err := n.cl.call(ctx, wire.PathList, wire.ListRequest{Version: wire.Current}, &out); err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(out)
+}
+
+func (n *Node) forwardWhoHolds(ctx context.Context, req handoff.Request) (json.RawMessage, error) {
+	var body wire.WhoHolds
+	if err := decodeBodyOf(req, &body); err != nil {
+		return nil, err
+	}
+
+	body.Version = wire.Current
+
+	var out wire.WhoHoldsAnswer
+	if err := n.cl.call(ctx, wire.PathWhoHolds, body, &out); err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(out)
+}
+
+func (n *Node) forwardWhoIs(ctx context.Context, req handoff.Request) (json.RawMessage, error) {
+	var body wire.WhoIs
+	if err := decodeBodyOf(req, &body); err != nil {
+		return nil, err
+	}
+
+	body.Version = wire.Current
+
+	var out wire.WhoIsAnswer
+	if err := n.cl.call(ctx, wire.PathWhoIs, body, &out); err != nil {
 		return nil, err
 	}
 

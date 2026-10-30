@@ -614,6 +614,53 @@ func TestRequestsNeedTheRightPeerVersions(t *testing.T) {
 		}
 	})
 
+	t.Run("old CLI cannot have written a discovery request", func(t *testing.T) {
+		body, _ := json.Marshal(wire.WhoIs{Name: "guardian"})
+		req := handoff.Request{ID: state.NewID(), Kind: handoff.KindWhoIs, CreatedAt: time.Now(), Body: body}
+
+		if err := handoff.SubmitVersion(lr.state, req, 2); err != nil {
+			t.Fatal(err)
+		}
+
+		eventually(t, "the node to refuse the request", func() bool {
+			rep, err := handoff.ReadReply(lr.state, req.ID)
+
+			return err == nil && rep.Error != nil && rep.Error.Code == handoff.CodeTooOld
+		})
+	})
+
+	t.Run("new CLI with a node that predates discovery", func(t *testing.T) {
+		old := handoff.Presence{RequestVersion: 2, Kinds: []string{KindPing, handoff.KindClaim, handoff.KindList}}
+
+		for _, kind := range []string{handoff.KindWhoHolds, handoff.KindWhoIs} {
+			if err := old.Supports(kind, handoff.RequestVersion); err == nil || !strings.Contains(err.Error(), "node too old") {
+				t.Fatalf("Supports(%s) = %v, want node too old", kind, err)
+			}
+		}
+	})
+
+	t.Run("new node with a broker that predates discovery", func(t *testing.T) {
+		f := func(w http.ResponseWriter, req *http.Request) bool {
+			if req.URL.Path == wire.PathWhoHolds {
+				http.NotFound(w, req)
+
+				return true
+			}
+
+			return false
+		}
+		lr.intercept.Store(&f)
+
+		defer lr.intercept.Store(nil)
+
+		body, _ := json.Marshal(wire.WhoHolds{Resource: "cpu:heavy"})
+
+		rep := lr.submit(handoff.Request{ID: state.NewID(), Kind: handoff.KindWhoHolds, CreatedAt: time.Now(), Body: body})
+		if rep.Error == nil || rep.Error.Code != handoff.CodeBrokerTooOld {
+			t.Fatalf("reply error = %+v, want broker too old", rep.Error)
+		}
+	})
+
 	t.Run("new node with old broker", func(t *testing.T) {
 		var count atomic.Int32
 

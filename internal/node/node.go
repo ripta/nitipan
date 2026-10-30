@@ -20,6 +20,7 @@ import (
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/monoclock"
 	"github.com/space-armada/nitipan/internal/record"
+	"github.com/space-armada/nitipan/internal/rootset"
 	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/wire"
 )
@@ -92,6 +93,13 @@ type Options struct {
 
 	// StateOptions are the state directory options the node takes its lock with.
 	StateOptions state.Options
+
+	// Roots derives the repo entries of a mirrored lease that has no usable derived file. Nil leaves such
+	// a lease unknown.
+	Roots *rootset.Deriver
+
+	// DeriveBudget bounds the time one snapshot spends deriving entries. Default: DefaultDeriveBudget.
+	DeriveBudget time.Duration
 
 	// Finder finds checkout boundaries, for the check that an anchor still covers a lease's paths. Nil
 	// means no boundary exists.

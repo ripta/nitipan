@@ -296,6 +296,8 @@ func (n *Node) applySnapshotAck(ack wire.SnapshotAck) {
 	for _, l := range ack.Leases {
 		n.onLease(l, false)
 	}
+
+	n.applyOverlaps(ack.Overlaps)
 }
 
 type localView struct {

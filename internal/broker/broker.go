@@ -279,6 +279,8 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathBreak, b.authed(b.handleBreak))
 	mux.HandleFunc("POST "+wire.PathList, b.authed(b.handleList))
 	mux.HandleFunc("POST "+wire.PathFence, b.authed(b.handleFence))
+	mux.HandleFunc("POST "+wire.PathWhoHolds, b.authed(b.handleWhoHolds))
+	mux.HandleFunc("POST "+wire.PathWhoIs, b.authed(b.handleWhoIs))
 
 	return mux
 }
@@ -489,15 +491,16 @@ func (b *Broker) handleSnapshot(w http.ResponseWriter, r *http.Request, key Node
 	b.sweepLocked()
 
 	mine := b.afterSnapshot(key, req.Acked)
+	overlaps := b.overlapsForNode(key)
 	b.mu.Unlock()
 
-	if len(mine) == 0 {
+	if len(mine) == 0 && len(overlaps) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, wire.SnapshotAck{Version: wire.Current, Leases: mine})
+	writeJSON(w, http.StatusOK, wire.SnapshotAck{Version: wire.Current, Leases: mine, Overlaps: overlaps})
 }
 
 func (b *Broker) handleAck(w http.ResponseWriter, r *http.Request, key NodeKey) {

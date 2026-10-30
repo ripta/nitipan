@@ -437,7 +437,10 @@ func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKe
 		if sameHolder(g, node, req.Holder) {
 			// A holder never conflicts with itself. The same names again return the lease it holds.
 			if g.State == wire.StateLive && sameEntries(g.Entries, req.Entries) {
-				res := wire.Result{Code: wire.CodeGranted, Message: "already held", Lease: ptr(b.viewOf(g))}
+				res := wire.Result{
+					Code: wire.CodeGranted, Message: "already held", Lease: ptr(b.viewOf(g)),
+					Overlaps: b.overlapsFor(g, b.mirrorsLocked()),
+				}
 				b.answer(w, node, req.ID, res, nil)
 
 				return
@@ -490,7 +493,7 @@ func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKe
 	// The token is fixed once, here. The reply and the committed change both use it, so they never differ.
 	fresh.Token = nextToken(b.g.counter, b.cfg.Now())
 
-	res := wire.Result{Code: wire.CodeGranted, Lease: ptr(b.viewOf(fresh))}
+	res := wire.Result{Code: wire.CodeGranted, Lease: ptr(b.viewOf(fresh)), Overlaps: b.overlapsFor(fresh, b.mirrorsLocked())}
 	change := func(s *gstate) {
 		s.counter = fresh.Token
 		s.grants[fresh.ID] = fresh
@@ -504,9 +507,14 @@ func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKe
 	}
 
 	b.answer(w, node, req.ID, res, change)
+	b.settleGrantLocked(req.ID, taken)
+}
 
-	if b.g.grants[req.ID] == nil {
-		delete(b.dl, req.ID)
+// settleGrantLocked runs after a grant's write. A write that failed leaves no grant, so its deadline
+// goes. One that succeeded retires the lapsed leases the grant took and tells their nodes.
+func (b *Broker) settleGrantLocked(id string, taken []*grant) {
+	if b.g.grants[id] == nil {
+		delete(b.dl, id)
 
 		return
 	}

@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-29
+**Updated:** 2026-10-30
 
 ## Dependencies
 
@@ -547,11 +547,16 @@ Neither kind refuses the other through the broker. Overlaps between them are rep
   lease already ended and changes nothing. Overlap reports between `user` leases and mirrored `machine` leases go only
   between leases of one user. Amended 2026-10-29; see Decision Log
 - The broker never refuses a `user` claim because of a mirrored `machine` lease. No `machine` claim consults the
-  broker. Mirrored machine leases carry derived entries in their sidecar, from the CLI or, for a record a V1 binary
-  wrote, from the node. A derivation that fails shows as unknown in discovery, never as no overlap
+  broker. Mirrored machine leases carry derived entries in a sidecar keyed by lease ID in a directory V1 never scans.
+  The CLI writes it after a `machine` claim whenever the user has a node config file, even if the node is down. The
+  node derives for a lease with no sidecar for its current keys, a V1 record included, and removes the sidecars of
+  ended leases. A derivation that fails shows as unknown in discovery, never as no overlap. Amended 2026-10-30; see
+  Decision Log
 - Overlaps between `user` leases and mirrored `machine` leases appear in discovery, as a warning in the output of a
   `user` or `shared` `acquire`, and as notices to new-binary holders on both sides. A `machine` holder learns of an
-  overlap only by notice, since a `machine` claim never waits on the broker
+  overlap only by notice, since a `machine` claim never waits on the broker. A machine lease's holder is a new-binary
+  holder when the CLI wrote its derived-entries sidecar. A record a V1 binary wrote gets no notice. Amended
+  2026-10-30; see Decision Log
 
 A `user` lease then protects against other `user` claimants everywhere, and against V1 sessions in the holder's own
 checkout. A V1 session in a sibling worktree, and any `machine` claim on another machine, are warned about, never
@@ -579,10 +584,13 @@ review gate.
 **Revisit:** when a named caller needs a capability with no path behind it, such as "can review Go"
 
 - "Who holds X" takes a repo name, a local path, a resource name, or a qualified name. It returns every holder whose
-  keys overlap X, with its qualified name, reach, and whether it is mirrored, stale, or lapsed. A local path in a
-  checkout becomes a repo name and a machine-scoped path. A local path with no checkout behind it, such as an
-  installed plugin copy, searches only this machine's mirrored leases, and the answer says so and suggests the name
-  lookup
+  keys overlap X, with its qualified name, reach, and whether it is live, lapsed, mirrored, stale, or unknown. A
+  mirror is unknown when the broker cannot judge it: its record is unusable, or its repo entries are missing or
+  failed. Such a mirror is listed for every repo-name and resource query, never dropped. A local path in a checkout
+  becomes a repo name and a machine-scoped path. A local path with no checkout behind it, such as an installed plugin
+  copy, searches only this machine's mirrored leases, and the answer says so and suggests the name lookup. The
+  commands are `nitipan who holds <X>` and `nitipan who is <N>`, each with `--json`. Amended 2026-10-30; see Decision
+  Log
 - "Who is named N" matches `holder.name` or `holder.handle` exactly, across every live, stale, and lapsed lease on
   every machine. A name lookup is not a path query, so it crosses the per-machine scoping of mirrored paths
 - Both queries also accept a NIT-007 mail address, and every answer carries each holder's mail address beside its
@@ -941,13 +949,47 @@ Amended 2026-10-24; see Decision Log.
 
 ### M3: Discovery queries
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - "Who holds X" for a repo name, a checkout path, a path outside any checkout, and a resource name returns every
-  overlapping holder across machines, with its qualified name, reach, and whether it is mirrored, stale, or lapsed
+  overlapping holder across machines, with its qualified name, reach, and whether it is live, lapsed, mirrored, stale, or
+  unknown. Amended 2026-10-30; see Decision Log
 - "Who is named N" returns every holder with that name or handle on every machine, and flags a duplicate
 - Overlaps between `user` leases and mirrored `machine` leases appear in discovery, as warnings on `user` and `shared`
   claims, and as notices to new-binary holders on both sides
+
+**As built:**
+
+- The commands are `nitipan who holds <subject>` and `nitipan who is <name>`, each with `--json`. The JSON carries
+  `schema_version` 1.0 and the stored root set of each holder. `list --json` is unchanged, so its schema stays 1.5.
+- The handoff request version is now 3. Two request kinds, `who-holds` and `who-is`, need it. A CLI of this build gets
+  "node too old" from a node of version 2 for every request, since the version is global. A node restarts on the new
+  binary by itself. An older broker answers 404 to the two new paths, which reads as "broker too old".
+- Derived entries ride in `wire.MirroredLease.Derived`, with a state, the derivation version, the entries, and a reason.
+  A mirror without the field reads as unknown. The sidecar lives in `broker/derived/`, keyed by lease ID, and carries
+  the keys it was derived from. A sidecar for other keys than the record's current ones counts as absent. A sidecar of
+  a higher major is left alone and reads as unknown.
+- A key outside any checkout derives to no entries, which overlaps no repo. Every other refusal is a failed derivation.
+  A failure the node recorded is tried again after an hour. A failure the CLI recorded is not.
+- A snapshot spends at most 5 seconds starting derivations, since it runs on the loop that heartbeats and renews. A
+  lease left over reads as unknown and is derived by a later snapshot. A single walk can still take its own timeout.
+- `who is` lists a mirror with an unreadable record as unknown and notes that the holder count may be low. Such a record
+  names no holder, so it cannot be matched to the name.
+- A file the CLI wrote while the node was deriving wins over the node's. The notice rule below depends on it.
+- Unknown mirrors are listed for every repo-name and resource query on every machine. Their number is stated in the
+  answer's notes. A path query judges the asker's machine by keys, with no checkout-boundary exemption, so a sibling
+  worktree's lease is listed.
+- The overlap pair ID is the grant's lease ID and the mirror's lease ID. The broker leaves out the holder's own anchor,
+  the holder's other leases on the same node, and sub-leases delegated from the anchor. It reports an overlap with a
+  stale mirror, marked stale.
+- The notice reaches a node in the snapshot answer, which now carries `overlaps` and is sent when it has either leases
+  or overlaps. The node marks each pair and side once per process, so a node restart can repeat one notice that its
+  holder has not yet read. The claim reply carries the same overlaps, and the node marks the grant side as seen, so the
+  claimant gets a warning and no notice for it.
+- The node's own derivation is not retried on a V1 record's behalf more than once an hour after a failure. A machine
+  lease whose derived file the node wrote gets no overlap notice. That is how a V1 holder is told from a new-binary one.
+- Not covered: a mail address in either query, which NIT-007 adds, and the cross-user hiding NIT-006 adds. Running the
+  commands against a real launchd node and broker is left to the user.
 
 ## Decision Log
 
@@ -1116,6 +1158,27 @@ Amended 2026-10-24; see Decision Log.
   counter's floor on load to NIT-005. The text said the floor is NIT-005's to decide. NIT-005 M2 settled it: the
   broker applies no floor at load, since every grant floors its token at the wall clock. If a floor at load is wanted
   later, it is one `max` at start, and tokens already issued stay valid.
+- 2026-10-30 (run best guess): Amended "Discovery queries" and M3's first check. The text said an answer is mirrored,
+  stale, or lapsed. As built, a grant reads live or lapsed, a mirror reads mirrored or stale, and a mirror the broker
+  cannot judge reads unknown, which is listed for every repo-name and resource query. A stale node's grants and mirrors
+  also carry a stale flag. The commands are `who holds` and `who is`. A qualified name is accepted by `who holds` only.
+  If this is wrong, the unknown rows are dropped, and discovery answers "nobody" for a lease it could not judge.
+- 2026-10-30 (run best guess): Amended "Machine leases and user leases on the same path". The text said derived entries
+  live in the sidecar and name no writer rule. As built, the CLI writes it after a `machine` claim when the user has a
+  node config file, the node derives for a lease with no sidecar for its current keys, and the node removes the
+  sidecars of ended leases. The same bullet's notice rule is now narrowed: a machine lease's holder gets a notice only
+  when the CLI wrote its sidecar, since that marks a binary that can read one. If this is wrong, a V1 holder's notice
+  would sit unread in `notices/`, and a notice would be sent for every mirrored lease.
+- 2026-10-30 (run best guess): The overlap notice rides the snapshot answer, with the same pair marked once per node
+  process, and the claim reply marks the grant side seen. A version-gated stream event was the other candidate. It needs
+  a node version check and an ack, and the snapshot answer already reaches a node every third of a term. An older node
+  ignores the field. If a notice must survive a node restart exactly once, the mark moves to a file.
+- 2026-10-30: ADR candidate considered and not listed: a mirror the broker cannot judge reads as unknown, never as no
+  overlap. It restates ADR-04's minor rule for a new reader, so it fails the Architecture test.
+- 2026-10-30 (run best guess): Milestone review fixes for NIT-004 M3. A snapshot derived every underived lease before it
+  returned, on the loop that heartbeats and renews, so many V1 leases in large repos could have kept the node quiet
+  past a term. It now stops starting derivations after 5 seconds. `who is` skipped unreadable mirrors, and now lists
+  them as unknown. Neither changes proposal text.
 
 ## References
 

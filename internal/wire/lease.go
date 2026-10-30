@@ -148,6 +148,9 @@ type Result struct {
 	Message string  `json:"message,omitempty"`
 	Lease   *Lease  `json:"lease,omitempty"`
 	Others  []Lease `json:"others,omitempty"`
+
+	// Overlaps lists the mirrored machine leases a granted claim overlaps. The grant stands.
+	Overlaps []Overlap `json:"overlaps,omitempty"`
 }
 
 // RenewItem names a lease to renew and the liveness of its holder.
@@ -194,6 +197,10 @@ type Listed struct {
 type SnapshotAck struct {
 	Version Version `json:"version"`
 	Leases  []Lease `json:"leases"`
+
+	// Overlaps lists the overlaps between grants and mirrored machine leases that touch this node's
+	// leases. An older node ignores the field.
+	Overlaps []Overlap `json:"overlaps,omitempty"`
 }
 
 // FenceReport tells the broker a fence token a receiver refused a push over, or that a pusher read from a
