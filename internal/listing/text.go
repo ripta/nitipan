@@ -341,6 +341,10 @@ func WriteBroker(w io.Writer, leases []BrokerLease) error {
 
 		fmt.Fprintf(&b, "\n  anchor: %s\n", l.Anchor)
 
+		if l.Token != 0 {
+			fmt.Fprintf(&b, "  token:  %d\n", l.Token)
+		}
+
 		if l.Expires != "" {
 			fmt.Fprintf(&b, "  expires: %s\n", l.Expires)
 		}

@@ -63,7 +63,7 @@ func TestListJSONLinksSubLeasesToTheirParent(t *testing.T) {
 
 	doc := tr.w.listJSON(tr.third)
 
-	if doc["schema_version"] != "1.4" {
+	if doc["schema_version"] != "1.5" {
 		t.Errorf("schema_version = %v", doc["schema_version"])
 	}
 

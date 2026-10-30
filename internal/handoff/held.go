@@ -27,6 +27,7 @@ const (
 	KindBreak   = "break"
 	KindRenew   = "renew"
 	KindList    = "list"
+	KindFence   = "fence"
 )
 
 // Directories beside the request directories. A V1 binary never scans broker/.
@@ -40,6 +41,11 @@ const (
 // FileVersion is the version of the sidecar, deadline, and in-flight files this binary writes. A reader
 // follows the record format's rule: a higher minor reads, a higher major is unusable.
 var FileVersion = record.Version{Major: 1, Minor: 0}
+
+// SidecarVersion is the version of the sidecar this binary writes. Minor 1 adds Token. A reader of minor 0
+// ignores the field, and the CLI writes it from the reply it got, so a node that predates it cannot leave
+// a sidecar without a token the broker returned.
+var SidecarVersion = record.Version{Major: 1, Minor: 1}
 
 // ErrUnusableFile means a sidecar or deadline file is of a major this binary does not read, or cannot
 // be decoded. A caller treats the thing it describes as unknown, which means unchecked.
@@ -99,6 +105,11 @@ type BreakBody struct {
 	By    record.Holder `json:"by"`
 }
 
+// FenceBody is the body of a fence report request. See wire.FenceReport.
+type FenceBody struct {
+	Token uint64 `json:"token"`
+}
+
 // RenewBody is the body of a synchronous renew request.
 type RenewBody struct {
 	IDs    []string        `json:"ids"`
@@ -120,11 +131,15 @@ type Sidecar struct {
 	Holder      record.Envelope `json:"holder"`
 	Description string          `json:"description,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
+
+	// Token is the fence token of the broker's grant. Zero means none is known yet, as for a lease granted
+	// before tokens existed.
+	Token uint64 `json:"token,omitempty"`
 }
 
 // WriteSidecar writes a sidecar under the state lock.
 func WriteSidecar(l *state.Locked, sc Sidecar) error {
-	sc.Version = FileVersion
+	sc.Version = SidecarVersion
 
 	data, err := json.Marshal(sc)
 	if err != nil {

@@ -278,6 +278,7 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathRelease, b.authed(b.handleRelease))
 	mux.HandleFunc("POST "+wire.PathBreak, b.authed(b.handleBreak))
 	mux.HandleFunc("POST "+wire.PathList, b.authed(b.handleList))
+	mux.HandleFunc("POST "+wire.PathFence, b.authed(b.handleFence))
 
 	return mux
 }

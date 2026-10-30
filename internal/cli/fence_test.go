@@ -462,7 +462,7 @@ func TestListShowsFenceMarks(t *testing.T) {
 	holder := w.claude(200, "s1")
 	id := w.acquireOK(holder, "--checkout", repo, "--scope", "src", "--name", "alpha")
 
-	if doc := w.listJSON(w.terminal(900)); doc["schema_version"] != "1.4" || len(marksOf(doc)) != 0 {
+	if doc := w.listJSON(w.terminal(900)); doc["schema_version"] != "1.5" || len(marksOf(doc)) != 0 {
 		t.Fatalf("before the break: schema %v, marks %v", doc["schema_version"], doc["marks"])
 	}
 

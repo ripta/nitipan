@@ -394,7 +394,7 @@ func TestListShowsResourceLeasesBesidePathLeases(t *testing.T) {
 	wantAbsent(t, "stdout", res.Stdout, "remote")
 
 	doc := w.listJSON(w.terminal(900))
-	if doc["schema_version"] != "1.4" {
+	if doc["schema_version"] != "1.5" {
 		t.Errorf("schema_version = %v", doc["schema_version"])
 	}
 

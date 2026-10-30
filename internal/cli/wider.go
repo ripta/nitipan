@@ -278,9 +278,76 @@ func (a *app) runAcquireWide(cmd *cobra.Command, h adapter.Holder, reach string)
 		text = results[0].Text
 	}
 
+	a.saveToken(stateDir, res.Lease.ID, res.Lease.Token)
 	a.printGranted(res.Lease, entries, text, anchor.ID, created)
 
 	return nil
+}
+
+// saveToken stores the token a broker reply carried in the lease's sidecar. The CLI does this from the
+// reply it read, so a node that predates the field cannot leave the sidecar without it. It never creates
+// a sidecar.
+func (a *app) saveToken(stateDir, id string, token uint64) {
+	if token == 0 {
+		return
+	}
+
+	sc, err := handoff.ReadSidecar(stateDir, id)
+	if err != nil || sc.Token == token {
+		return
+	}
+
+	dir, err := state.Open(stateDir, a.deps.StateOptions)
+	if err != nil {
+		a.warn(err)
+
+		return
+	}
+
+	l, err := dir.Lock()
+	if err != nil {
+		a.warn(err)
+
+		return
+	}
+
+	defer func() { _ = l.Unlock() }()
+
+	sc, err = handoff.ReadSidecar(stateDir, id)
+	if err != nil {
+		return
+	}
+
+	sc.Token = token
+
+	if err := handoff.WriteSidecar(l, sc); err != nil {
+		a.warn(err)
+	}
+}
+
+// reportFence tells the broker a fence token seen on a remote, through the node. The broker raises its
+// counter to a token within its bound and refuses one above it. See wire.FenceReport.
+func (a *app) reportFence(token uint64) (wire.FenceVerdict, error) {
+	stateDir, err := a.deps.StateDir()
+	if err != nil {
+		return wire.FenceVerdict{}, fmt.Errorf("resolving the state directory: %w", err)
+	}
+
+	if err := a.nodeFor(handoff.KindFence); err != nil {
+		return wire.FenceVerdict{}, err
+	}
+
+	rep, err := a.roundTrip(stateDir, handoff.KindFence, state.NewID(), "", handoff.FenceBody{Token: token})
+	if err != nil {
+		return wire.FenceVerdict{}, err
+	}
+
+	var out wire.FenceVerdict
+	if err := json.Unmarshal(rep.Body, &out); err != nil {
+		return wire.FenceVerdict{}, fmt.Errorf("decoding the fence verdict: %w", err)
+	}
+
+	return out, nil
 }
 
 // takeAnchor takes, or reuses, the machine lease the wider-reach lease hangs on. "Already covered"
@@ -384,6 +451,11 @@ func (a *app) printGranted(l *wire.Lease, entries []repoid.Name, text, anchor st
 	}
 
 	fmt.Fprintf(out, "  anchor: machine lease %s (%s)\n", anchor, how)
+
+	if l.Token != 0 {
+		fmt.Fprintf(out, "  token:  %d\n", l.Token)
+	}
+
 	fmt.Fprintf(out, "  expires %s, renewed by the node every %v\n", time.UnixMilli(l.ExpiresMillis).Local().Format(time.RFC3339),
 		time.Duration(l.TermMillis)*time.Millisecond/3)
 }
@@ -747,7 +819,10 @@ func (a *app) runRenew(ids []string) error {
 	for _, r := range out.Results {
 		switch r.Code {
 		case wire.CodeRenewed, wire.CodeRevived:
-			fmt.Fprintf(a.deps.Stdout, "renewed %s; expires %s\n", r.ID, time.UnixMilli(r.Lease.ExpiresMillis).Local().Format(time.RFC3339))
+			a.saveToken(stateDir, r.ID, r.Lease.Token)
+
+			fmt.Fprintf(a.deps.Stdout, "renewed %s; expires %s%s\n", r.ID, time.UnixMilli(r.Lease.ExpiresMillis).Local().Format(time.RFC3339),
+				tokenText(r.Lease.Token))
 		case wire.CodeTaken:
 			errs = append(errs, fmt.Errorf("%w: lease %s was lost to %s", exitcode.ErrRefused, r.ID, r.TakenBy))
 		case wire.CodeEnded:
@@ -758,6 +833,14 @@ func (a *app) runRenew(ids []string) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func tokenText(token uint64) string {
+	if token == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("; token %d", token)
 }
 
 func endedBy(by string) string {
@@ -826,7 +909,7 @@ func fromWire(l wire.Lease, mine bool) listing.BrokerLease {
 
 	bl := listing.BrokerLease{
 		ID: l.ID, Reach: l.Reach, State: l.State, Names: names, Anchor: l.Anchor, Holder: holderLine(l.Holder), Node: l.Node,
-		Liveness: l.Liveness, Mine: mine,
+		Liveness: l.Liveness, Mine: mine, Token: l.Token,
 	}
 
 	if l.ExpiresMillis != 0 {
@@ -875,7 +958,7 @@ func (a *app) leasesOnFile(stateDir, key string, riskOf func(string) (string, bo
 		}
 
 		bl := listing.BrokerLease{
-			ID: sc.ID, Reach: sc.Reach, State: "unknown", Names: names, Anchor: sc.Anchor.ID, Mine: true,
+			ID: sc.ID, Reach: sc.Reach, State: "unknown", Names: names, Anchor: sc.Anchor.ID, Mine: true, Token: sc.Token,
 			Holder: holderLine(wire.Holder{Handle: sc.Holder.Holder.Handle, Agent: sc.Holder.Holder.Agent, SessionID: sc.Holder.Holder.SessionID}),
 		}
 
