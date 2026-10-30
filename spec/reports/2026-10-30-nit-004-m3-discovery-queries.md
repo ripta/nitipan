@@ -17,7 +17,7 @@ The system `python3` is 3.9, which cannot run the plugin's `proposals.py`. The r
 
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
-| NIT-004 M3 | DONE | `f5511d3`, review fixes in the next commit |
+| NIT-004 M3 | DONE | `f5511d3`, review fixes `ca51515` |
 
 Row `NIT-004 M3` is BLOCKED from finishing on an ADR-07 conflict. See "Row review" below. The milestone's code is
 committed and M3 is `DONE`. NIT-004 is not marked `implemented`, and the row stays in `queue.md`.
@@ -136,7 +136,8 @@ The implementer also fixed a flaky test. `TestOverlapNoticesGoOncePerPairToHolde
 on `f5511d3`, because the node's derived file could overwrite the one the test wrote. The test now waits for the node's
 mirror first. It then passed 40 runs in a row.
 
-The proposal gained one Decision Log entry for these fixes. `make ci` passed, with `internal/cli` at about 306 s.
+Commit: `ca51515 nitipan: keep overlap reports from getting lost or judged stale`. The proposal gained one Decision
+Log entry for these fixes. `make ci` passed, with `internal/cli` at about 306 s.
 `proposals.py freeze --row-commit f5511d3` returned `[]`.
 
 ADR impact found ADR-01, ADR-04, ADR-05, ADR-06, and ADR-08 consistent, and two PLAUSIBLE conflicts:
