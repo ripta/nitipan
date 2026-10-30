@@ -323,3 +323,73 @@ func TestHigherMinorSidecarStillReads(t *testing.T) {
 		t.Fatalf("a higher minor must read: %v", err)
 	}
 }
+
+func plant(t *testing.T, root, sub, name, body string) string {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, sub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	p := filepath.Join(root, sub, name+".json")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return p
+}
+
+func TestClaimRefusesABodyWhoseIDDiffersFromTheFileName(t *testing.T) {
+	root := t.TempDir()
+	victim, forged := state.NewID(), state.NewID()
+
+	body := `{"version":2,"id":"` + victim + `","kind":"ping","requester":{"pid":5}}`
+	plant(t, root, PendingDir, forged, body)
+
+	req, err := Claim(root, forged)
+	if err == nil {
+		t.Fatalf("Claim accepted a body naming %s under the file name %s", req.ID, forged)
+	}
+
+	if req.ID != forged {
+		t.Errorf("rejected request ID = %q, want the file name %q", req.ID, forged)
+	}
+}
+
+func TestReapRemovesAMismatchedIDFileOncePastTheRequestWindow(t *testing.T) {
+	root := t.TempDir()
+	name, other := state.NewID(), state.NewID()
+
+	body := `{"version":2,"id":"` + other + `","kind":"ping","requester":{"pid":5}}`
+	oldPath := plant(t, root, ClaimedDir, name, body)
+	freshPath := plant(t, root, ClaimedDir, state.NewID(), strings.Replace(body, other, state.NewID(), 1))
+
+	oldTime := time.Now().Add(-MaxAge - time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := state.Open(root, state.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := dir.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = l.Unlock() }()
+
+	if err := Reap(l, checker(5)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(oldPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the old mismatched file survived: %v", err)
+	}
+
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Errorf("a recent file was removed: %v", err)
+	}
+}

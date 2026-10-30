@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/atomicfile"
 	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/repoid"
 )
@@ -336,32 +337,7 @@ func (d *Deriver) remember(head string, roots []string) {
 		return
 	}
 
-	dir := filepath.Dir(d.CachePath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return
-	}
-
-	tmp, err := os.CreateTemp(dir, ".tmp-"+filepath.Base(d.CachePath)+"-*")
-	if err != nil {
-		return
-	}
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-
-		return
-	}
-
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmp.Name())
-
-		return
-	}
-
-	if err := os.Rename(tmp.Name(), d.CachePath); err != nil {
-		_ = os.Remove(tmp.Name())
-	}
+	_ = atomicfile.Write(filepath.Dir(d.CachePath), filepath.Base(d.CachePath), data)
 }
 
 // Union merges the entries of several results, dropping equal ones.

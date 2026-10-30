@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -183,7 +182,7 @@ func New(opts Options) (*Node, error) {
 		written: map[string]bool{},
 		cl: &client{
 			base:      base,
-			http:      &http.Client{Transport: tr},
+			http:      newHTTPClient(tr),
 			machineID: opts.Machine.ID,
 			uid:       opts.UID,
 		},

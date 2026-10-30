@@ -343,6 +343,36 @@ func TestBreakRefusesWithoutForceAndForceLeavesAFact(t *testing.T) {
 	}
 }
 
+func TestBreakFromAnotherNodeLeavesAnUnackedEndFactForItsOwner(t *testing.T) {
+	h := newHarness(t, nil)
+	h.twoNodes()
+	h.claim(laptop, "L1", wire.ReachUser, name("svc"), "a")
+
+	var res wire.Result
+
+	h.call(studio, wire.PathBreak, wire.Break{Version: wire.Current, RequestID: "B1", ID: "L1", Force: true, By: holder("b")}, &res)
+
+	if res.Code != wire.CodeBroken || len(h.b.Facts()) != 1 {
+		t.Fatalf("break --force: %+v", res)
+	}
+
+	h.call(studio, wire.PathBreak, wire.Break{Version: wire.Current, RequestID: "B2", ID: "L1", By: holder("c")}, &res)
+
+	if res.Code != wire.CodeEnded || res.Lease == nil || res.Lease.EndedBy == "" {
+		t.Fatalf("a second break answers = %+v, want the lease already ended", res)
+	}
+
+	if len(h.b.Facts()) != 1 {
+		t.Fatalf("another node's break dropped the unacked fact: %+v", h.b.Facts())
+	}
+
+	h.call(laptop, wire.PathBreak, wire.Break{Version: wire.Current, RequestID: "B3", ID: "L1", By: holder("a")}, &res)
+
+	if res.Code != wire.CodeBroken || len(h.b.Facts()) != 0 {
+		t.Fatalf("the owner's own break clears the fact: %+v, facts %+v", res, h.b.Facts())
+	}
+}
+
 func TestNoRevivalAfterReleaseOrReportedDeath(t *testing.T) {
 	h := newHarness(t, nil)
 	h.twoNodes()

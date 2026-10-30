@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/atomicfile"
 	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/repoid"
@@ -237,7 +238,7 @@ func WriteDeadlines(root string, d Deadlines) error {
 		return fmt.Errorf("encoding the deadline file: %w", err)
 	}
 
-	return writeAtomic(filepath.Join(root, DeadlinesDir), d.Holder+fileSuffix, data)
+	return atomicfile.Write(filepath.Join(root, DeadlinesDir), d.Holder+fileSuffix, data)
 }
 
 // RemoveDeadlines deletes a holder's deadline file.
@@ -327,7 +328,7 @@ func NoteInflightWith(root, key, id string, now time.Time, sidecars []Sidecar) e
 		return fmt.Errorf("encoding the in-flight record: %w", err)
 	}
 
-	return writeAtomic(filepath.Join(root, InflightDir), key+fileSuffix, data)
+	return atomicfile.Write(filepath.Join(root, InflightDir), key+fileSuffix, data)
 }
 
 // InflightSidecars returns the sidecars a release left in its in-flight record.

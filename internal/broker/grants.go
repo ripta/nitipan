@@ -714,6 +714,14 @@ func (b *Broker) handleBreak(w http.ResponseWriter, r *http.Request, node NodeKe
 
 	over := g.State == wire.StateTaken || g.State == wire.StateEnded
 
+	// An end fact stays until its owner acks it, so the holder still learns who took or ended the
+	// lease. Only the owner's own node may clear it early.
+	if over && g.nodeKey() != node {
+		b.answer(w, node, req.RequestID, wire.Result{Code: wire.CodeEnded, Lease: ptr(b.viewOf(g))}, nil)
+
+		return
+	}
+
 	if !over && !req.Force {
 		why := "its holder is alive"
 		if g.Liveness == wire.LiveUnknown || g.State == wire.StateLapsed {

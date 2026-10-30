@@ -131,6 +131,20 @@ func refusePublicDial(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
+// ErrRedirect means the broker answered with a redirect. The node never follows one, since Go would
+// re-send the credential, and a redirect from https to http would send it in the clear.
+var ErrRedirect = errors.New("the broker redirected the call")
+
+// newHTTPClient wraps the transport in a client that follows no redirect.
+func newHTTPClient(tr http.RoundTripper) *http.Client {
+	return &http.Client{
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			return fmt.Errorf("%s: refusing to follow it: %w", req.URL.Redacted(), ErrRedirect)
+		},
+	}
+}
+
 // client talks to the broker with the node's credential on every request.
 type client struct {
 	base *url.URL

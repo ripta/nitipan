@@ -15,11 +15,58 @@ The approved plan is `/Users/ripta/.claude/plans/virtual-weaving-cupcake.md`.
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
 | NIT-004 M1 | DONE | `f81c349` |
-| NIT-004 M2 | DONE | see commit 2 |
+| NIT-004 M2 | DONE | `70cb3b7` |
 
 Commits, in order:
 
 1. `f81c349` nitipan: add the per-user node, the broker, and machine lease mirrors
+2. `70cb3b7` nitipan: grant user and shared leases through the node and broker
+
+## Row and final review
+
+The row has two milestones. One reviewer pass over `7ad4d68..70cb3b7` served as both the row review and the run's
+final review, with the ADR review. An `adr-impact` agent ran beside it. `adr-impact` found no conflicts and no
+supersessions across the range, and no uncovered decision beyond the two recorded ADR candidates.
+`proposals.py freeze` with both row commits returned `[]`.
+
+Reviewer findings and dispositions:
+
+1. The node's HTTP client follows redirects. An https broker that redirects to `http://` on the same host would get
+   the bearer key sent in plaintext. PLAUSIBLE. Sent to trace.
+2. `Claim` never checked that a request body's ID matches its file name. A sandboxed session could forge another
+   request's reply. CONFIRMED. Sent to fix.
+3. The M2 run best-guess Decision Log entry carried no tag, which reads as the user's choice. Sent to fix with
+   `(autonomous)`.
+4. Any node could break a `taken` or `ended` fact before its owner acked it, so the owner lost the notice. PLAUSIBLE.
+   Sent to trace.
+5. The same-holder rule trusts the client's holder key, so a same-uid session could forge it. Dismissed: it is the
+   same threat model as NIT-001, where any process of the same OS user can write records.
+6. A stray line break in the `Reap` doc comment. Sent to fix.
+7. Duplicate atomic file writers added in this range. Sent to fix: fold the new ones together where layering allows.
+8. A stray break in M2's As built block. Sent to fix. The reviewer found the As built blocks otherwise in form.
+
+Fix round results, from a fresh implementer:
+
+1. Confirmed with a TLS server that sent a 307 to plain HTTP. The credential reached the plain server. The node now
+   refuses every redirect, and reports it as an error. A regression test failed first.
+2. Fixed. `Claim` refuses a body whose ID differs from its file name or fails ID validation. `Reap` removes such a
+   file after the request window. Both regression tests failed first.
+3. Fixed. The two run-made Decision Log entries from this run carry `(autonomous)`. The coordinator tagged the
+   row-review entry.
+4. Confirmed. A break from a node other than the fact's owner now answers `ended` and leaves the fact for its owner's
+   ack. "Machine leases and user leases on the same path" is amended with one marker, and the Decision Log records it.
+   A regression test failed first. Run best guess: the existing `ended` code, rather than a new wire code.
+5. Dismissed, as above. The Decision Log entry gained one sentence naming the threat model.
+6. Fixed.
+7. Fixed. A new `internal/atomicfile` package holds the synced temp-file-plus-rename writer. The handoff and rootset
+   code use it. The older `setup`, `state`, and broker-store writers were left alone, since their durability needs
+   differ.
+8. Fixed.
+
+After the round, `make fmt` and `make ci` passed. `proposals.py freeze` with both row commits returned `[]`.
+
+The implementer noted that "the node never follows broker redirects" belongs under the existing plaintext-channel
+ADR candidate. No separate candidate was recorded.
 
 ## Plan-time decisions
 

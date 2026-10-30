@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/atomicfile"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/state"
@@ -33,7 +34,6 @@ const (
 	PresenceName = "presence.json"
 
 	fileSuffix = ".json"
-	tempPrefix = ".tmp-"
 )
 
 // Versions this binary writes. A reader refuses a version it does not know, and a node keeps
@@ -58,6 +58,10 @@ var (
 	// ErrRequestExpired means a request is older than MaxAge.
 	ErrRequestExpired = errors.New("request expired")
 )
+
+// ErrIDMismatch means a request body names an ID other than its file name. A session could plant
+// one to forge the reply to another live request.
+var ErrIDMismatch = errors.New("request ID does not match its file name")
 
 // Requester names the process that published a request, so a lock holder can reap what a dead
 // requester left.
@@ -174,7 +178,7 @@ func WritePresence(root string, p Presence) error {
 		return fmt.Errorf("encoding the presence record: %w", err)
 	}
 
-	return writeAtomic(filepath.Join(root, BrokerDir), PresenceName, data)
+	return atomicfile.Write(filepath.Join(root, BrokerDir), PresenceName, data)
 }
 
 // RemovePresence deletes the presence record when the node stops.
@@ -242,7 +246,7 @@ func SubmitVersion(root string, req Request, version int) error {
 		return fmt.Errorf("encoding the request: %w", err)
 	}
 
-	return writeAtomic(filepath.Join(root, PendingDir), req.ID+fileSuffix, data)
+	return atomicfile.Write(filepath.Join(root, PendingDir), req.ID+fileSuffix, data)
 }
 
 // Pending lists the IDs waiting in pending, in ID order.
@@ -280,6 +284,10 @@ func Claim(root, id string) (Request, error) {
 		return Request{ID: id}, fmt.Errorf("decoding claimed request %s: %w", id, err)
 	}
 
+	if req.ID != id || !state.ValidID(req.ID) {
+		return Request{ID: id}, fmt.Errorf("claimed request %s names the ID %q: %w", id, req.ID, ErrIDMismatch)
+	}
+
 	return req, nil
 }
 
@@ -292,7 +300,7 @@ func Answer(root string, rep Reply) error {
 		return fmt.Errorf("encoding the reply: %w", err)
 	}
 
-	if err := writeAtomic(filepath.Join(root, AnsweredDir), rep.ID+fileSuffix, data); err != nil {
+	if err := atomicfile.Write(filepath.Join(root, AnsweredDir), rep.ID+fileSuffix, data); err != nil {
 		return err
 	}
 
@@ -321,9 +329,9 @@ func ReadReply(root, id string) (Reply, error) {
 }
 
 // Reap removes the requests and replies whose requester is dead, since nobody will read them. A
-// lock holder runs it with the other repairs. A file that cannot be decoded is removed once it is
-// older than the request window. It
-// returns the first removal failure but tries every file.
+// lock holder runs it with the other repairs. A file that cannot be decoded, or whose body names
+// another ID than its file name, is removed once it is older than the request window. It returns
+// the first removal failure but tries every file.
 func Reap(l *state.Locked, checker *liveness.Checker) error {
 	root := l.Dir().Path()
 
@@ -346,10 +354,13 @@ func Reap(l *state.Locked, checker *liveness.Checker) error {
 			}
 
 			var who struct {
+				ID        string    `json:"id"`
 				Requester Requester `json:"requester"`
 			}
 
-			if json.Unmarshal(data, &who) != nil || who.Requester.PID <= 0 {
+			id, _ := strings.CutSuffix(name, fileSuffix)
+
+			if json.Unmarshal(data, &who) != nil || who.Requester.PID <= 0 || who.ID != id {
 				if undecodableExpired(root, sub, name) {
 					err = l.RemoveNamed(sub, name)
 					if err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil {
@@ -399,45 +410,4 @@ func listIDs(root, sub string) ([]string, error) {
 	}
 
 	return ids, nil
-}
-
-// writeAtomic writes a file through a synced temp file and rename(2), so a reader never sees a
-// partial file.
-func writeAtomic(dir, name string, data []byte) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating %s: %w", dir, err)
-	}
-
-	tmp, err := os.CreateTemp(dir, tempPrefix+name+"-*")
-	if err != nil {
-		return fmt.Errorf("creating a temp file in %s: %w", dir, err)
-	}
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-
-		return fmt.Errorf("writing %s: %w", name, err)
-	}
-
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-
-		return fmt.Errorf("syncing %s: %w", name, err)
-	}
-
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmp.Name())
-
-		return fmt.Errorf("closing %s: %w", name, err)
-	}
-
-	if err := os.Rename(tmp.Name(), filepath.Join(dir, name)); err != nil {
-		_ = os.Remove(tmp.Name())
-
-		return fmt.Errorf("publishing %s: %w", name, err)
-	}
-
-	return nil
 }

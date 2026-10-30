@@ -543,8 +543,9 @@ Neither kind refuses the other through the broker. Overlaps between them are rep
   without `--force` while the holder is alive or unknown. With `--force`, the broker ends the lease, and the holder's
   node writes it a tombstone-like notice that names the breaker. The anchor stays as an ordinary lease, and the notice
   says so. Under NIT-006's "What auth authorizes", a user may break only their own leases, and the broker owner any.
-  Overlap reports between `user` leases and mirrored `machine` leases go only between leases of one user. Amended
-  2026-10-24; see Decision Log
+  A `taken` or `ended` fact stays until its owner's node acks it, so a `break` from any other node answers that the
+  lease already ended and changes nothing. Overlap reports between `user` leases and mirrored `machine` leases go only
+  between leases of one user. Amended 2026-10-29; see Decision Log
 - The broker never refuses a `user` claim because of a mirrored `machine` lease. No `machine` claim consults the
   broker. Mirrored machine leases carry derived entries in their sidecar, from the CLI or, for a record a V1 binary
   wrote, from the node. A derivation that fails shows as unknown in discovery, never as no overlap
@@ -859,6 +860,8 @@ Amended 2026-10-24; see Decision Log.
 - A node call other than the stream has a 30-second deadline, so a stalled broker ends the session and the node
   reconnects. A claimed, answered, or pending handoff file that names no requester is reaped once it is over a day old.
 - The volume check off macOS always fails, since the broker runs as a macOS LaunchAgent.
+- The node follows no broker redirect, since Go would re-send the credential over plain HTTP. A handoff file whose
+  body ID differs from its file name is refused and reaped after a day.
 
 ### M2: Wider-reach leases
 
@@ -906,11 +909,12 @@ Amended 2026-10-24; see Decision Log.
 - The store keeps the 1.0 version. The grant, the outcome, and the counter ride in the `leases`, `outcomes`, and
   `counter` fields M1 reserved. A taken or broken lease stays in `leases` with state `taken` or `ended` until its node
   acks it in a snapshot. The counter bumps with each grant, and the grant's token is the counter value. Revival keeps
-  it.
-  Whether NIT-005 keeps that meaning is NIT-005's to settle.
+  it. Whether NIT-005 keeps that meaning is NIT-005's to settle.
 - The snapshot answer carries the node's leases, end facts included, and the snapshot request carries the acks. An
   older node ignores the answer, and an older broker answers with no body, which a node accepts.
 - A holder never conflicts with its own leases at the broker. See the 2026-10-29 Decision Log entry on M2.
+- A break from a node other than the owner leaves a `taken` or `ended` fact for its owner to ack. See the row review
+  entry in the Decision Log.
 - The node renews at a third of the term, checks anchors and holder liveness in the same pass, and treats a gap
   between loop ticks larger than 5 seconds as a wake. The broker detects its own wake by comparing the monotonic clock
   with Go's clock, which stops during sleep.
@@ -1088,13 +1092,20 @@ Amended 2026-10-24; see Decision Log.
   per ADR-07.
 - 2026-10-29: ADR candidate (cuts across the system): the node-broker channel never carries plaintext over a public
   path. Undecided. Found in NIT-004 M1.
-- 2026-10-29: Work-queue run best guess on M2, amending "Which user a user-reach lease belongs to" and M2's check on
-  `user` and `shared` leases: one holder never conflicts with its own broker leases. The text said every `user` lease
+- 2026-10-29 (autonomous): Work-queue run best guess on M2, amending "Which user a user-reach lease belongs to" and
+  M2's check on `user` and `shared` leases: one holder never conflicts with its own broker leases. The text said every `user` lease
   conflicts with every other `user` lease on overlapping names, and that `user` and `shared` leases on overlapping names
   conflict, with no word on a holder against itself. As built, the same names again from the same holder return the
   lease it holds, and overlapping names from the same holder are granted as another lease. A second `user` lease under
   one anchor, which M2's shared-anchor check needs, cannot exist otherwise. If this is wrong, one comparison in the
-  broker's claim handler changes, and a second overlapping claim from the same holder is refused.
+  broker's claim handler changes, and a second overlapping claim from the same holder is refused. The rule trusts the
+  client-supplied holder key, which another session of the same OS user could forge. That is NIT-001's threat model.
+- 2026-10-29 (autonomous): Row review fixes for NIT-004 M1-M2. "Machine leases and user leases on the same path" let `break` from
+  any node delete a `taken` or `ended` fact. The holder then lost the notice that says who took or ended its lease,
+  against "Lease term and renewal", which drops the marker on the owner's ack. A break from any node but the fact's
+  owner now leaves the fact and answers that the lease already ended. The owner's own break still clears it.
+  Separately, the node refuses a request file whose body ID differs from its file name, and refuses to follow a broker
+  redirect, which would re-send the credential. Neither changes proposal text.
 - 2026-10-29: ADR candidate (departs from the past): at `user` and `shared` reach, a lease names a repo's files across
   every checkout and worktree, unlike the checkout-boundary exemption ADR-03 sets for `machine` reach. Undecided.
   Found in NIT-004 M2.
