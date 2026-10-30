@@ -21,6 +21,16 @@ Commits, in order:
 
 1. `f81c349` nitipan: add the per-user node, the broker, and machine lease mirrors
 2. `70cb3b7` nitipan: grant user and shared leases through the node and broker
+3. `687fd7c` nitipan: refuse broker redirects and forged handoff replies
+4. The `spec:` commit that moves the row to `history.md` and carries this report's last amendment
+
+The row is finished. NIT-004 stays `accepted`, since M3 remains queued. `NIT-004 M1-M2` moved from `queue.md` to the
+end of `history.md`, and `proposals.py check` then returned `[]`. The next row in the queue is `NIT-005 M2`.
+
+ADR candidates recorded as Undecided in NIT-004's Decision Log:
+
+- The node-broker channel never carries plaintext over a public path. That now includes refusing broker redirects.
+- At `user` and `shared` reach, a lease names a repo's files across every checkout and worktree.
 
 ## Row and final review
 
