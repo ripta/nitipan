@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-24
+**Updated:** 2026-10-29
 
 ## Dependencies
 
@@ -286,9 +286,13 @@ macOS-only, which matches the platforms the user runs.
 - The node takes a flock on a node lock file in the state directory. A second node for the same machine and user fails
   loudly, since two would keep replacing each other's snapshots
 - The node exits when its executable changes, so launchd restarts it on the upgraded binary
-- The broker address and proxy settings come from a node config file in the state directory, beside NIT-002's
-  `slots.json`. A LaunchAgent does not inherit the user's shell environment, and Go's default proxy lookup reads only
-  the environment
+- The broker address and proxy settings come from a node config file at `~/.config/nitipan/node.json`, outside the state
+  directory. The node finds the home directory in the user database, like the state directory, and ignores `HOME` and
+  `XDG_CONFIG_HOME`. A LaunchAgent does not inherit the user's shell environment, and Go's default proxy lookup reads
+  only the environment, so the node sets its own proxy function from the file. The node refuses a file or directory
+  that another user owns or that others can write. That check guards against other users and loose permissions, not
+  against a sandboxed session, which runs as the same user. ADR-07 keeps what the node connects to out of input a
+  sandbox can write. Amended 2026-10-29; see Decision Log
 - The plist also carries the codex path and `CODEX_HOME` that `setup` resolves, for NIT-007's Codex rings. No agent
   sandbox can write the plist, while the state directory is writable from inside them, so anything the node runs comes
   from the plist. Amended 2026-10-24; see Decision Log
@@ -607,8 +611,10 @@ Nothing says how the broker runs or what survives its restart. Live leases, requ
 seen-label table, and NIT-005's counter must not be lost, or a retried request can grant twice.
 
 Decision (autonomous): the broker is `nitipan broker`, run on a host the user picks under a launchd LaunchAgent that
-`setup` prints. Its listen address and store path are in a broker config file. All broker state lives in one
-versioned JSON file, rewritten whole through a temp file, fsync, and `rename(2)` for each change.
+`setup` prints. Its listen address, certificate, and store path are in a broker config file at
+`~/.config/nitipan/broker.json`, outside the state directory and read like the node config. All broker state lives in
+one versioned JSON file, rewritten whole through a temp file, fsync, and `rename(2)` for each change. Amended
+2026-10-29; see Decision Log.
 
 - The file holds live and lapsed leases with their grants, revisions, tokens, and anchors; the "taken" markers; request
   outcomes; end facts the holder's node has not acked; the seen-label table; and NIT-005's counter
@@ -797,7 +803,7 @@ Amended 2026-10-24; see Decision Log.
 
 ### M1: Node, broker, and mirrors
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `setup` prints a per-user LaunchAgent that runs `nitipan node`, and a second node for the same machine and user fails
   on its flock
@@ -824,6 +830,34 @@ Amended 2026-10-24; see Decision Log.
 - A node's mirrors read stale when its stream has had no heartbeat for one term, even while the connection stays open
 - A node refuses to forward a request more than one day old with "request expired"
 - Before a major migration of its store, the broker keeps the previous file, and an older broker starts from it
+
+**As built:**
+
+- The node config moved out of the state directory. See the 2026-10-29 Decision Log entry.
+- Running the printed LaunchAgents under real launchd, with `launchctl bootstrap`, is left to the user. Tests cover
+  the node and broker in-process, the flocks, and the printed plist text.
+- The broker and node tests run over `httptest` with fake clocks. Two OS users on one Mac are tested as two uids
+  against one broker. Two real node processes cannot be tested that way, since the state directory must be owned by the
+  calling user.
+- The node mirrors a record unchanged on disk and in meaning. JSON transport compacts its whitespace.
+- The store keeps a hash of each node key, never the key, and the derivation version beside each label. The kept
+  previous file is named after the store with the major it held, such as `broker.json.v1`.
+- The only request kind the node forwards is `ping`, which echoes the node's label. M2 adds the real kinds. No
+  command calls the "node not running" check yet, and its error exits with status 1.
+- The node reads NIT-008's `recalls/` only when the directory exists, and changes nothing yet.
+- Plain HTTP to a literal public IP is refused when the node starts. A host name is allowed, and the node's dialer
+  checks the address the name resolves to just before it connects, refusing a public one. This also covers a name whose
+  answer changes later. With a proxy configured, the dialer judges the proxy's address. The node warns on any plain
+  HTTP.
+- The broker refuses a store file with a higher minor at start, naming both versions, since it cannot rewrite one and
+  could not register a node against it.
+- The store path check refuses `~/Library/Mobile Documents`, `~/Library/CloudStorage`, which covers iCloud Drive,
+  Dropbox, Google Drive, OneDrive, and Box on current macOS, and the legacy `~/Dropbox`, `~/Google Drive`,
+  `~/OneDrive*`, `~/iCloud Drive`, `~/Box`, and `~/Box Sync` folders. It matches by path only. A sync tool pointed at
+  an arbitrary folder, and iCloud's Desktop and Documents sync, are not detected.
+- A node call other than the stream has a 30-second deadline, so a stalled broker ends the session and the node
+  reconnects. A claimed, answered, or pending handoff file that names no requester is reaped once it is over a day old.
+- The volume check off macOS always fails, since the broker runs as a macOS LaunchAgent.
 
 ### M2: Wider-reach leases
 
@@ -1002,6 +1036,16 @@ Amended 2026-10-24; see Decision Log.
   until NIT-006 is built.
 - 2026-10-24: Scheduled as NIT-004 M1-M2 and NIT-004 M3 in queue.md. The split lets NIT-005 M2 land on the new
   grant path first.
+- 2026-10-29: "Node lifecycle" said the node config file sits in the state directory, beside NIT-002's `slots.json`.
+  ADR-07 forbids that, because an agent sandbox can write the state directory, and the broker address, proxy, and CA
+  decide where the node connects. It now says `~/.config/nitipan/node.json`, outside the state directory, found from
+  the home directory in the user database. The node refuses a file or directory that another user owns or that others
+  can write, which guards against other users and loose permissions and not against a sandbox. "Broker lifecycle and
+  store" now names `~/.config/nitipan/broker.json` for the broker config, which it left unplaced. "Broker protocol"
+  says only "the node config", so its text stands. The user chose `~/.config` during the NIT-004 M1-M2 work-queue plan,
+  per ADR-07.
+- 2026-10-29: ADR candidate (cuts across the system): the node-broker channel never carries plaintext over a public
+  path. Undecided. Found in NIT-004 M1.
 
 ## References
 

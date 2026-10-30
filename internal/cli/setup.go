@@ -25,6 +25,9 @@ For opencode, --install-plugins <dir> writes nitipan's two plugins into <dir>/ni
 nitipan's absolute path baked in. It writes plugin files and nothing else. It refuses to overwrite a
 file that differs from the one nitipan ships, unless --replace is given.
 
+setup node and setup broker print the LaunchAgent that runs the per-user node, and the one that runs the
+broker, with the launchctl command that loads each. They write nothing.
+
 setup git --install <checkout> installs a git hook that refuses a branch or HEAD update touching
 paths another session holds, or that a broken lease used to cover. A path claim inside a git checkout
 is refused until the hook is in force there. The hook goes into the directory git uses for hooks, in
@@ -56,6 +59,10 @@ previous core.hooksPath. A caller that is no agent, such as the user's own termi
 func (a *app) runSetup(cmd *cobra.Command, args []string) error {
 	if len(args) == 1 && args[0] == setup.Git {
 		return a.runSetupGit(cmd)
+	}
+
+	if len(args) == 1 && (args[0] == setup.Node || args[0] == setup.Broker) {
+		return a.runSetupDaemon(args[0])
 	}
 
 	agent, err := a.setupAgent(args)
