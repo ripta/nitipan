@@ -964,8 +964,8 @@ Fences `machine` leases on one machine. Needs no broker.
   at load, so a bad store still starts and still serves renewals.
 - 2026-10-29: ADR candidate (cuts across the system): a fence token never falls below the broker's wall clock, and a
   restored or reinstalled broker never issues below a token already on a remote. The invariant is the floor and the
-  bounded raise, not the margin value. It may wait for NIT-005 M3, which first reads tokens on a remote. Undecided.
-  Found in NIT-005 M2.
+  bounded raise, not the margin value. M3 only reads tokens, so nothing the invariant rests on is still in design.
+  Undecided. Found in NIT-005 M2.
 
 ## References
 

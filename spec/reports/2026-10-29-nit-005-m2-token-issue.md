@@ -89,7 +89,9 @@ Reviewer findings and dispositions:
 3. The counter at its maximum value would wrap to 0, and the next token could fall below the counter. PLAUSIBLE. It
    was sent to trace. The trace confirmed it: a damaged or hand-edited store loads that counter unchecked. The report
    path cannot reach it. Fixed: a claim fails closed with 503 when the counter cannot advance, with a test. The store
-   still loads and still serves renewals. A `(run best guess)` Decision Log entry records it.
+   still loads and still serves renewals. A `(run best guess)` Decision Log entry records it. The test was not run
+   against the unfixed code, so it pins the fix. Unfixed, the claim would have succeeded with a clock-valued token, so
+   the test's 503 assertion should fail there, but that was not observed.
 
 Checks after fixes: `make ci` passed. `proposals.py check` reports only the row move. `proposals.py freeze` returned
 `[]`.
