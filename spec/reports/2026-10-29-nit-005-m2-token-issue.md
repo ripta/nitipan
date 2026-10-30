@@ -113,4 +113,7 @@ of `history.md`. The next row in the queue is `NIT-004 M3`.
 ## Commits
 
 1. `8f0dd70` nitipan: issue fencing tokens floored at the broker's clock
-2. The `spec:` commit that moves the row to history and carries this report's amendment
+2. `a26cbca` spec: move NIT-005 M2 to history and finish its session report
+3. The `spec:` commit that carries this report's last amendment
+
+`proposals.py check` returned `[]` after the row moved.
