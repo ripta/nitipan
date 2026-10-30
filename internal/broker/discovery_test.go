@@ -3,6 +3,7 @@ package broker
 import (
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/space-armada/nitipan/internal/keys"
@@ -151,6 +152,23 @@ func TestWhoHoldsRepoNameReachesGrantsAndEveryMirror(t *testing.T) {
 
 	if len(ans.Notes) == 0 {
 		t.Fatal("an answer with unjudged mirrors must say so")
+	}
+}
+
+func TestWhoHoldsReadsAMirrorBelowTheDerivationFloorAsUnknown(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.DerivationFloor = 2 })
+	h.twoNodes()
+
+	h.snapshot(studio, machineMirror(t, "M-below-floor", "m1", okEntries("svc"), "/x/svc"))
+
+	ans, status := h.whoHolds(laptop, wire.WhoHolds{Names: name("svc")})
+	if status != http.StatusOK {
+		t.Fatalf("status %d", status)
+	}
+
+	f := found(t, ans, "M-below-floor")
+	if f.State != wire.StateUnknown || !strings.Contains(f.Why, "derivation") {
+		t.Fatalf("a mirror below the broker's derivation floor must read as unknown with a reason: %+v", f)
 	}
 }
 

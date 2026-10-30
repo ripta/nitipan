@@ -81,8 +81,9 @@ func decodeMirror(ml wire.MirroredLease) (rec *record.Record, why string) {
 func (m mirror) isPath() bool { return m.rec != nil && m.rec.Domain.Kind == record.KindPath }
 
 // repoUnknown says why the mirror's repo entries cannot be compared, or returns the empty string when
-// they can.
-func (m mirror) repoUnknown() string {
+// they can. A derivation below the broker's floor is one the broker no longer accepts in a claim, so it
+// reads as unknown as well.
+func (m mirror) repoUnknown(floor int) string {
 	switch {
 	case m.derived == nil:
 		return "the node sent no repo entries for it, as a node that predates them does"
@@ -90,6 +91,8 @@ func (m mirror) repoUnknown() string {
 		return "deriving its repo entries failed: " + m.derived.Reason
 	case m.derived.Derivation > MaxDerivation:
 		return fmt.Sprintf("its repo entries come from derivation %d, and this broker knows up to %d", m.derived.Derivation, MaxDerivation)
+	case m.derived.Derivation < floor:
+		return fmt.Sprintf("its repo entries come from derivation %d, and this broker accepts from %d", m.derived.Derivation, floor)
 	}
 
 	return ""
@@ -230,7 +233,7 @@ func (b *Broker) judge(asker NodeKey, q wire.WhoHolds, addr *Address, m mirror) 
 		return false, ""
 	}
 
-	if why := m.repoUnknown(); why != "" {
+	if why := m.repoUnknown(b.cfg.DerivationFloor); why != "" {
 		return false, why
 	}
 
@@ -381,7 +384,7 @@ func (b *Broker) overlapsFor(g *grant, mirrors []mirror) []wire.Overlap {
 	var out []wire.Overlap
 
 	for _, m := range mirrors {
-		if !m.isPath() || m.rec.Reach != record.ReachMachine || m.repoUnknown() != "" {
+		if !m.isPath() || m.rec.Reach != record.ReachMachine || m.repoUnknown(b.cfg.DerivationFloor) != "" {
 			continue
 		}
 

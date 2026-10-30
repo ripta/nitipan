@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/space-armada/nitipan/internal/handoff"
@@ -81,11 +82,14 @@ func (n *Node) forwardClaim(ctx context.Context, req handoff.Request) (json.RawM
 		n.book.apply(*res.Lease, sent, true)
 		n.publishDeadlinesNow()
 
-		// The claimant sees these overlaps as warnings in the claim's own output, so the snapshot answer
-		// that repeats them later writes no notice to the grant's holder.
-		for _, o := range res.Overlaps {
-			n.book.once(overlapKey(o, sideGrant))
+		// The claimant sees these overlaps as warnings in the claim's own output, but only once it reads
+		// the reply. Until then the snapshot answer that repeats them holds back its notice.
+		held := make([]string, len(res.Overlaps))
+		for i, o := range res.Overlaps {
+			held[i] = overlapKey(o, sideGrant)
 		}
+
+		n.holdOverlaps(req.ID, held)
 	}
 
 	return json.Marshal(res)
@@ -279,6 +283,65 @@ func (n *Node) publishDeadlinesNow() {
 	}
 }
 
+func (n *Node) holdOverlaps(id string, held []string) {
+	n.book.mu.Lock()
+	defer n.book.mu.Unlock()
+
+	if lr, ok := n.book.late[id]; ok {
+		lr.overlaps = held
+		n.book.late[id] = lr
+	}
+}
+
+// overlapAwaitsReader reports whether a claim reply that carries the overlap is still waiting for its
+// CLI. A reply that was read means the CLI printed the warning, so the pair counts as reported. A reply
+// left unread past the grace is a CLI that never printed it, so the holder gets the notice.
+func (n *Node) overlapAwaitsReader(key string) bool {
+	n.book.mu.Lock()
+
+	var ids []string
+
+	for id, lr := range n.book.late {
+		if slices.Contains(lr.overlaps, key) {
+			ids = append(ids, id)
+		}
+	}
+
+	n.book.mu.Unlock()
+
+	if len(ids) == 0 {
+		return false
+	}
+
+	ages, err := handoff.Answered(n.opts.StateDir, time.Now())
+	if err != nil {
+		return true
+	}
+
+	for _, id := range ids {
+		age, waiting := ages[id]
+
+		switch {
+		case !waiting:
+			n.book.once(key)
+
+			return true
+		case age < n.replyGrace():
+			return true
+		}
+	}
+
+	return false
+}
+
+func (n *Node) replyGrace() time.Duration {
+	if n.opts.ReplyGrace == 0 {
+		return DefaultReplyGrace
+	}
+
+	return n.opts.ReplyGrace
+}
+
 func (n *Node) rememberLate(id string, lr lateReply) {
 	n.book.mu.Lock()
 	n.book.late[id] = lr
@@ -302,16 +365,17 @@ func (n *Node) deliverLate() {
 	}
 	n.book.mu.Unlock()
 
-	grace := n.opts.ReplyGrace
-	if grace == 0 {
-		grace = DefaultReplyGrace
-	}
+	grace := n.replyGrace()
 
 	for id, lr := range pending {
 		age, waiting := ages[id]
 
 		switch {
 		case !waiting:
+			for _, key := range lr.overlaps {
+				n.book.once(key)
+			}
+
 			n.forgetLate(id)
 		case age >= grace:
 			n.lateNotice(id, lr)

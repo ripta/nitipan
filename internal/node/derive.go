@@ -124,7 +124,7 @@ func (n *Node) applyOverlaps(overlaps []wire.Overlap) {
 	loaded := false
 
 	for _, o := range overlaps {
-		if o.Grant.Node == label {
+		if o.Grant.Node == label && !n.overlapAwaitsReader(overlapKey(o, sideGrant)) {
 			if sc, err := handoff.ReadSidecar(n.opts.StateDir, o.Grant.Lease); err == nil && n.book.once(overlapKey(o, sideGrant)) {
 				n.notice(sc.Holder, o.Grant.Lease, "overlap-"+o.Mirror.Lease, 0, fmt.Sprintf("your %s lease %s names repo files "+
 					"that the machine lease %s of %s also covers. Nothing refuses either one. Ask them before you both change the same files",

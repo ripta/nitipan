@@ -965,10 +965,11 @@ Amended 2026-10-24; see Decision Log.
 - The handoff request version is now 3. Two request kinds, `who-holds` and `who-is`, need it. A CLI of this build gets
   "node too old" from a node of version 2 for every request, since the version is global. A node restarts on the new
   binary by itself. An older broker answers 404 to the two new paths, which reads as "broker too old".
-- Derived entries ride in `wire.MirroredLease.Derived`, with a state, the derivation version, the entries, and a reason.
-  A mirror without the field reads as unknown. The sidecar lives in `broker/derived/`, keyed by lease ID, and carries
-  the keys it was derived from. A sidecar for other keys than the record's current ones counts as absent. A sidecar of
-  a higher major is left alone and reads as unknown.
+- Mirrors carry their derived entries, with a state, the derivation version, the entries, and a reason. A mirror
+  without them reads as unknown. The node keeps them in a directory V1 never scans, keyed by lease ID, with the keys
+  they were derived from. A file for other keys than the record's current ones counts as absent. A file of a higher
+  major is left alone and reads as unknown. A mirror derived below the broker's derivation floor reads as unknown too,
+  as one above the highest derivation it knows does.
 - A key outside any checkout derives to no entries, which overlaps no repo. Every other refusal is a failed derivation.
   A failure the node recorded is tried again after an hour. A failure the CLI recorded is not.
 - A snapshot spends at most 5 seconds starting derivations, since it runs on the loop that heartbeats and renews. A
@@ -984,8 +985,14 @@ Amended 2026-10-24; see Decision Log.
   stale mirror, marked stale.
 - The notice reaches a node in the snapshot answer, which now carries `overlaps` and is sent when it has either leases
   or overlaps. The node marks each pair and side once per process, so a node restart can repeat one notice that its
-  holder has not yet read. The claim reply carries the same overlaps, and the node marks the grant side as seen, so the
-  claimant gets a warning and no notice for it.
+  holder has not yet read. The claim reply carries the same overlaps. The node marks the grant side as seen once the CLI
+  has read the reply, so the claimant gets a warning and no notice for it. A reply left unread past the grace means no
+  warning was printed. The snapshot answer then writes the notice, so the grant's holder still hears of the overlap.
+- Not covered: a refused claimant's transient anchor is a machine lease that overlaps the live grant it is refused for.
+  A snapshot that lands before the broker answers the claim can report that pair, and the grant's holder gets a notice
+  about a lease released moments later. The window is wider when the outcome is unknown and the anchor stays. The CLI
+  writes no derived file for the anchor, so no mirror-side notice goes out. The broker cannot tell the anchor from any
+  other machine lease before the claim reaches it, so excluding it after a refusal would leave the main window open.
 - The node's own derivation is not retried on a V1 record's behalf more than once an hour after a failure. A machine
   lease whose derived file the node wrote gets no overlap notice. That is how a V1 holder is told from a new-binary one.
 - Not covered: a mail address in either query, which NIT-007 adds, and the cross-user hiding NIT-006 adds. Running the
@@ -1153,7 +1160,7 @@ Amended 2026-10-24; see Decision Log.
   redirect, which would re-send the credential. Neither changes proposal text.
 - 2026-10-29: ADR candidate (departs from the past): at `user` and `shared` reach, a lease names a repo's files across
   every checkout and worktree, unlike the checkout-boundary exemption ADR-03 sets for `machine` reach. Undecided.
-  Found in NIT-004 M2.
+  Found in NIT-004 M2. M3's path query also lists across worktree boundaries, found in NIT-004 M3.
 - 2026-10-29 (run best guess): Amended "Broker lifecycle and store" and the risk on NIT-005, which both left the
   counter's floor on load to NIT-005. The text said the floor is NIT-005's to decide. NIT-005 M2 settled it: the
   broker applies no floor at load, since every grant floors its token at the wall clock. If a floor at load is wanted
@@ -1179,6 +1186,13 @@ Amended 2026-10-24; see Decision Log.
   returned, on the loop that heartbeats and renews, so many V1 leases in large repos could have kept the node quiet
   past a term. It now stops starting derivations after 5 seconds. `who is` skipped unreadable mirrors, and now lists
   them as unknown. Neither changes proposal text.
+- 2026-10-30 (run best guess): Row-review fixes for NIT-004 M3. The claim reply marked the grant-side overlap notice
+  as seen before the CLI read the reply, so a CLI that timed out and never retried left the grant's holder with no
+  report. The node now marks the pair when the reply is read and holds the snapshot notice back until then. A reply
+  unread past the grace lets the snapshot write the notice. A mirror below the broker's derivation floor now reads as
+  unknown, as the claim path already refuses it. The refused claimant's transient anchor can still produce a brief
+  overlap notice, which M3's As built block records. The As built text for the derived entries lost its symbol and
+  path names.
 
 ## References
 

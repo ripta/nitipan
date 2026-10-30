@@ -17,7 +17,11 @@ The system `python3` is 3.9, which cannot run the plugin's `proposals.py`. The r
 
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
-| NIT-004 M3 | IN PROGRESS | |
+| NIT-004 M3 | DONE | `f5511d3`, review fixes in the next commit |
+
+Row `NIT-004 M3` is BLOCKED from finishing on an ADR-07 conflict. See "Row review" below. The milestone's code is
+committed and M3 is `DONE`. NIT-004 is not marked `implemented`, and the row stays in `queue.md`.
+`proposals.py check` keeps reporting those two row-finish findings until the user rules.
 
 ## Best guesses from the plan
 
@@ -105,3 +109,77 @@ The regression tests for findings 1 and 2 were not run against the unfixed code 
 implementer's reasoning says each would fail without its fix, but that is unverified.
 
 `make ci` passed again after the fixes, with `internal/cli` at 398 s.
+
+Commit: `f5511d3 nitipan: answer who holds and who is across machines`. It carries the code, the proposal, and this
+report.
+
+## Row review
+
+The row review was also the run's final review, with an ADR review, over `28ec274..HEAD`. The range adds or edits no
+ADR.
+
+Reviewer findings, all PLAUSIBLE. A fresh implementer traced and fixed them:
+
+1. `forwardClaim` marked the grant-side overlap pair seen before the CLI read the claim reply. A CLI that timed out and
+   never retried printed no warning, and no notice followed. Fixed: the trace confirmed it. The node now marks the pair
+   only once the CLI consumes the reply. An unread reply past its grace lets the snapshot write the notice. The
+   regression test failed on the unfixed code and passes now
+2. A refused claimant's transient anchor shows as a mirrored lease overlapping the live grant, so the grant's holder
+   can get a notice about a lease released moments later. Confirmed, not fixed. The node's snapshot usually lands
+   before the broker sees the claim, so excluding refused anchors at the broker would miss the main window. M3's As
+   built block now names this under "Not covered"
+3. A mirror derived below the broker's derivation floor was compared as current. Fixed. It now reads as unknown. The
+   test failed first and passes now. Unreachable today, since the floor and maximum are both 1
+4. The M3 As built block named a wire field and a directory. Fixed: rewritten in prose
+
+The implementer also fixed a flaky test. `TestOverlapNoticesGoOncePerPairToHoldersThatCanReadThem` failed 8 of 40 runs
+on `f5511d3`, because the node's derived file could overwrite the one the test wrote. The test now waits for the node's
+mirror first. It then passed 40 runs in a row.
+
+The proposal gained one Decision Log entry for these fixes. `make ci` passed, with `internal/cli` at about 306 s.
+`proposals.py freeze --row-commit f5511d3` returned `[]`.
+
+ADR impact found ADR-01, ADR-04, ADR-05, ADR-06, and ADR-08 consistent, and two PLAUSIBLE conflicts:
+
+- ADR-03: the `who holds` path query lists leases across checkout boundaries, with no boundary exemption. It only adds
+  hits and never hides an overlap. Folded into the existing 2026-10-29 ADR candidate on user-reach boundaries, which
+  stays `Undecided`
+- ADR-07: blocks the row. See below
+
+### Block: ADR-07
+
+ADR-07 says "The node never runs, loads, or configures anything from input an agent sandbox can write or control." M3's
+node derivation runs `git --no-replace-objects -C <dir>` where `<dir>` comes from a lease record in the
+sandbox-writable state directory. Only the repo-locating environment variables are stripped. Git loads that
+directory's `.git/config`, which a sandboxed session can write. That is the node running with configuration taken from
+sandbox input. The proposal text says derived entries for a V1 record come "from the node", so the proposal and the
+ADR disagree. Honoring the ADR changes the approved plan, so section 5 makes this a block rather than a best guess.
+
+Two separate exposures:
+
+1. M3, in this run: `rootset.ExecRunner` runs `rev-parse`, `rev-list --max-parents=0`, and `ls-files --stage` on
+   every mirrored lease that has no CLI-written derived file. That covers every V1 record
+2. M2, before this run: the node's anchor check already ran `git -C <repo> ls-files -s` through `keys.ExecGit` at
+   `28ec274`. The run did not make that edit and did not change it
+
+The implementer's read-only survey, unverified by running git: `core.fsmonitor` can run a program when `ls-files`
+refreshes the index, which is medium to high confidence. `core.alternateRefsCommand` may run under `rev-list`, which
+is medium confidence. `include.path` pulls in more config from the same directory. `safe.directory` gives no
+protection, since the session and the node run as the same user.
+
+Options for the user:
+
+- Drop node derivation. The CLI becomes the only deriver, and a V1 record without a CLI-written file reads as unknown,
+  which is already safe. This amends NIT-004's "Machine leases and user leases on the same path" and the
+  macOS-privacy risk's mitigation. M2's anchor check needs its own answer
+- Supersede ADR-07 with a carve-out for git on record-named directories, naming the hardening it requires
+- Harden with `-c core.fsmonitor=false`, `GIT_CONFIG_NOSYSTEM=1`, and similar overrides. This is a denylist on a
+  sandbox-chosen input, the class ADR-07's Alternatives section rejects
+
+Marking NIT-004 `implemented` now would freeze it before the amendment the first option needs. So the row stays
+unfinished, with its code committed.
+
+### ADR candidates
+
+None new. The ADR-07 question fails the Decision test, since nothing is decided yet. The unknown-mirror rule was
+declined in the Decision Log. The 2026-10-29 user-reach boundary candidate predates this run and stays `Undecided`.

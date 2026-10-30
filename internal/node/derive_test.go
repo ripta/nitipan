@@ -261,6 +261,9 @@ func TestOverlapNoticesGoOncePerPairToHoldersThatCanReadThem(t *testing.T) {
 	cliPath := filepath.Join(g.top, "cli")
 	cliID, _ := writeRecord(t, lr.state, cliPath)
 
+	// The node derives the record first, so the CLI's file lands after it and is the one that stays.
+	mirrorOfLease(t, lr, cliID)
+
 	writeDerivedFile(t, lr.state, handoff.Derived{
 		ID: cliID, By: handoff.DerivedByCLI, State: wire.DerivedOK, Derivation: 1, Keys: []keys.Key{{Path: cliPath}},
 		Entries: derivedNames("x"), At: time.Now(),
@@ -352,4 +355,100 @@ func TestASnapshotBoundsItsDerivationWorkAndFinishesOnLaterSnapshots(t *testing.
 	}
 
 	t.Fatal("later snapshots must finish the derivation")
+}
+
+// submitOverlappingClaim hands the node a claim whose names overlap the mirrored lease cliPath, and
+// returns once the reply is on disk. It leaves the reply unread, as a CLI that timed out would.
+func submitOverlappingClaim(t *testing.T, lr *leaseRig, top string) string {
+	t.Helper()
+
+	cliPath := filepath.Join(top, "cli")
+	cliID, _ := writeRecord(t, lr.state, cliPath)
+
+	mirrorOfLease(t, lr, cliID)
+
+	writeDerivedFile(t, lr.state, handoff.Derived{
+		ID: cliID, By: handoff.DerivedByCLI, State: wire.DerivedOK, Derivation: 1, Keys: []keys.Key{{Path: cliPath}},
+		Entries: derivedNames("x"), At: time.Now(),
+	})
+
+	forceSnapshot(t, lr, top, "settle")
+
+	plantAnchor(t, lr.state, anchorA, "/work/a")
+
+	body, err := json.Marshal(handoff.ClaimBody{
+		Reach: wire.ReachUser, Entries: derivedNames("x/api"), Derivation: 1, Holder: holderEnv(record.LivenessProcess),
+		Anchor: handoff.Anchor{ID: anchorA, Keys: []keys.Key{{Path: "/work/a"}}, Covered: []keys.Key{{Path: "/work/a"}}, Created: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id := state.NewID()
+	if err := handoff.Submit(lr.state, handoff.Request{ID: id, Kind: handoff.KindClaim, CreatedAt: time.Now(), Body: body}); err != nil {
+		t.Fatal(err)
+	}
+
+	eventually(t, "the node to answer the claim", func() bool {
+		_, err := handoff.ReadReply(lr.state, id)
+
+		return err == nil
+	})
+
+	return id
+}
+
+func countNoticesContaining(lr *leaseRig, substr string) int {
+	count := 0
+
+	for _, n := range lr.notices() {
+		if strings.Contains(n.Detail, substr) {
+			count++
+		}
+	}
+
+	return count
+}
+
+// forceSnapshot makes the node send another snapshot, so the broker repeats the standing overlaps.
+func forceSnapshot(t *testing.T, lr *leaseRig, top, name string) {
+	t.Helper()
+
+	id, _ := writeRecord(t, lr.state, filepath.Join(top, name))
+	mirrorOfLease(t, lr, id)
+}
+
+func TestAnOverlapTheCLINeverReadStillReachesTheGrantsHolder(t *testing.T) {
+	g, deriver := newFakeGit(t)
+	lr := newLeaseRig(t, func(o *Options) {
+		o.Roots = deriver
+		o.ReplyGrace = 200 * time.Millisecond
+	})
+
+	submitOverlappingClaim(t, lr, g.top)
+
+	lr.waitNotice("granted after nitipan stopped waiting")
+	forceSnapshot(t, lr, g.top, "other")
+
+	eventually(t, "the overlap notice for a CLI that never printed the warning", func() bool {
+		return countNoticesContaining(lr, "names repo files") == 1
+	})
+}
+
+func TestAnOverlapTheCLIPrintedGivesNoSecondNotice(t *testing.T) {
+	g, deriver := newFakeGit(t)
+	lr := newLeaseRig(t, func(o *Options) { o.Roots = deriver })
+
+	id := submitOverlappingClaim(t, lr, g.top)
+	handoff.Consume(lr.state, id)
+
+	for _, name := range []string{"other1", "other2"} {
+		forceSnapshot(t, lr, g.top, name)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	if got := countNoticesContaining(lr, "names repo files"); got != 0 {
+		t.Fatalf("the CLI printed the warning, so the grant's holder needs no notice: %d", got)
+	}
 }
