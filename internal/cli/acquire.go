@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -53,6 +54,7 @@ Retry the same acquire, which reports it as already held, or run list.`,
 	cmd.Flags().String("name", "", "the session name others can reach you by, such as the /rename name")
 	cmd.Flags().String("permission-mode", "", "the session's permission mode, as the agent names it")
 	cmd.Flags().String("description", "", "what this session does with the domain")
+	cmd.Flags().String("reach", "", "how far the lease reaches: machine (the default), user, or shared. user and shared go through the node to the broker")
 	cmd.Flags().StringSlice("replace", nil, "rewrite your lease with this ID to the new domain; repeat to merge several")
 
 	return cmd
@@ -62,6 +64,21 @@ func (a *app) runAcquire(cmd *cobra.Command) error {
 	h, err := a.holder()
 	if err != nil {
 		return err
+	}
+
+	reach, err := wideReach(cmd)
+	if err != nil {
+		return err
+	}
+
+	if reach != "" {
+		if err := a.runAcquireWide(cmd, h, reach); err != nil {
+			return err
+		}
+
+		a.reportRisk(h)
+
+		return nil
 	}
 
 	resource, err := resourceName(cmd)
@@ -116,9 +133,18 @@ func (a *app) runAcquire(cmd *cobra.Command) error {
 		res, err = e.Acquire(req)
 	}
 
+	var covered *lease.CoveredError
+	if errors.As(err, &covered) {
+		for _, l := range covered.Leases {
+			a.clearCreated(l.ID)
+		}
+	}
+
 	if err != nil {
 		return err
 	}
+
+	a.reportRisk(h)
 
 	return a.printAcquired(res)
 }

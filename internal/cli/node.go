@@ -16,7 +16,9 @@ import (
 	"github.com/space-armada/nitipan/internal/handoff"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/node"
+	"github.com/space-armada/nitipan/internal/session"
 	"github.com/space-armada/nitipan/internal/setup"
+	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/version"
 )
 
@@ -82,7 +84,16 @@ func (a *app) runNode() error {
 	self := a.deps.Procs.Self()
 	start, _ := a.deps.Procs.Start(self)
 
+	sessions := &session.Service{Root: stateDir, Procs: a.deps.Procs, Local: local, Now: a.deps.Now, DB: a.opencodeDB()}
+	checker := &liveness.Checker{Procs: a.deps.Procs, Local: local, Sessions: sessions.Rules()}
+
 	n, err := node.New(node.Options{
+		Checker: checker,
+		Finder:  a.deps.Finder,
+		StateOptions: state.Options{
+			Checker: checker, Procs: a.deps.Procs, Machine: local, SelfPID: self, SelfStart: start, Command: "nitipan node",
+			Warn: func(err error) { fmt.Fprintf(a.deps.Stderr, "nitipan: node: %v\n", err) },
+		},
 		StateDir:  stateDir,
 		UID:       uid,
 		User:      user,

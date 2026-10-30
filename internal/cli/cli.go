@@ -24,6 +24,7 @@ import (
 	"github.com/space-armada/nitipan/internal/machine"
 	"github.com/space-armada/nitipan/internal/proc"
 	"github.com/space-armada/nitipan/internal/record"
+	"github.com/space-armada/nitipan/internal/rootset"
 	"github.com/space-armada/nitipan/internal/session"
 	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/version"
@@ -91,6 +92,13 @@ type Deps struct {
 	// the default Codex home. Like the state directory, it never reads $HOME. Default: the user
 	// database entry.
 	UserHome func() (string, error)
+
+	// HandoffWait is how long a command waits for the node's reply. Default: DefaultHandoffWait.
+	HandoffWait time.Duration
+
+	// Roots derives the repo names of a wider-reach claim. Nil asks git and keeps the root sets in the
+	// state directory.
+	Roots *rootset.Deriver
 
 	// OpencodeDB reads opencode's database. Nil reads it with the sqlite3 program.
 	OpencodeDB session.OpencodeDB
@@ -203,6 +211,7 @@ func newRoot(a *app) *cobra.Command {
 		a.releaseCmd(),
 		a.listCmd(),
 		a.breakCmd(),
+		a.renewCmd(),
 		a.advertiseCmd(),
 		a.requestCmd(),
 		a.grantCmd(),
@@ -225,6 +234,9 @@ func Execute(deps Deps, args []string) int {
 	root.SetArgs(args)
 
 	err := root.Execute()
+
+	a.releaseOrphans()
+
 	if err != nil {
 		fmt.Fprintf(deps.Stderr, "nitipan: %v\n", err)
 	}

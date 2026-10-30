@@ -271,3 +271,55 @@ func TestReapRemovesUndecodableFilesOnceTheyPassTheRequestWindow(t *testing.T) {
 		}
 	}
 }
+
+func TestUnusableSidecarAndDeadlineFilesReadAsUnknown(t *testing.T) {
+	root := t.TempDir()
+
+	for _, sub := range []string{HeldDir, DeadlinesDir} {
+		if err := os.MkdirAll(filepath.Join(root, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(root, HeldDir, "01H0000000000000000000000A.json"), []byte(`{"version":"2.0","id":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, HeldDir, "01H0000000000000000000000B.json"), []byte(`not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, DeadlinesDir, "k.json"), []byte(`{"version":"3.1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	usable, unknown, err := Sidecars(root)
+	if err != nil || len(usable) != 0 || len(unknown) != 2 {
+		t.Fatalf("Sidecars = %v, %v, %v", usable, unknown, err)
+	}
+
+	if _, err := ReadSidecar(root, "01H0000000000000000000000A"); !errors.Is(err, ErrUnusableFile) {
+		t.Fatalf("ReadSidecar err = %v, want ErrUnusableFile", err)
+	}
+
+	if _, err := ReadDeadlines(root, "k"); !errors.Is(err, ErrUnusableFile) {
+		t.Fatalf("ReadDeadlines err = %v, want ErrUnusableFile", err)
+	}
+}
+
+func TestHigherMinorSidecarStillReads(t *testing.T) {
+	root := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(root, HeldDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `{"version":"1.9","id":"01H0000000000000000000000A","future":true}`
+	if err := os.WriteFile(filepath.Join(root, HeldDir, "01H0000000000000000000000A.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ReadSidecar(root, "01H0000000000000000000000A"); err != nil {
+		t.Fatalf("a higher minor must read: %v", err)
+	}
+}

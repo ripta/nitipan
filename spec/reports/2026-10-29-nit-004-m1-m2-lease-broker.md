@@ -14,10 +14,12 @@ The approved plan is `/Users/ripta/.claude/plans/virtual-weaving-cupcake.md`.
 
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
-| NIT-004 M1 | DONE | see M1 commit below |
-| NIT-004 M2 | QUEUED | |
+| NIT-004 M1 | DONE | `f81c349` |
+| NIT-004 M2 | DONE | see commit 2 |
 
-Commits, in order: none yet.
+Commits, in order:
+
+1. `f81c349` nitipan: add the per-user node, the broker, and machine lease mirrors
 
 ## Plan-time decisions
 
@@ -136,4 +138,112 @@ accepted NIT-006 builds on it. It is recorded as Undecided in NIT-004's Decision
 
 ## NIT-004 M2
 
-Queued.
+### Implementation
+
+A fresh implementer built M2 in about 50 minutes.
+
+- New packages: `internal/repoid` holds the `repo:` names and their overlap. `internal/rootset` derives root sets.
+- New files: `internal/broker/grants.go`, `internal/handoff/held.go`, `internal/node/lease.go`,
+  `internal/node/forward.go`, `internal/cli/wider.go`, and `internal/wire/lease.go`.
+- Changed: `acquire`, `release`, `break`, and `list`. A new `renew` command was added.
+- `make ci` passed. `proposals.py freeze --row-commit f81c349` returned `[]`.
+- `proposals.py check` reported only that the finished row must move to `history.md`.
+
+The implementer amended "Machine leases and user leases on the same path". A late refusal now becomes a notice that
+names the release command. The text had said the next call that receives the late refusal releases the anchor. The
+Decision Log entry is marked as a run best guess.
+
+Implementer best guesses:
+
+1. One ULID serves as both the request ID and the lease ID. A timed-out command leaves `broker/inflight/<key>.json`, and
+   a retry reuses its ID.
+2. `RequestVersion` is 2. An M2 CLI gets "node too old" from an M1 node.
+3. The broker store stays at 1.0 and uses M1's reserved fields. The token is the counter value at grant time, and
+   revival keeps it. NIT-005 M2 may change these semantics.
+4. The snapshot answer carries the node's leases and end facts. Acks ride in `Snapshot.Acked`. The answer is 204 when
+   there are none, which keeps M1 clients working.
+5. Overlapping leases from the same holder do not conflict at the broker. Otherwise a second `user` lease could not
+   share an anchor.
+6. An exact repeat of a name by the same holder returns the existing lease.
+7. Deadline files are `broker/deadlines/<holder-key>.json`, and each carries a connected flag.
+8. `renew` is a subcommand over a `renew` request kind.
+9. `list` asks the node. With no live node, it falls back to the holder's sidecars with state `unknown`. JSON gains
+   `broker_leases`, and the listing schema goes to 1.4.
+10. A remote `break` goes to the broker when the ID matches no local lease, tombstone, or mark file.
+11. No new exit codes. "taken", refused, and ended exit 3. "not found" exits 8. Node and broker version errors exit 1.
+12. A gap of more than 5 seconds between node loop ticks, on the monotonic clock, counts as a wake.
+13. The broker removes a lapsed lease whose anchor the node's snapshot omits.
+14. A claim with several covering leases from the same holder is refused, since only one can be the anchor.
+15. The root-set cache is `broker/rootsets.json`. A claim inside a submodule emits the submodule's entry first.
+16. Releasing a typed `repo:` name releases the caller's own live or lapsed leases that overlap it.
+
+Gaps the implementer named: the "restored" notice has no test, and no test is dedicated to an old node against a new
+broker. A node restart within the 90-second reply window drops the late-reply notice, though a retry still returns
+the same answer.
+
+### Review
+
+The reviewer's sandbox denied local port binding, so it ran only the rootset, repoid, and handoff tests. They passed.
+
+Reviewer findings and dispositions:
+
+1. A release of another session's lease ID deleted that session's sidecar on `not_found`, so its lease stopped
+   renewing. CONFIRMED. Sent to fix.
+2. An exact repeat claim wrote a ghost sidecar under the new request ID. The holder then got a false loss notice.
+   CONFIRMED. Sent to fix.
+3. A hard round-trip failure, such as "broker too old" or a withdrawn request, leaked an anchor the claim had created.
+   CONFIRMED. Sent to fix.
+4. Dropping "or the next call that receives the late refusal" releases the anchor was a shortcut the plan did not
+   approve. Sent to fix the way the proposal says, reverting the amendment. A retried release after a lost reply also
+   skipped the created-anchor release. That went with it.
+5. The same-holder rule appeared only in the Decision Log, not in the settled text. Sent to fix by an amendment in
+   place.
+6. Only some skew directions had tests: there was no old-node test, and the old-CLI test used only ping. The
+   "restored" notice was nearly unreachable. Sent to fix.
+7. Request outcomes were keyed by request ID with no node check, so another node could replay a "granted" outcome.
+   PLAUSIBLE. Sent to trace.
+8. The root-set cache was written non-atomically. Sent to fix.
+9. Comment craft: a "mirror of" comment, a doc comment bound to the wrong name, and a no-op assignment. Sent to fix.
+
+Fix round results, from the same implementer:
+
+1. Fixed. A release removes a sidecar only when its holder key matches the requester's. A regression test failed
+   first.
+2. Fixed. The sidecar is keyed on the returned lease ID, and an existing sidecar keeps its created flag. Node and CLI
+   regression tests failed first.
+3. Fixed. A created anchor is released on every definite non-grant, and kept only when the outcome is unknown.
+4. Fixed, and the amendment reverted. The node writes `broker/orphans/<claimID>.json` beside the late-refusal notice.
+   The orphan holds the anchor's ID, keys, and created flag. The next command that delivers the notice releases the
+   anchor under the lock, by the created-anchor rules. A release keeps its sidecars in the in-flight record, so a
+   retry after a lost reply still releases a created anchor. Both regression tests failed first. Run best guess: an
+   orphan file rather than a new `record.Notice` field, since a field needs a record minor bump.
+5. Fixed. "Which user a user-reach lease belongs to" and M2's check now say one holder never conflicts with its own
+   broker leases. Each has one marker. A single Decision Log entry, marked as a run best guess, gives the prior text.
+6. Fixed. An old-node snapshot with no `Acked` field works. A v1 request for a kind added in v2 gets "node too old".
+   The "restored" notice now fires once, after the node's own deadline passes with no acked renewal. Each regression
+   test failed first.
+7. Confirmed and fixed. A stored outcome carries the node that made it, so another node's replay gets 409. An outcome
+   stored with no node still replays, which keeps old stores working.
+8. Fixed. The root-set cache is written through a temp file and rename. No test can fail first, since a torn write
+   cannot be reproduced. The test pins only that no temp file is left.
+9. Fixed.
+10. ADR-05 ceiling, fixed. The broker refuses a derivation above `MaxDerivation`, which is 1, as "broker too old". A
+    regression test failed first.
+
+After the round, `make fmt` and `make ci` passed. `proposals.py freeze --row-commit f81c349` returned `[]`.
+`proposals.py check` reported only the row move. The `internal/cli` tests now take about 340 seconds under `-race`.
+
+`adr-impact` findings and dispositions:
+
+1. ADR-05: the broker refused a derivation below its floor but accepted an unknown higher one. Treated as a fix: ADR-05
+   says a reader refuses a version it does not know.
+2. ADR-03: repo-name overlap ignores the checkout-boundary exemption. Dismissed as a conflict. A `repo` entry is its
+   own type and never overlaps a `path` entry, and "Name syntax for wider reach" settles that it covers every
+   worktree. The invariant behind it is recorded as an ADR candidate below.
+3. Token equals the counter, and a holder never conflicts with itself. Not recorded as candidates. The token meaning
+   is NIT-005 M2's to settle, and the same-holder rule is a run best guess the user has not confirmed.
+
+ADR candidate: at `user` and `shared` reach, a lease names a repo's files across every checkout and worktree,
+unlike the checkout-boundary exemption at `machine` reach. Architecture: it departs from ADR-03's pattern, and
+NIT-005, NIT-006, and NIT-007 inherit it. Decision: repo-wide coverage, over per-checkout coverage. Record: "Name
+syntax for wider reach" is settled and accepted. It is recorded as Undecided in NIT-004's Decision Log.

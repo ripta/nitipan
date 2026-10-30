@@ -72,12 +72,10 @@ func (n *Node) stream(ctx context.Context) error {
 // so it stays queued.
 func (n *Node) handle(ctx context.Context, ev wire.Event) error {
 	if _, dup := n.seen[ev.ID]; !dup {
-		if n.opts.OnEvent != nil {
-			if err := n.opts.OnEvent(ev); err != nil {
-				n.warn(fmt.Sprintf("handling event %s (%s): %v", ev.ID, ev.Kind, err))
+		if err := n.handleEvent(ev); err != nil {
+			n.warn(fmt.Sprintf("handling event %s (%s): %v", ev.ID, ev.Kind, err))
 
-				return nil
-			}
+			return nil
 		}
 
 		n.remember(ev.ID)

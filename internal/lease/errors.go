@@ -72,3 +72,16 @@ func strayFileHint(reason record.Reason) string {
 	return ". Its name is not an ID, so no nitipan command can address it. After checking what it is, " +
 		"the user can delete the file by hand"
 }
+
+// CoveredError is the refusal of a claim that the caller's own leases already cover. It carries those
+// leases, so a wider-reach claim can take one as its anchor.
+type CoveredError struct {
+	Leases []*record.Record
+	msg    string
+}
+
+// Error implements error.
+func (e *CoveredError) Error() string { return e.msg }
+
+// Is matches the exit-status sentinel for an already covered claim.
+func (e *CoveredError) Is(target error) bool { return target == exitcode.ErrAlreadyCovered }

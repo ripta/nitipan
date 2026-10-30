@@ -11,11 +11,15 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/space-armada/nitipan/internal/config"
 	"github.com/space-armada/nitipan/internal/handoff"
+	"github.com/space-armada/nitipan/internal/keys"
+	"github.com/space-armada/nitipan/internal/liveness"
+	"github.com/space-armada/nitipan/internal/monoclock"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/wire"
@@ -84,6 +88,25 @@ type Options struct {
 	// sends it again after a reconnect.
 	OnEvent func(wire.Event) error
 
+	// Checker judges the liveness of the holders of broker leases. Nil reads every holder as alive.
+	Checker *liveness.Checker
+
+	// StateOptions are the state directory options the node takes its lock with.
+	StateOptions state.Options
+
+	// Finder finds checkout boundaries, for the check that an anchor still covers a lease's paths. Nil
+	// means no boundary exists.
+	Finder keys.BoundaryFinder
+
+	// Clock paces renewals. Default: CLOCK_MONOTONIC.
+	Clock monoclock.Clock
+
+	// WakeGap is how long the loop may go between ticks before the node treats the gap as a sleep.
+	// ReplyGrace is how long a reply may wait unread before it becomes a notice. Defaults: DefaultWakeGap
+	// and DefaultReplyGrace.
+	WakeGap    time.Duration
+	ReplyGrace time.Duration
+
 	// Warn receives warnings, such as plain HTTP. Nil drops them.
 	Warn func(string)
 
@@ -105,6 +128,10 @@ type Node struct {
 	seen   map[string]struct{}
 	seenQ  []string
 	forwrd map[string]Forwarder
+
+	book       *leaseBook
+	deadlineMu sync.Mutex
+	written    map[string]bool
 }
 
 // New validates the options. It touches no file and opens no connection.
@@ -139,10 +166,21 @@ func New(opts Options) (*Node, error) {
 		opts.Now = time.Now
 	}
 
+	if opts.Clock == nil {
+		opts.Clock = monoclock.System{}
+	}
+
+	if opts.WakeGap == 0 {
+		opts.WakeGap = DefaultWakeGap
+	}
+
 	n := &Node{
 		opts:  opts,
 		https: https,
 		seen:  map[string]struct{}{},
+		book:  newBook(),
+
+		written: map[string]bool{},
 		cl: &client{
 			base:      base,
 			http:      &http.Client{Transport: tr},
@@ -152,6 +190,7 @@ func New(opts Options) (*Node, error) {
 	}
 
 	n.forwrd = map[string]Forwarder{KindPing: n.forwardPing}
+	n.registerLeaseKinds()
 
 	for k, f := range opts.Forward {
 		n.forwrd[k] = f
@@ -272,6 +311,13 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 	n.term = time.Duration(reg.TermMillis) * time.Millisecond
 	n.keep = time.Duration(reg.KeepaliveMillis) * time.Millisecond
 
+	n.book.setConnected(true)
+
+	defer func() {
+		n.book.setConnected(false)
+		n.publishDeadlinesNow()
+	}()
+
 	sctx, cancel := context.WithCancel(ctx)
 	exited := make(chan struct{})
 
@@ -298,6 +344,10 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 	if err := n.sendSnapshot(sctx); err != nil {
 		return err
 	}
+
+	n.maintain(sctx)
+
+	lastTick := n.clockNow()
 
 	beat := n.opts.Heartbeat
 	if beat == 0 {
@@ -335,8 +385,23 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 			if err := n.heartbeat(sctx); err != nil {
 				return err
 			}
+
+			n.maintain(sctx)
 		case <-reqTick.C:
+			now := n.clockNow()
+
+			if now-lastTick > n.opts.WakeGap {
+				if err := n.sendSnapshot(sctx); err != nil {
+					return err
+				}
+
+				n.maintain(sctx)
+			}
+
+			lastTick = now
+
 			n.serveRequests(sctx)
+			n.deliverLate()
 		case <-execTick.C:
 			if n.executableChanged(exe) {
 				return ErrExecutableChanged
@@ -386,12 +451,7 @@ func (n *Node) register(ctx context.Context) (wire.Registered, error) {
 }
 
 func (n *Node) sendSnapshot(ctx context.Context) error {
-	snap, err := n.snapshot()
-	if err != nil {
-		return fmt.Errorf("reading the leases to mirror: %w", err)
-	}
-
-	return n.cl.call(ctx, wire.PathSnapshot, snap, nil)
+	return n.sendSnapshotAck(ctx)
 }
 
 func (n *Node) heartbeat(ctx context.Context) error {

@@ -160,6 +160,10 @@ const FootprintAll = "all"
 type Snapshot struct {
 	Version Version         `json:"version"`
 	Leases  []MirroredLease `json:"leases"`
+
+	// Acked lists the end facts the node has handled, so the broker can drop them. An older broker
+	// ignores it and keeps resending, which a node tolerates.
+	Acked []string `json:"acked,omitempty"`
 }
 
 // Heartbeat tells the broker the node's stream is alive.

@@ -477,16 +477,17 @@ routine reconnect while the broker still held the old stream.
 one person's machines. Which identity scopes a `user` lease before NIT-006 is open.
 
 Decision (autonomous): until NIT-006, each broker is one user scope. Every `user` lease on a broker conflicts with
-every other `user` lease on overlapping names, whatever its `holder.user`.
+every `user` lease of another holder on overlapping names, whatever its `holder.user`. One holder never conflicts with
+its own broker leases. Amended 2026-10-29; see Decision Log.
 
 - No name configures the scope. Nobody has been named who would set one
-- `user` and `shared` leases on overlapping names conflict
+- `user` and `shared` leases of different holders on overlapping names conflict
 - `acting_for` is carried unchanged on every broker lease, and is ignored for scope until NIT-006 defines its meaning.
   NIT-006 M1 then has a defined input
 - When NIT-006 splits the scope by authenticated user, leases only get narrower, which matches what callers asked for.
   Stored `repo:` names and `<handle>@<label>` addresses carry no user, so nothing stored changes meaning
 
-Amended 2026-10-24; see Decision Log. NIT-006 is accepted and scopes `user` leases by authenticated identity. Each
+NIT-006 is accepted and scopes `user` leases by authenticated identity. Each
 bound user is one user scope, named by a lease's `acting_for`, under NIT-006's "Session credential" and "Shared
 agents and acting_for". A `user` lease and another user's `shared` lease on overlapping names still conflict, with
 the refusal detail NIT-006's "`user` and `shared` leases across users" sets. The one-scope rule above holds until a
@@ -861,7 +862,7 @@ Amended 2026-10-24; see Decision Log.
 
 ### M2: Wider-reach leases
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `user` claims from checkouts of one repo on two machines derive overlapping root-set names and conflict. Shallow
   clones, an unborn HEAD, a graft file, and an uninitialized submodule are refused with their errors
@@ -881,7 +882,8 @@ Amended 2026-10-24; see Decision Log.
 - Releasing a `user` lease releases an anchor its claim created and left unchanged. It leaves an anchor that was
   already held, widened, merged, or shared with a second `user` lease, and says so, and the second lease survives
 - `break --force` of a `user` lease from another machine ends it, and the holder gets a notice naming the breaker
-- A `user` lease and a `shared` lease on overlapping names conflict
+- A `user` lease and a `shared` lease of different holders on overlapping names conflict. Amended 2026-10-29; see
+  Decision Log
 - A command run while the node is disconnected says the holder's broker leases are at risk and when they lapse, and
   past that time says they lapsed
 - A synchronous renew through the request handoff returns the lease's new expiry
@@ -889,6 +891,46 @@ Amended 2026-10-24; see Decision Log.
 - Old CLI with new node, new CLI with old node, old node with new broker, and new node with old broker each give the
   error "Version skew" states, in tests. A derivation version below the broker's floor is refused. A sidecar or anchor
   file the reader cannot use reads as unknown
+
+**As built:**
+
+- The CLI generates one ID that is both the request ID and the lease ID. A command whose reply the CLI did not see
+  leaves an in-flight record under `broker/inflight/`, so a retry of the same command reuses the ID and the broker
+  replays its outcome. The handoff request version is now 2, so a CLI of this build gets "node too old" from an M1
+  node at once.
+- The node delivers a reply nobody read within 90 seconds as a notice and removes the reply file. Its memory of whom to
+  notify is per process, so a node restart in that window drops the notice. The retry still returns the same answer.
+- Synchronous renew is a `renew` subcommand over a `renew` request kind. Plain `list` also shows the broker leases,
+  through a `list` request kind, and falls back to the holder's own sidecars with an `unknown` state when no live node
+  answers. `list --json` gained `broker_leases`, so its schema moved to 1.4.
+- The store keeps the 1.0 version. The grant, the outcome, and the counter ride in the `leases`, `outcomes`, and
+  `counter` fields M1 reserved. A taken or broken lease stays in `leases` with state `taken` or `ended` until its node
+  acks it in a snapshot. The counter bumps with each grant, and the grant's token is the counter value. Revival keeps
+  it.
+  Whether NIT-005 keeps that meaning is NIT-005's to settle.
+- The snapshot answer carries the node's leases, end facts included, and the snapshot request carries the acks. An
+  older node ignores the answer, and an older broker answers with no body, which a node accepts.
+- A holder never conflicts with its own leases at the broker. See the 2026-10-29 Decision Log entry on M2.
+- The node renews at a third of the term, checks anchors and holder liveness in the same pass, and treats a gap
+  between loop ticks larger than 5 seconds as a wake. The broker detects its own wake by comparing the monotonic clock
+  with Go's clock, which stops during sleep.
+- A lapsed lease whose anchor was merged into another lease by `--replace` has an anchor ID the snapshot no longer
+  lists, so the broker removes the lapsed lease. A live one survives, since the node follows `absorbs`.
+- A late refusal leaves an orphan record under `broker/orphans/`, keyed by the claim ID that its notice
+  targets. The next command that delivers the notice releases the anchor under the local lock, by the rules a release
+  uses. A refusal the CLI sees at once, and any definite failure, releases a new anchor on the spot. Only an unknown
+  outcome keeps it.
+- A release the CLI did not see answered keeps the sidecars it asked to remove in its in-flight record. A retry reads
+  them, so it still decides about a created anchor even though the node already removed the sidecar.
+- The node removes a sidecar for a release only when the holder key matches the requester's. A repeat claim that the
+  broker answers with the held lease writes no second sidecar, and an existing sidecar keeps its created flag.
+- A stored outcome is bound to the node that made the request, and another node's retry of the ID is refused. The
+  broker refuses a claim whose derivation is above the highest it knows (1), as "broker too old", and below its floor.
+- A request kind introduced after request version 1 is refused from a version 1 request as "node too old".
+- The "restored" notice fires when the node's own deadline passed with no acked renewal and a later renewal or snapshot
+  shows the lease live.
+- The root-set cache is a JSON file at `broker/rootsets.json`. A submodule entry covers the whole submodule, and a claim
+  inside a submodule emits its own entry first, then each superproject's.
 
 ### M3: Discovery queries
 
@@ -1046,6 +1088,16 @@ Amended 2026-10-24; see Decision Log.
   per ADR-07.
 - 2026-10-29: ADR candidate (cuts across the system): the node-broker channel never carries plaintext over a public
   path. Undecided. Found in NIT-004 M1.
+- 2026-10-29: Work-queue run best guess on M2, amending "Which user a user-reach lease belongs to" and M2's check on
+  `user` and `shared` leases: one holder never conflicts with its own broker leases. The text said every `user` lease
+  conflicts with every other `user` lease on overlapping names, and that `user` and `shared` leases on overlapping names
+  conflict, with no word on a holder against itself. As built, the same names again from the same holder return the
+  lease it holds, and overlapping names from the same holder are granted as another lease. A second `user` lease under
+  one anchor, which M2's shared-anchor check needs, cannot exist otherwise. If this is wrong, one comparison in the
+  broker's claim handler changes, and a second overlapping claim from the same holder is refused.
+- 2026-10-29: ADR candidate (departs from the past): at `user` and `shared` reach, a lease names a repo's files across
+  every checkout and worktree, unlike the checkout-boundary exemption ADR-03 sets for `machine` reach. Undecided.
+  Found in NIT-004 M2.
 
 ## References
 

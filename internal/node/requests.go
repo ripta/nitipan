@@ -95,9 +95,14 @@ func (n *Node) answer(ctx context.Context, req handoff.Request) handoff.Reply {
 		return fail(handoff.CodeTooOld, fmt.Sprintf("%v: the node does not know the %q request", handoff.ErrNodeTooOld, req.Kind))
 	}
 
+	if req.Version < handoff.KindSince(req.Kind) {
+		return fail(handoff.CodeTooOld, fmt.Sprintf("%v: the %q request needs request version %d, this request is version %d",
+			handoff.ErrNodeTooOld, req.Kind, handoff.KindSince(req.Kind), req.Version))
+	}
+
 	body, err := fwd(ctx, req)
 	if err != nil {
-		return fail(handoff.CodeBroker, err.Error())
+		return fail(classify(err), err.Error())
 	}
 
 	rep.Body = body

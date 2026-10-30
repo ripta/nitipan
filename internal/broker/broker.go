@@ -84,6 +84,10 @@ type Config struct {
 	// Version is the broker's build version.
 	Version string
 
+	// DerivationFloor is the lowest root-set derivation a user claim may carry. Default:
+	// DefaultDerivationFloor.
+	DerivationFloor int
+
 	// Derive makes a label. Default: DeriveLabel. A test injects a collision through it.
 	Derive func(machineID string, uid int) string
 
@@ -99,6 +103,13 @@ type Broker struct {
 
 	mu    sync.Mutex
 	nodes map[NodeKey]*nodeState
+
+	// g is the typed lease state. dl holds each live lease's deadline on the monotonic clock. Nothing
+	// lapses before graceUntil.
+	g          *gstate
+	dl         map[string]time.Duration
+	graceUntil time.Duration
+	lastSweep  time.Duration
 
 	failOnce sync.Once
 	failed   error
@@ -164,13 +175,23 @@ func New(cfg Config) *Broker {
 
 	_, _ = rand.Read(boot[:])
 
-	return &Broker{
+	if cfg.DerivationFloor == 0 {
+		cfg.DerivationFloor = DefaultDerivationFloor
+	}
+
+	b := &Broker{
 		cfg:   cfg,
 		store: cfg.Store,
 		boot:  hex.EncodeToString(boot[:]),
 		nodes: map[NodeKey]*nodeState{},
 		done:  make(chan struct{}),
 	}
+
+	if err := b.startGrants(); err != nil {
+		b.fail(err)
+	}
+
+	return b
 }
 
 // Done is closed when a store write failed. The broker must then exit, and launchd restarts it from
@@ -252,6 +273,11 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathSnapshot, b.authed(b.handleSnapshot))
 	mux.HandleFunc("POST "+wire.PathHeartbeat, b.authed(b.handleHeartbeat))
 	mux.HandleFunc("POST "+wire.PathPing, b.authed(b.handlePing))
+	mux.HandleFunc("POST "+wire.PathClaim, b.authed(b.handleClaim))
+	mux.HandleFunc("POST "+wire.PathRenew, b.authed(b.handleRenew))
+	mux.HandleFunc("POST "+wire.PathRelease, b.authed(b.handleRelease))
+	mux.HandleFunc("POST "+wire.PathBreak, b.authed(b.handleBreak))
+	mux.HandleFunc("POST "+wire.PathList, b.authed(b.handleList))
 
 	return mux
 }
@@ -458,9 +484,19 @@ func (b *Broker) handleSnapshot(w http.ResponseWriter, r *http.Request, key Node
 	ns.hasSnapshot = true
 
 	b.beatIfStreaming(ns)
+
+	b.sweepLocked()
+
+	mine := b.afterSnapshot(key, req.Acked)
 	b.mu.Unlock()
 
-	w.WriteHeader(http.StatusNoContent)
+	if len(mine) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, wire.SnapshotAck{Version: wire.Current, Leases: mine})
 }
 
 func (b *Broker) handleAck(w http.ResponseWriter, r *http.Request, key NodeKey) {
@@ -614,13 +650,17 @@ func (b *Broker) flush(w http.ResponseWriter, key NodeKey, sent int) (int, error
 // Enqueue queues an event for a node. It stays queued until the node acks it, and a node that
 // reconnects gets every unacked event again.
 func (b *Broker) Enqueue(key NodeKey, kind string, data any) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.enqueueLocked(key, kind, data)
+}
+
+func (b *Broker) enqueueLocked(key NodeKey, kind string, data any) (string, error) {
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return "", fmt.Errorf("encoding event data: %w", err)
 	}
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	if _, ok := b.store.Data().Nodes[key.String()]; !ok {
 		return "", fmt.Errorf("node %s: %w", key, ErrNoNode)
@@ -750,6 +790,8 @@ func (b *Broker) serveOn(ctx context.Context, ln net.Listener, certFile, keyFile
 	}
 
 	errc := make(chan error, 1)
+
+	go b.RunSweeper(base, max(b.cfg.Term/10, 10*time.Millisecond))
 
 	go func() {
 		if certFile != "" {

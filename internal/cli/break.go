@@ -49,6 +49,36 @@ func (a *app) runBreak(cmd *cobra.Command, ids []string) error {
 		return fmt.Errorf("reading --force: %w", err)
 	}
 
+	stateDir, err := a.deps.StateDir()
+	if err != nil {
+		return fmt.Errorf("resolving the state directory: %w", err)
+	}
+
+	var remote []string
+
+	local := ids[:0:0]
+
+	for _, id := range ids {
+		if isLocalID(stateDir, id) {
+			local = append(local, id)
+		} else {
+			remote = append(remote, id)
+		}
+	}
+
+	if len(remote) > 0 && len(local) == 0 {
+		if _, err := a.requireNode(); err == nil {
+			return a.runBreakBroker(stateDir, remote, force)
+		}
+	}
+
+	var brokerErr error
+
+	if len(remote) > 0 && len(local) > 0 {
+		brokerErr = a.runBreakBroker(stateDir, remote, force)
+		ids = local
+	}
+
 	req := lease.BreakRequest{IDs: ids, Force: force}
 
 	req.Caller, req.CallerErr = a.resolver().Resolve().Caller()
@@ -59,6 +89,10 @@ func (a *app) runBreak(cmd *cobra.Command, ids []string) error {
 	}
 
 	res, err := e.Break(req)
+	if brokerErr != nil {
+		defer func() { fmt.Fprintf(a.deps.Stderr, "nitipan: %v\n", brokerErr) }()
+	}
+
 	if res != nil {
 		for _, t := range res.Targets {
 			fmt.Fprintln(a.deps.Stdout, breakLine(t))

@@ -39,7 +39,7 @@ const (
 // Versions this binary writes. A reader refuses a version it does not know, and a node keeps
 // answering every request version it ever accepted.
 const (
-	RequestVersion  = 1
+	RequestVersion  = 2
 	PresenceVersion = 1
 )
 
@@ -100,6 +100,9 @@ const (
 	CodeExpired = "request_expired"
 	CodeTooOld  = "node_too_old"
 	CodeBroker  = "broker_error"
+
+	// CodeBrokerTooOld means the broker does not serve the call the request needs.
+	CodeBrokerTooOld = "broker_too_old"
 )
 
 // ReplyError says why a request failed.
@@ -223,7 +226,12 @@ func Require(root string, checker *liveness.Checker, install string) (Presence, 
 
 // Submit publishes a request into pending. It takes no lock, and the request appears all at once.
 func Submit(root string, req Request) error {
-	req.Version = RequestVersion
+	return SubmitVersion(root, req, RequestVersion)
+}
+
+// SubmitVersion is Submit with an explicit request version. A test stands in for an older CLI with it.
+func SubmitVersion(root string, req Request, version int) error {
+	req.Version = version
 
 	if !state.ValidID(req.ID) {
 		return fmt.Errorf("%q: %w", req.ID, state.ErrBadID)

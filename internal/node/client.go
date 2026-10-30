@@ -161,6 +161,15 @@ func (c *client) request(ctx context.Context, method, path string, body io.Reade
 // call posts a message and decodes the answer into out when it is not nil. The whole call has a
 // deadline, so a broker that accepts the connection and never answers cannot stall the session.
 func (c *client) call(ctx context.Context, path string, in, out any) error {
+	return c.do(ctx, path, in, out, false)
+}
+
+// callOpt is call for an answer that may be empty, as an older broker's snapshot answer is.
+func (c *client) callOpt(ctx context.Context, path string, in, out any) error {
+	return c.do(ctx, path, in, out, true)
+}
+
+func (c *client) do(ctx context.Context, path string, in, out any, optional bool) error {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 
@@ -181,15 +190,23 @@ func (c *client) call(ctx context.Context, path string, in, out any) error {
 
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("calling %s: this broker does not serve it: %w", path, ErrBrokerTooOld)
+	}
+
 	if resp.StatusCode/100 != 2 {
 		return decodeError(path, resp)
 	}
 
-	if out == nil {
+	if out == nil || resp.StatusCode == http.StatusNoContent {
 		return nil
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		if optional && errors.Is(err, io.EOF) {
+			return nil
+		}
+
 		return fmt.Errorf("decoding the %s answer: %w", path, err)
 	}
 

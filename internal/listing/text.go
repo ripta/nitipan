@@ -311,3 +311,48 @@ func orNone(s string) string {
 
 	return s
 }
+
+// WriteBroker prints the broker leases after the local ones.
+func WriteBroker(w io.Writer, leases []BrokerLease) error {
+	if len(leases) == 0 {
+		return nil
+	}
+
+	var b strings.Builder
+
+	b.WriteString("\nbroker leases:\n")
+
+	for _, l := range leases {
+		fmt.Fprintf(&b, "%s  %s  %s", l.ID, l.Reach, l.State)
+
+		if l.Mine {
+			b.WriteString("  (yours)")
+		}
+
+		if l.Liveness == "unknown" {
+			b.WriteString("  (holder liveness unknown, which counts as alive)")
+		}
+
+		fmt.Fprintf(&b, "\n  names:  %s\n  holder: %s", strings.Join(l.Names, ", "), l.Holder)
+
+		if l.Node != "" {
+			fmt.Fprintf(&b, " on %s", l.Node)
+		}
+
+		fmt.Fprintf(&b, "\n  anchor: %s\n", l.Anchor)
+
+		if l.Expires != "" {
+			fmt.Fprintf(&b, "  expires: %s\n", l.Expires)
+		}
+
+		if l.Risk != "" {
+			fmt.Fprintf(&b, "  %s\n", l.Risk)
+		}
+	}
+
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return fmt.Errorf("writing the broker leases: %w", err)
+	}
+
+	return nil
+}

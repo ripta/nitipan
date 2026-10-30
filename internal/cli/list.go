@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/listing"
 )
@@ -76,12 +77,22 @@ func (a *app) runList(cmd *cobra.Command) error {
 		return err
 	}
 
+	var me *adapter.Holder
+	if callerErr == nil {
+		me = caller.Holder
+	}
+
 	req.Emit = func(out listing.Output) error {
+		if req.Domain == nil && req.Resource == "" {
+			out.BrokerLeases = a.brokerLeases(me)
+		}
+
 		for _, t := range out.Tombstones {
 			fmt.Fprintf(a.deps.Stderr, "nitipan: tombstone %s: %s\n", t.Action, t.Summary)
 		}
 
 		for _, n := range out.Notices {
+			a.noteNoticed(n.Target)
 			a.printRecordNotice(n.Summary)
 		}
 
@@ -89,7 +100,11 @@ func (a *app) runList(cmd *cobra.Command) error {
 			return listing.Encode(a.deps.Stdout, out)
 		}
 
-		return listing.WriteText(a.deps.Stdout, out)
+		if err := listing.WriteText(a.deps.Stdout, out); err != nil {
+			return err
+		}
+
+		return listing.WriteBroker(a.deps.Stdout, out.BrokerLeases)
 	}
 
 	res, err := e.List(req)
@@ -104,6 +119,10 @@ func (a *app) runList(cmd *cobra.Command) error {
 
 	if callerErr != nil {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%v; tombstones and notices are not delivered", callerErr))
+	}
+
+	if me != nil {
+		a.reportRisk(*me)
 	}
 
 	for _, w := range res.Warnings {
