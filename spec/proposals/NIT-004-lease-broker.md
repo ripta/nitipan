@@ -1,8 +1,8 @@
 # NIT-004: Lease Broker
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-10-30
+**Updated:** 2026-11-08
 
 ## Dependencies
 
