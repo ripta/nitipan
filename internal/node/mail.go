@@ -419,31 +419,49 @@ func (n *Node) expiredMail(now time.Time) []mailbox.Message {
 	return due
 }
 
+// pendingRing is one socket ring the node has decided to make.
+type pendingRing struct {
+	ad   adapter.Adapter
+	reg  mailbox.Registration
+	keys []string
+}
+
 // ringMail rings every live Claude Code session that has unrung mail and no live waiter. The socket
 // ring is the fallback to the waiter, so a message the waiter already rang is never rung again.
+//
+// The registrations are judged under the mail lock. The dial and the write are not, since a socket
+// that accepts and never reads would otherwise stall every other mail call on the node.
 func (n *Node) ringMail() {
 	if !n.https {
 		return
 	}
 
+	for _, p := range n.pendingRings() {
+		n.ringSocket(p.ad, p.reg, p.keys)
+	}
+}
+
+func (n *Node) pendingRings() []pendingRing {
 	n.mailMu.Lock()
 	defer n.mailMu.Unlock()
 
 	root := n.opts.StateDir
 
 	if names, err := state.ListNames(root, mailbox.InboxDir); err != nil || len(names) == 0 {
-		return
+		return nil
 	}
 
 	regs, _, err := mailbox.Registrations(root)
 	if err != nil || len(regs) == 0 {
-		return
+		return nil
 	}
 
 	msgs, _ := mailbox.All(root)
 	if len(msgs) == 0 {
-		return
+		return nil
 	}
+
+	var out []pendingRing
 
 	for _, r := range regs {
 		ad, ok := adapter.ByName(r.Agent)
@@ -461,9 +479,11 @@ func (n *Node) ringMail() {
 		}
 
 		if len(keys) > 0 {
-			n.ringSocket(ad, r, keys)
+			out = append(out, pendingRing{ad: ad, reg: r, keys: keys})
 		}
 	}
+
+	return out
 }
 
 func (n *Node) waiterLive(r mailbox.Registration) bool {
@@ -512,7 +532,7 @@ func (n *Node) ringSocket(ad adapter.Adapter, r mailbox.Registration, keys []str
 		return
 	}
 
-	if err := dialRing(r, len(fresh)); err != nil {
+	if err := ringDialer(r, len(fresh)); err != nil {
 		_ = mailbox.Unclaim(n.opts.StateDir, r.Identity, fresh)
 
 		n.ringMu.Lock()
@@ -522,6 +542,9 @@ func (n *Node) ringSocket(ad adapter.Adapter, r mailbox.Registration, keys []str
 		n.warn(fmt.Sprintf("ringing the %s session %s: %v", ad.Name, r.Current, err))
 	}
 }
+
+// ringDialer is how the node reaches a session's inbox socket. Tests replace it to hold a ring open.
+var ringDialer = dialRing
 
 // ringLine is the line a ring writes to a Claude Code inbox socket. Its body format is undocumented,
 // and only the auth line is. The node never sends the auth line: posting with the session's token would

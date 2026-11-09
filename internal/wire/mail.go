@@ -15,6 +15,11 @@ const MailCapability = 1
 // keeps queued and bounced mail small in the whole-file store.
 const MaxMailBody = 64 << 10
 
+// MaxSnapshotSessions is the most mailbox sessions the broker reads from one snapshot. It reads the
+// first ones in the order the node listed them, and logs the rest as refused. A node that holds this
+// many registrations has stopped reaping the dead ones.
+const MaxSnapshotSessions = 256
+
 // MailRetention is how long the broker holds mail it never sent, how long a node keeps stored mail
 // for a session that is not running, and how long a bounce that cannot reach its sender is kept.
 const MailRetention = 7 * 24 * time.Hour

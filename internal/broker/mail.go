@@ -8,33 +8,79 @@ import (
 	"strings"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/session"
 	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
+// maxLabelSessions is the most session IDs the broker stores for one label. An address once reported
+// stays valid, so the set only grows. This bound is about 1 MiB of store per label. At 10 new sessions a
+// day it lasts about 2.7 years. A label that reaches it refuses new IDs with a logged reason, and
+// forgetting the label does not clear them.
+const maxLabelSessions = 10000
+
 // noteSessionsLocked records the sessions a node reported. The live set replaces the last one. An ID
 // the label never reported before joins the stored set, which only grows.
+//
+// Only a pinned label's sessions are read. A pending label can neither send nor receive mail, and its
+// key proves nothing yet. The broker reads the first wire.MaxSnapshotSessions entries and refuses an
+// entry whose agent has no mail name or whose ID is not safe in a file name. It refuses a new ID once
+// the label holds maxLabelSessions. Each refusal is logged with its reason, and none is dropped quietly.
 func (b *Broker) noteSessionsLocked(key NodeKey, ns *nodeState, sessions []wire.MailSession) {
-	live := make(map[string]bool, len(sessions))
 	label := b.store.Data().Nodes[key.String()].Label
+
+	if label == "" || !b.pinnedLocked(label) {
+		ns.liveSessions = nil
+
+		return
+	}
+
+	if len(sessions) > wire.MaxSnapshotSessions {
+		b.cfg.Logger.Warn("mail sessions refused: the snapshot lists too many", "label", label,
+			"reported", len(sessions), "limit", wire.MaxSnapshotSessions, "refused", len(sessions)-wire.MaxSnapshotSessions)
+
+		sessions = sessions[:wire.MaxSnapshotSessions]
+	}
+
+	live := make(map[string]bool, len(sessions))
+	stored := b.store.Data().Sessions[label]
 
 	var fresh []wire.MailSession
 
+	invalid, overCap := 0, 0
+
 	for _, s := range sessions {
-		if s.SessionID == "" || s.Agent == "" {
+		if !mailableAgent(s.Agent) || !session.ValidSession(s.SessionID) {
+			invalid++
+
 			continue
+		}
+
+		if _, known := stored[s.SessionID]; !known {
+			if len(stored)+len(fresh) >= maxLabelSessions {
+				overCap++
+
+				continue
+			}
+
+			fresh = append(fresh, s)
 		}
 
 		if s.Live {
 			live[s.SessionID] = true
 		}
-
-		if _, known := b.store.Data().Sessions[label][s.SessionID]; !known && label != "" {
-			fresh = append(fresh, s)
-		}
 	}
 
 	ns.liveSessions = live
+
+	if invalid > 0 {
+		b.cfg.Logger.Warn("mail sessions refused: unknown agent or unsafe session ID", "label", label, "refused", invalid)
+	}
+
+	if overCap > 0 {
+		b.cfg.Logger.Warn("mail sessions refused: the label already stores the most it may", "label", label,
+			"limit", maxLabelSessions, "refused", overCap)
+	}
 
 	if len(fresh) == 0 {
 		return
@@ -53,6 +99,16 @@ func (b *Broker) noteSessionsLocked(key NodeKey, ns *nodeState, sessions []wire.
 
 		return nil
 	})
+}
+
+// mailableAgent reports whether an agent has a mail name derivation.
+func mailableAgent(agent string) bool {
+	switch agent {
+	case agentClaude, agentCodex, agentOpencode:
+		return true
+	}
+
+	return false
 }
 
 // resolveRecipientLocked finds the session ID a mail name stands for under a label.

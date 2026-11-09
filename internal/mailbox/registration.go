@@ -65,7 +65,8 @@ func (r Registration) Holds(sessionID string) bool { return slices.Contains(r.Se
 
 // Refresh writes a registration, merging the session IDs of an earlier one for the same identity. A
 // later registration replaces the earlier one, which is how an endpoint is refreshed. It leaves a file
-// of a newer minor alone and returns ErrNewer.
+// of a newer minor alone and returns ErrNewer. It leaves any other file it cannot read alone too, so a
+// truncated or mismatched file keeps the session IDs it names until a person looks at it.
 func Refresh(root string, r Registration, now time.Time) (Registration, error) {
 	if !session.ValidSession(r.Current) {
 		return r, fmt.Errorf("session ID %q: %w", r.Current, ErrBadName)
@@ -92,8 +93,8 @@ func Refresh(root string, r Registration, now time.Time) (Registration, error) {
 
 		r.SessionIDs = merged
 	case errors.Is(err, fs.ErrNotExist):
-	case errors.Is(err, ErrUnknownVersion):
-		return r, fmt.Errorf("registration %s: %w", r.Identity, err)
+	default:
+		return r, fmt.Errorf("registration %s is not rewritten: %w", r.Identity, err)
 	}
 
 	if !slices.Contains(r.SessionIDs, r.Current) {
@@ -175,16 +176,58 @@ func Live(r Registration, c *liveness.Checker) bool {
 	return c.Check(r.Envelope()).Status != liveness.Dead
 }
 
-// RemoveRegistration deletes a registration with its ring ledger and waiter presence.
+// RemoveRegistration deletes a registration with its ring ledger and waiter presence. It removes only
+// a file this binary can decode, of its own major and no higher minor. A registration it must leave
+// keeps its ledger and presence beside it, and a ledger or presence it must leave stays when the
+// rest goes. A leftover registration still reads as dead, so nothing rings it.
 func RemoveRegistration(root, identity string) error {
 	for _, sub := range []string{RegDir, RingDir, WaitDir} {
-		err := os.Remove(filepath.Join(root, sub, identity+fileSuffix))
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		path := filepath.Join(root, sub, identity+fileSuffix)
+
+		ok, err := removable(path)
+		if err != nil {
+			return err
+		}
+
+		if !ok {
+			if sub == RegDir {
+				return nil
+			}
+
+			continue
+		}
+
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("removing %s/%s: %w", sub, identity, err)
 		}
 	}
 
 	return nil
+}
+
+// versioned is the part of a mail file that says which version wrote it.
+type versioned struct {
+	Version record.Version `json:"version"`
+}
+
+// removable reports whether a file may be deleted. A missing file is removable, since removing it is
+// a no-op.
+func removable(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", path, err)
+	}
+
+	var v versioned
+	if json.Unmarshal(data, &v) != nil {
+		return false, nil
+	}
+
+	return v.Version.Major == Version.Major && v.Version.Minor <= Version.Minor, nil
 }
 
 // Resolution is how a stored message's session ID maps onto live registrations.

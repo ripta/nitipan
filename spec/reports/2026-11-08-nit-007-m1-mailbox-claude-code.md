@@ -189,3 +189,65 @@ Checks: `make ci TEST_ARGS=-count=1` passed uncached, with 0 lint issues. `propo
 row-finish finding, and `freeze` returned `[]`. Test cost from that run: `internal/cli` 300.6 s, `internal/node`
 31.6 s, `internal/broker` 8.7 s, `internal/setup` 10.8 s, `internal/gitfence` 10.2 s, `internal/state` 2.1 s,
 `internal/mailbox` 1.4 s, `internal/handoff` 1.3 s, `internal/adapter` 1.0 s.
+
+Commit: `nitipan: carry mail between one user's sessions across machines`, carrying the code, the NIT-007 and NIT-008
+edits, and this report.
+
+## Row review
+
+A reviewer and an ADR-impact agent ran on the range from the base commit to the milestone commit.
+`proposals.py freeze` with the milestone commit as the row commit returned `[]`. Findings and their triage:
+
+1. CONFIRMED, security: the broker stores every session a snapshot reports, with no validation and no cap, even for a
+   pending label. The whole-file store grows, and so does the per-send name derivation. Fix
+2. Proposal: the Claude Code-only gate, the rule that a sender must be a mailable live holder, the rule that an
+   unpinned stream gets no mail, and forget resetting `Sent` appear only in the Decision Log, with no marker on the text
+   they change. Fix
+3. Proposal: NIT-006 says a kept previous store holds NIT-007's keys in the clear. Only hashes are stored. Fix, per
+   the project's rule to make cross-proposal edits
+4. PLAUSIBLE: the node holds its mail lock across the socket dial and write. A socket that accepts and never reads can
+   stall snapshots for seconds. Trace
+5. Verify: whether the "Version skew" text covers handoff request version 4 in every CLI, node, and broker
+   direction. Trace
+6. PLAUSIBLE, ADR-04: `Refresh` overwrites a registration it cannot decode. Trace
+7. PLAUSIBLE, ADR-04: the dead-process reap removes ring and waiter files without checking their versions. Trace
+
+ADR impact found ADR-01, ADR-05, ADR-06, ADR-07, and ADR-08 consistent. It confirmed that the milestone review's
+ADR-04 fixes hold, apart from finding 6. It noted that the pre-approval fingerprint is a 64-bit hash prefix, a strength
+question rather than an ADR conflict. No uncovered decision clears the ADR bar.
+
+A fresh implementer took the fixes and traces. Outcomes:
+
+1. Fixed. The regression tests failed first. The broker now records sessions only from a pinned label. It refuses an
+   agent with no mail name and an ID that fails `session.ValidSession`. It takes at most 256 sessions per snapshot and
+   stores at most 10,000 per label, logging each refusal. Three broker tests had relied on a pending label's sessions
+   and were reworked to approve, report, then forget
+2. Fixed. Each of the four behaviors is now amended in place with one marker. The two M1 check bullets now say
+   "A Claude Code session"
+3. Fixed. NIT-006 now says the kept store holds the hashes of NIT-007's keys, in both places, with a marker and a log
+   entry
+4. Confirmed and fixed. A test holding a ring dial open stalled `mailSessions` on the unfixed code. The node now
+   collects rings under its lock and dials after releasing it
+5. Partly missing, now added. NIT-007 gained a "Delivery guarantees" bullet for the CLI, node, and broker directions of
+   request version 4. The store's 1.1 stamp keeps no previous file, so a rollback below 1.1 needs a copy taken before
+   the upgrade. That is now stated
+6. Confirmed and fixed. The test failed first for a non-JSON file, a field mismatch, and a missing current session ID.
+   `Refresh` now refuses on any read error except a missing file
+7. Confirmed and fixed. The test failed first for four cases. The reap now removes only files this binary can use, and
+   keeps a registration's ring and waiter files when the registration itself must stay
+
+Best guesses the implementer added:
+
+- The caps are 256 sessions per snapshot and 10,000 per label. No source gives a number. 10,000 is about 2.7 years at
+  10 new sessions a day. At the cap, new sessions on that label stop being mailable, since "an address once reported
+  stays valid" rules out eviction. If wrong, raise the constant or design pruning
+- Mail to a label never approved now gets "no such session", because the broker holds no address for it. A forgotten
+  label keeps its addresses, so its mail still waits. This takes "Auth"'s rule that a pending label can neither send
+  nor receive strictly. If wrong, pending labels record sessions again, with validation and caps
+- A refusal at the cap is logged on the broker only. The node gets no signal
+
+Checks: `make ci TEST_ARGS=-count=1` passed, with 0 lint issues. `proposals.py freeze` with the milestone commit
+returned `[]`. `proposals.py check` reported only the row-finish finding. Test cost: `internal/cli` 293 s,
+`internal/node` 32.4 s, `internal/broker` 10.6 s, `internal/mailbox` 1.6 s.
+
+Commit: `nitipan: bound the sessions a label can report for mail`.

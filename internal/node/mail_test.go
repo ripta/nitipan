@@ -611,3 +611,56 @@ func TestAnUnusableRegistrationMakesItsSessionUnknownSoItsMailIsNeverExpired(t *
 		t.Error("the unreadable registration was reaped")
 	}
 }
+
+func TestASocketRingThatNeverReturnsDoesNotStallTheNodesOtherMailCalls(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	old := ringDialer
+
+	ringDialer = func(mailbox.Registration, int) error {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+
+		<-release
+
+		return nil
+	}
+
+	t.Cleanup(func() { ringDialer = old })
+
+	mp := newMailPair(t, nil)
+
+	t.Cleanup(func() { close(release) })
+
+	path, _ := inboxSocket(t)
+
+	mp.register(t, mp.r.state, testMachine, os.Getpid(), startA, "sess-a", "")
+	mp.register(t, mp.bState, secondMachine, os.Getpid(), startA, "sess-b", path)
+	to := mp.address(t, mp.b, secondMachine, "sess-b")
+
+	if _, rep := mp.send(t, mp.r.state, testMachine, to, "x"); rep.Error != nil {
+		t.Fatalf("send failed: %+v", rep.Error)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the node never tried the ring")
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		mp.b.n.mailSessions()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listing the mail sessions waited on a ring that was still dialing")
+	}
+}

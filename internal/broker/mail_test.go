@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -268,8 +269,14 @@ func TestANewLabelCanNeitherSendNorReceiveMailUntilApproved(t *testing.T) {
 
 	// alice is approved. bob registers but is not.
 	h.mailNode(alice, senderSession)
-	bobLabel := h.registerMail(bob)
-	h.reportSessions(bob, recipientSession)
+	bobLabel := h.mailNode(bob, recipientSession)
+
+	// Forgetting the label makes it pending again, and its reported addresses stay valid.
+	if err := h.b.Forget(bobLabel); err != nil {
+		t.Fatal(err)
+	}
+
+	h.registerMail(bob)
 
 	to := h.mailName(bobLabel, recipientSession)
 
@@ -295,8 +302,13 @@ func TestAPendingLabelStillGetsLeaseServiceButNoMailEvent(t *testing.T) {
 	h := newHarness(t, nil)
 
 	h.mailNode(alice, senderSession)
-	label := h.registerMail(bob)
-	h.reportSessions(bob, recipientSession)
+	label := h.mailNode(bob, recipientSession)
+
+	if err := h.b.Forget(label); err != nil {
+		t.Fatal(err)
+	}
+
+	h.registerMail(bob)
 
 	if resp := h.send(alice, mailIDs[0], h.mailName(label, recipientSession), "wait", senderSession); resp.StatusCode != http.StatusOK {
 		t.Fatalf("send status %d", resp.StatusCode)
@@ -725,9 +737,9 @@ func TestAnOldNodeGetsNoMailAndTheSenderLearnsTheRecipientNodeIsTooOld(t *testin
 
 	h.mailNode(alice, senderSession)
 
-	// bob predates mail: it registers no capability. The broker still learned its session.
-	label := h.register(bob).Label
-	h.reportSessions(bob, recipientSession)
+	// bob comes back as an older binary after it reported a session: same key, no capability.
+	label := h.mailNode(bob, recipientSession)
+	h.register(bob)
 
 	resp := h.send(alice, mailIDs[0], h.mailName(label, recipientSession), "x", senderSession)
 	if resp.StatusCode != http.StatusConflict {
@@ -866,8 +878,13 @@ func TestAnAddressOnceReportedStaysValidAndMailQueuedForAnUnapprovedLabelBounces
 	h := newHarness(t, nil)
 
 	h.mailNode(alice, senderSession)
-	bobLabel := h.registerMail(bob)
-	h.reportSessions(bob, recipientSession)
+	bobLabel := h.mailNode(bob, recipientSession)
+
+	if err := h.b.Forget(bobLabel); err != nil {
+		t.Fatal(err)
+	}
+
+	h.registerMail(bob)
 
 	to := h.mailName(bobLabel, recipientSession)
 
@@ -930,8 +947,13 @@ func TestApprovingTheRealKeyClosesAnImpostorsOpenStreamAndSendsItNoMail(t *testi
 
 	h.mailNode(alice, senderSession)
 
-	label := h.registerMail(bob)
-	h.reportSessions(bob, recipientSession)
+	label := h.mailNode(bob, recipientSession)
+
+	if err := h.b.Forget(label); err != nil {
+		t.Fatal(err)
+	}
+
+	h.registerMail(bob)
 
 	// A host on the LAN registers under the sleeping machine's label with a key of its own, and opens a
 	// stream. The label is unpinned, so the live-stream rule accepts it.
@@ -985,5 +1007,122 @@ func TestApprovingTheRealKeyClosesAnImpostorsOpenStreamAndSendsItNoMail(t *testi
 
 	if got := h.data().Mail[mailIDs[0]]; got.Sent {
 		t.Error("the broker marked the message sent to a stream that did not hold the pinned key")
+	}
+}
+
+func (h *harness) reportRaw(n nodeID, sessions ...wire.MailSession) {
+	h.t.Helper()
+
+	resp := h.do(http.MethodPost, wire.PathSnapshot, n, wire.Snapshot{Version: wire.Current, Sessions: sessions})
+	if resp.StatusCode/100 != 2 {
+		h.t.Fatalf("snapshot status %d", resp.StatusCode)
+	}
+}
+
+func TestAReportedSessionWithAnUnknownAgentOrAnUnsafeIDIsNotStored(t *testing.T) {
+	h := newHarness(t, nil)
+
+	label := h.mailNode(alice, senderSession)
+
+	h.reportRaw(alice,
+		wire.MailSession{Agent: "claude", SessionID: senderSession, Live: true},
+		wire.MailSession{Agent: "mallory", SessionID: "sess-odd-agent", Live: true},
+		wire.MailSession{Agent: "claude", SessionID: "../escape", Live: true},
+		wire.MailSession{Agent: "claude", SessionID: strings.Repeat("a", 129), Live: true},
+	)
+
+	got := h.data().Sessions[label]
+	if len(got) != 1 || got[senderSession].Agent != "claude" {
+		t.Errorf("stored sessions = %+v, want only %s", got, senderSession)
+	}
+}
+
+func TestAPendingLabelsReportedSessionsAreNotStored(t *testing.T) {
+	h := newHarness(t, nil)
+
+	label := h.registerMail(bob)
+	h.reportSessions(bob, recipientSession)
+
+	if got := h.data().Sessions[label]; len(got) != 0 {
+		t.Errorf("a label no one approved stored sessions %+v", got)
+	}
+
+	h.approve(bob, label)
+	h.reportSessions(bob, recipientSession)
+
+	if _, ok := h.data().Sessions[label][recipientSession]; !ok {
+		t.Error("an approved label's next report was not stored")
+	}
+}
+
+func TestASnapshotPastItsSessionCapKeepsTheFirstOnesAndLogsTheRest(t *testing.T) {
+	var logs strings.Builder
+
+	h := newHarness(t, func(c *Config) {
+		c.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+
+	label := h.mailNode(alice, senderSession)
+
+	ms := []wire.MailSession{{Agent: "claude", SessionID: senderSession, Live: true}}
+
+	for i := range wire.MaxSnapshotSessions + 2 {
+		ms = append(ms, wire.MailSession{Agent: "claude", SessionID: fmt.Sprintf("sess-%04d", i), Live: true})
+	}
+
+	h.reportRaw(alice, ms...)
+
+	if got := len(h.data().Sessions[label]); got != wire.MaxSnapshotSessions {
+		t.Errorf("stored %d sessions from one snapshot, want %d", got, wire.MaxSnapshotSessions)
+	}
+
+	if _, ok := h.data().Sessions[label][ms[len(ms)-1].SessionID]; ok {
+		t.Error("a session past the cap was stored")
+	}
+
+	if !strings.Contains(logs.String(), "refused") {
+		t.Errorf("the refusal was not logged: %q", logs.String())
+	}
+}
+
+func TestALabelAtItsStoredSessionCapRefusesNewIDsAndKeepsKnownOnesLive(t *testing.T) {
+	var logs strings.Builder
+
+	h := newHarness(t, func(c *Config) {
+		c.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+
+	label := h.mailNode(alice, senderSession)
+
+	err := h.b.commit(func(d *Data) error {
+		for i := range maxLabelSessions {
+			d.Sessions[label][fmt.Sprintf("filler-%05d", i)] = SessionRecord{Agent: "claude", NameVersion: MailNameDerivation}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h.reportRaw(alice,
+		wire.MailSession{Agent: "claude", SessionID: senderSession, Live: true},
+		wire.MailSession{Agent: "claude", SessionID: "sess-one-too-many", Live: true},
+	)
+
+	if _, ok := h.data().Sessions[label]["sess-one-too-many"]; ok {
+		t.Error("a new session was stored past the label's cap")
+	}
+
+	if !strings.Contains(logs.String(), "refused") {
+		t.Errorf("the refusal was not logged: %q", logs.String())
+	}
+
+	h.b.mu.Lock()
+	live := h.b.node(alice.key()).liveSessions
+	h.b.mu.Unlock()
+
+	if !live[senderSession] || live["sess-one-too-many"] {
+		t.Errorf("live set = %v, want the known session only", live)
 	}
 }

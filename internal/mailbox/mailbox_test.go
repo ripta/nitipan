@@ -208,6 +208,123 @@ func TestRefreshKeepsEverySessionIDAndRefusesAFileOfANewerMinor(t *testing.T) {
 	}
 }
 
+var refreshUnusableTests = []refreshUnusableTest{
+	{Name: "not JSON", Body: `{"version":`},
+	{Name: "fields that do not match", Body: `{"version":"1.0","identity":"other","agent":"claude","pid":10,"current":"sess-9","session_ids":["sess-9"]}`},
+	{Name: "no current session", Body: `{"version":"1.0","agent":"claude","pid":10,"session_ids":["sess-9","sess-8"]}`},
+}
+
+type refreshUnusableTest struct {
+	Name string
+	Body string
+}
+
+func TestRefreshNeverRewritesARegistrationItCannotUse(t *testing.T) {
+	for _, test := range refreshUnusableTests {
+		t.Run(test.Name, func(t *testing.T) {
+			root := t.TempDir()
+
+			first, err := Refresh(root, reg(10, "sess-1"), t0)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			path := filepath.Join(root, RegDir, first.Identity+".json")
+
+			if err := os.WriteFile(path, []byte(test.Body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := Refresh(root, reg(10, "sess-3"), t0.Add(time.Minute)); err == nil {
+				t.Error("refresh over an unusable registration succeeded")
+			}
+
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if string(got) != test.Body {
+				t.Errorf("the unusable registration was rewritten to %s", got)
+			}
+		})
+	}
+}
+
+var removeRegistrationTests = []removeRegistrationTest{
+	{Name: "a usable registration goes with its siblings", Reg: "", Ring: "", Wait: "", WantReg: false, WantRing: false, WantWait: false},
+	{Name: "a registration of a newer minor stays with its siblings", Reg: "1.7", Ring: "", Wait: "", WantReg: true, WantRing: true, WantWait: true},
+	{Name: "a ledger of a newer minor stays", Reg: "", Ring: "1.7", Wait: "", WantReg: false, WantRing: true, WantWait: false},
+	{Name: "a presence file of an unknown major stays", Reg: "", Ring: "", Wait: "3.0", WantReg: false, WantRing: false, WantWait: true},
+	{Name: "a presence file that cannot be decoded stays", Reg: "", Ring: "", Wait: "garbage", WantReg: false, WantRing: false, WantWait: true},
+}
+
+type removeRegistrationTest struct {
+	Name string
+	Reg  string
+	Ring string
+	Wait string
+
+	WantReg  bool
+	WantRing bool
+	WantWait bool
+}
+
+func TestRemoveRegistrationNeverRemovesAFileItCannotUseOrOfANewerVersion(t *testing.T) {
+	for _, test := range removeRegistrationTests {
+		t.Run(test.Name, func(t *testing.T) {
+			root := t.TempDir()
+
+			r, err := Refresh(root, reg(10, "sess-1"), t0)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := Claim(root, r.Identity, []string{"mail:x"}, t0); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := Arm(root, WaiterPresence{Identity: r.Identity, PID: 11, Start: startOne, Machine: machine, ArmedAt: t0}); err != nil {
+				t.Fatal(err)
+			}
+
+			overwrite := func(sub, version string) {
+				body := `{"version":"` + version + `","identity":"` + r.Identity + `","pid":11,"rung":{}}`
+				if version == "garbage" {
+					body = "garbage"
+				}
+
+				if err := os.WriteFile(filepath.Join(root, sub, r.Identity+".json"), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if test.Reg != "" {
+				overwrite(RegDir, test.Reg)
+			}
+
+			if test.Ring != "" {
+				overwrite(RingDir, test.Ring)
+			}
+
+			if test.Wait != "" {
+				overwrite(WaitDir, test.Wait)
+			}
+
+			if err := RemoveRegistration(root, r.Identity); err != nil {
+				t.Fatal(err)
+			}
+
+			for sub, want := range map[string]bool{RegDir: test.WantReg, RingDir: test.WantRing, WaitDir: test.WantWait} {
+				_, err := os.Stat(filepath.Join(root, sub, r.Identity+".json"))
+				if got := err == nil; got != want {
+					t.Errorf("%s file present = %v, want %v", sub, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestResolveFollowsTheAddressOrderLiveCurrentThenLivePreClearThenNothing(t *testing.T) {
 	table := proctest.New(record.PlatformDarwin, 1)
 	table.Add(10, proctest.Process{Start: startOne})

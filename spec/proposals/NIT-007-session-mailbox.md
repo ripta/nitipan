@@ -137,7 +137,8 @@ Log.
 - Each agent's start path writes a registration into the state directory: a new Claude Code `SessionStart` hook that
   `setup` prints, Codex's existing `SessionStart` hook, and the opencode plugin's session events. Every nitipan call
   that sends or reads mail refreshes it from its own environment. That covers a session started before the hook was
-  installed, and gives every sender a reply address
+  installed, and gives every sender a reply address. A send is refused unless its sender is a registered session that its
+  node reported as live, so every bounce has a mailbox to land in. Amended 2026-11-08; see Decision Log
 - A registration stores the holder's identity fields, which are agent, PID, process start, and every session ID the
   process has held, plus the delivery endpoint. It stores no name. The node checks the fields with NIT-001's liveness
   rule before it rings. A later registration for the same identity replaces the earlier one, which is how an endpoint
@@ -164,7 +165,12 @@ Log.
   session's identity, within the same-user trust NIT-001 already has
 - The node reports each live registration's session IDs to the broker, and the broker keeps every session ID each
   label ever reported. Mail for an address no node ever reported is refused at send with "no such session", as NIT-004
-  refuses an unknown label. An address once reported stays valid, so a stored copy never strands
+  refuses an unknown label. An address once reported stays valid, so a stored copy never strands. The broker reads
+  reports only from a label pinned to the reporting node's key, since a pending label can neither send nor receive
+  mail. It reads the first 256 sessions of a snapshot, and refuses an agent it has no mail name for and an ID unsafe in
+  a file name. It stores at most 10,000 session IDs per label and refuses a new one past that. Each refusal is logged
+  with its reason and never dropped quietly. A label that reaches the bound needs a new design, since an address once
+  reported stays valid. Amended 2026-11-08; see Decision Log
 - Registrations, presence files, and message files carry `major.minor` versions under ADR-04's reader rules, as
   NIT-004's sidecars do. One the node or CLI cannot use reads as unknown: it is never rung or read, and `mail status`
   says why. A registration missing a field its adapter's descriptor needs is refused the same way
@@ -200,12 +206,15 @@ verified HTTPS. Mail across users waits on NIT-006.
   is recorded, and the label pins the first key that presents it. Every other pending key for the label is discarded, so
   a host that submits a key of its own cannot block the approval. Amended 2026-11-08; see Decision Log
 - A different key for a pinned label is refused whether or not the old stream is live, for leases as well as mail.
-  Labels the broker saw before mail shipped are not pinned automatically. Each needs the same approval
+  Labels the broker saw before mail shipped are not pinned automatically. Each needs the same approval. Until then the
+  label keeps NIT-004's live-stream key rule for leases, and its stream receives no mail. Approval closes a stream that
+  opened under another key. Amended 2026-11-08; see Decision Log
 - A reinstalled or wiped machine is recovered with a broker-side "forget label" command. Mail queued for a forgotten
-  label is kept for the label's next approved key, never handed to an unapproved one. Mail already stored on the
-  forgotten machine and never read bounces to its senders without its body, since the broker no longer holds it.
-  Under NIT-006, when the next key binds the label to a different user, the queued mail bounces instead. Amended
-  2026-10-24; see Decision Log
+  label is kept for the label's next approved key, never handed to an unapproved one. Mail the broker had sent and
+  saw no ack for is queued again, since an ack lost before a wipe cannot be told from a message that never arrived.
+  Mail already stored on the forgotten machine and never read bounces to its senders without its body, since the
+  broker no longer holds it. Under NIT-006, when the next key binds the label to a different user, the queued mail
+  bounces instead. Amended 2026-11-08; see Decision Log
 - A node sends and accepts mail only when its broker address is HTTPS with a certificate it verifies. A node on plain
   HTTP gets leases but no mail, and its error says why
 - The broker stamps each message's sender from the authenticated connection and ignores any sender field the client
@@ -390,6 +399,16 @@ read is returned to the sender with the reason.
 - Stage updates and bounces are new event kinds between broker and node. The broker sends them only to a node whose
   registered version supports them. A newer node facing an older broker reports "broker too old" for mail, per NIT-004's
   "Version skew"
+- The mail request kinds raise the handoff request version to 4, which is global to the CLI and node. A new CLI facing
+  an older node gets "node too old" for every request, mail or not, until the node restarts on the new binary, which
+  it does by itself when its executable changes. An older CLI facing a new node sends versions the node still answers,
+  and has no mail commands. The broker never sees the handoff version. Its direction is the node's registration: an
+  older node sends no mail capability, so the broker refuses a send to it with "recipient node too old", and a newer
+  node facing an older broker reports "broker too old". The broker store is 1.1. A 1.0 store is stamped 1.1 as it
+  loads, so a 1.0 broker refuses the file once a newer broker has run on it. Rolling the broker back below 1.1
+  therefore needs a copy of the store made before the upgrade, and loses every approval, reported session, and queued
+  message since. A minor stamp keeps no previous file, since NIT-004 keeps one only before a major migration.
+  Amended 2026-11-08; see Decision Log
 
 A sender can tell mail in flight from mail stuck, and a reply is never silently lost. An idle requestor wakes for its
 reply or its bounce, and for nothing else.
@@ -452,8 +471,9 @@ Amended 2026-10-24; see Decision Log.
 
 **Status:** DONE
 
-- A session on one machine sends a message that a Claude Code session on another machine reads with
-  `nitipan mail read`, and the message is stored on the recipient's machine before the broker drops it
+- A Claude Code session on one machine sends a message that a Claude Code session on another machine reads with
+  `nitipan mail read`, and the message is stored on the recipient's machine before the broker drops it. Amended
+  2026-11-08; see Decision Log
 - Mail queued for a disconnected node survives a broker restart. A body over the cap is refused at send
 - A node crash between storing a message and acking it, followed by a resend, leaves one copy, including after the
   first copy was read
@@ -465,11 +485,11 @@ Amended 2026-10-24; see Decision Log.
   body
 - The broker stamps the sender from the connection, and a client-set sender or `sender_verified` is ignored. The
   reader shows the sender and its verification outside the message body
-- A session registers at start and on each mail call. A resumed Claude Code session keeps its mail address and reads
-  mail sent before the resume, a stored address still reaches it after 7 days, and mail to a pre-`/clear` address
-  reaches the live process marked as such. Two live sessions with one session ID make the address ambiguous. A dead
-  registration is never rung, mail for an address no node reported is refused at send, and a Claude Code holder with
-  no session ID shows as not mailable
+- A Claude Code session registers at start and on each mail call. A resumed Claude Code session keeps its mail
+  address and reads mail sent before the resume, a stored address still reaches it after 7 days, and mail to a
+  pre-`/clear` address reaches the live process marked as such. Two live sessions with one session ID make the address
+  ambiguous. A dead registration is never rung, mail for an address no node reported is refused at send, and a Claude
+  Code holder with no session ID shows as not mailable. Amended 2026-11-08; see Decision Log
 - The broker alone derives mail names. Discovery, reply addresses, and `mail status` print mail addresses, and "who
   holds X" and "who is named N" accept one
 - The node rings a Claude Code socket only after the kernel names the registered PID as its peer
@@ -527,8 +547,8 @@ What was built, and what was found:
   stops the socket ring inside Claude Code and leaves the waiter armed. The macOS managed path comes from the sandbox's
   own deny list, and the Linux path from memory, since the managed settings page was not fetched
 - The mail name for Codex and opencode is already derived and equals the lease handle. Their delivery is M2
-- `NIT-006` still says a kept previous store holds this proposal's keys in the clear. Keys are stored hashed, so that
-  line is stale. This milestone did not touch NIT-006
+- `NIT-006` said a kept previous store holds this proposal's keys in the clear. Keys are stored hashed, so that line was
+  stale. The row review corrected it in NIT-006 with an amendment
 - A `Makefile` variable pair, `TEST_PKGS` and `TEST_ARGS`, lets `make test` run one package. Nothing else changed in
   the build
 - `TestDeadHolderEndsItsLeasesAtOnce` already raced on the base commit. It deleted from the fake process table while the
@@ -555,6 +575,22 @@ What was built, and what was found:
     that presents it. A malformed fingerprint, or an approval for a label already pinned to another key, is refused
   - `mail send` rings pending mail like any identified-holder call. `mail read` and `mail status` stay quiet, since they
     show the mail
+- The row review found and fixed these, each pinned by a test where one could be written:
+  - The broker stored every session a node reported, with no check of the agent or ID, no bound, and from a pending
+    label. It now reads reports only from a pinned label, first 256 per snapshot, refuses an unknown agent and an
+    unsafe ID, and stores at most 10,000 IDs per label. Each refusal is logged. A mail to a label that was never
+    approved is refused with "no such session", since the broker holds no address for it. A forgotten label keeps its
+    addresses, so mail queued for it waits
+  - A socket ring held the node's mail lock across the dial and the write. A socket that never answers could stall
+    every other mail call for the dial's two seconds. The node now judges the registrations under the lock and dials
+    after releasing it. The claim on the ring ledger is still made before the dial and undone when it fails
+  - A registration refresh over a file that failed to decode, or whose name and fields did not match, rewrote it and
+    dropped its session IDs. A refresh now refuses on any read error other than a missing file
+  - Reaping a dead process's registration removed files this binary may not remove under ADR-04. It now removes only a
+    file it can decode, of its own major and no higher minor. A registration it must leave keeps its ledger and
+    presence beside it. A leftover registration still reads as dead, so nothing rings it, and `mail status` lists it
+  - The version skew and store rollback consequences, and the narrowed checks and behaviors the Decision Log held
+    alone, are now in the settled text with markers
 - The Claude-only gate narrows two checks. A session sends mail and registers its mailbox only when its agent is Claude
   Code. Codex and opencode sessions get a clear refusal until M2 lifts the gate. See Decision Log
 
@@ -773,6 +809,32 @@ Check to test, by the bullet order above:
   the settled design allows. The accepted-ID ledger instead treats any entry as the message taken.
 - 2026-11-08 (autonomous): A node's request handoff version is 4 for the mail kinds, as the M2 and M3 precedents of
   NIT-004 bumped it for their kinds.
+
+- 2026-11-08 (autonomous): The row review amended the text in place for decisions the log held alone. "A session on
+  one machine sends" and "A session registers at start" said any session, and now say a Claude Code session, since
+  M1 gates the other agents until M2. "Mailbox registration" gained that a send is refused unless its sender is a
+  registered session that its node reported as live. "Auth" gained that an unpinned label's stream receives no mail
+  until approval, which closes a stream opened under another key. "Auth"'s forget text said queued mail waits for
+  the next approved key, and now also says mail the broker had sent without an ack is queued again.
+- 2026-11-08 (autonomous): The broker read every session a node reported. "Mailbox registration" said the broker keeps
+  every session ID each label reported, with no condition and no bound. It now reads reports only from a label pinned
+  to the node's key, the first 256 per snapshot, only for an agent with a mail name and an ID safe in a file name,
+  and it stores at most 10,000 per label. Each refusal is logged. The first condition follows "Auth", which says a
+  pending label can neither send nor receive mail. The others bound what a node, or a host holding a pending key,
+  can make the whole-file store and the per-send name derivation grow by. A mail to a label never approved is now
+  "no such session" instead of waiting. A label forgotten after it reported keeps its addresses, so its mail still
+  waits. The 10,000 bound is about 1 MiB per label and about 2.7 years at 10 new sessions a day. A label that
+  reaches it needs a new design: no eviction exists, since an address once reported stays valid.
+- 2026-11-08 (autonomous): "Delivery guarantees" covered mail event kinds between broker and node only. It said nothing
+  of the handoff request version 4 between CLI and node, or of the store stamp. It now states each direction of the
+  CLI, node, and broker trio, and that rolling the broker back below store 1.1 needs a pre-upgrade copy of the store
+  and loses the approvals, sessions, and mail since.
+- 2026-11-08 (autonomous): Two node rules from the row review. A file under `mail/` that this binary cannot decode, or
+  that carries a higher minor, is never rewritten, and a registration refresh over one now fails. A reaped dead
+  registration is removed only when it and each sibling file is decodable, of the binary's major, and no higher
+  minor. Otherwise the file stays. ADR-04 says an old binary never removes a session file of a higher version or one
+  it cannot decode. NIT-008's "removed with its registration" holds for files this binary can use. A leftover
+  registration reads as dead because its process is dead, so nothing rings it.
 
 ## References
 
