@@ -17,6 +17,18 @@ The approved plan is `/Users/ripta/.claude/plans/iterative-baking-steele.md`.
 |-----------|------------|--------|
 | NIT-007 M1 | DONE | `nitipan: carry mail between one user's sessions across machines` |
 
+The run's commits, in order:
+
+1. `nitipan: carry mail between one user's sessions across machines`: the milestone and its review fixes
+2. `nitipan: bound the sessions a label can report for mail`: row review fixes
+3. `spec: move NIT-007 M1 to history`: the row finish
+4. `nitipan: keep a reaped registration from leaving a ring ledger behind`: final review fixes
+5. `nitipan: stay quiet when a ring's registration was reaped mid-ring`: the final review's follow-up
+
+This report's last amendments land in a commit of their own after these.
+
+The row is finished. NIT-007 stays `accepted`, since M2 is still queued.
+
 ## Best guesses from the plan
 
 - Approve, forget, and pending reach the running broker through a local admin unix socket with a peer-UID check. No
@@ -51,8 +63,10 @@ The approved plan is `/Users/ripta/.claude/plans/iterative-baking-steele.md`.
 - Two settled behaviors changed by run best guesses, each amended with a marker. "Recipient node too old" now refuses
   the send rather than keeping the message. An approval by a fingerprint no pending key has now waits for that key
   rather than erroring, so a LAN host cannot block approval
-- NIT-006's text says a kept previous broker store holds NIT-007's keys in the clear. The broker stores only key hashes,
-  so that text is stale. NIT-006 is not this row's work
+- At the cap of 10,000 sessions per label, new sessions on that label stop being mailable. No eviction exists, since
+  an address once reported stays valid. Mail to a label that was never approved gets "no such session"
+- A registration file the binary cannot decode is never rewritten. Its session then cannot re-register until someone
+  removes the file by hand, and the error does not say so
 
 ## NIT-007 M1
 
@@ -250,4 +264,42 @@ Checks: `make ci TEST_ARGS=-count=1` passed, with 0 lint issues. `proposals.py f
 returned `[]`. `proposals.py check` reported only the row-finish finding. Test cost: `internal/cli` 293 s,
 `internal/node` 32.4 s, `internal/broker` 10.6 s, `internal/mailbox` 1.6 s.
 
-Commit: `nitipan: bound the sessions a label can report for mail`.
+Commit: `nitipan: bound the sessions a label can report for mail`. Its first wording opened the body with a recap of
+the prior state. It was reworded before any push, with its tree unchanged.
+
+The row finish moved `NIT-007 M1` from `queue.md` to the end of `history.md`. `proposals.py check` then returned `[]`.
+
+## Final review
+
+A reviewer, also asked for the ADR review, and an ADR-impact agent ran on the whole run's range. `proposals.py check`
+and `freeze` with all the run's commits as row commits returned `[]`. The range adds or edits no ADR. ADR impact found
+ADR-04, ADR-05, ADR-06, and ADR-07 consistent with the row review's fixes, and found no conflict. The stored-session
+cap refuses only IDs a label never stored, so ADR-05's "no identifier is ever reassigned" holds.
+
+Findings and outcomes:
+
+1. PLAUSIBLE: with rings dialing outside the mail lock, a reap between picking a ring and claiming it could write a
+   ring ledger for a removed registration, which nothing would reap. Confirmed by
+   `TestARingForARegistrationReapedAfterItWasPickedWritesNoLedger`, which failed first. Fixed: `Claim` refuses once
+   the registration is gone, checked under the ledger lock, and removal holds the ledger lock for its whole run. The
+   implementer's first report said `ringSocket` returns silently on that refusal, but the edit was missing, so it
+   logged a warning. A chained shell edit had failed. The follow-up commit adds the quiet case, and the test now
+   fails on any "claiming the ring ledger" warning. That assertion was not run against the code without the case, so
+   it pins the fix, not the bug. `make ci TEST_ARGS=-count=1` passed after it, with `internal/node` at 32.2 s
+2. Fixed: a NIT-006 risk bullet ran past the file's wrap width
+3. Fixed: a stray blank line in NIT-007's Decision Log
+
+Checks: `make ci TEST_ARGS=-count=1` passed. Test cost: `internal/node` 31.8 s, `internal/mailbox` 1.6 s.
+
+## ADR candidates
+
+None recorded. Each candidate the agents named fails the "What Earns an ADR" bar:
+
+- The admin socket as the concrete channel ADR-08 asks for. ADR-08 says which proofs qualify belong to the proposal
+  that adds the grant, so this is proposal detail
+- A kernel peer check as what ADR-07's "belongs to the session it claims to" means for a node dialing a socket. It
+  restates ADR-07 with an example
+- A ring ledger exists only while its registration does. It follows from ADR-04 and NIT-008's "removed with its
+  registration"
+- The 10,000-session cap with no eviction. ADR-05 already states the principle, and the cap is an implementation bound
+  recorded in NIT-007's Decision Log
