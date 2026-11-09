@@ -583,7 +583,9 @@ What was built, and what was found:
     addresses, so mail queued for it waits
   - A socket ring held the node's mail lock across the dial and the write. A socket that never answers could stall
     every other mail call for the dial's two seconds. The node now judges the registrations under the lock and dials
-    after releasing it. The claim on the ring ledger is still made before the dial and undone when it fails
+    after releasing it. The claim on the ring ledger is still made before the dial and undone when it fails. A reap
+    can land between the pick and the claim, so the claim and the undo write no ledger for an identity with no
+    registration, and removing a registration holds the ledger lock
   - A registration refresh over a file that failed to decode, or whose name and fields did not match, rewrote it and
     dropped its session IDs. A refresh now refuses on any read error other than a missing file
   - Reaping a dead process's registration removed files this binary may not remove under ADR-04. It now removes only a
@@ -809,7 +811,6 @@ Check to test, by the bullet order above:
   the settled design allows. The accepted-ID ledger instead treats any entry as the message taken.
 - 2026-11-08 (autonomous): A node's request handoff version is 4 for the mail kinds, as the M2 and M3 precedents of
   NIT-004 bumped it for their kinds.
-
 - 2026-11-08 (autonomous): The row review amended the text in place for decisions the log held alone. "A session on
   one machine sends" and "A session registers at start" said any session, and now say a Claude Code session, since
   M1 gates the other agents until M2. "Mailbox registration" gained that a send is refused unless its sender is a

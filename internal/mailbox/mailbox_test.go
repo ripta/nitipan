@@ -2,6 +2,7 @@ package mailbox
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,6 +102,7 @@ func TestStoreRefusesNamesThatCouldEscapeTheDirectory(t *testing.T) {
 
 func TestClaimReturnsEachKeyToExactlyOneCallerEvenWhenTheyRace(t *testing.T) {
 	root := t.TempDir()
+	holdRegistration(t, root, "ident")
 	keys := []string{MailKey(state.NewID()), MailKey(state.NewID())}
 
 	var (
@@ -145,6 +147,7 @@ func TestClaimReturnsEachKeyToExactlyOneCallerEvenWhenTheyRace(t *testing.T) {
 
 func TestAnUnusableLedgerReadsAsEmptyAndOldKeysOfAUsableOneArePruned(t *testing.T) {
 	root := t.TempDir()
+	holdRegistration(t, root, "ident")
 
 	if err := os.MkdirAll(filepath.Join(root, RingDir), 0o700); err != nil {
 		t.Fatal(err)
@@ -482,6 +485,7 @@ func TestClaimNeverRewritesARingLedgerItCannotUseOrOfAHigherMinor(t *testing.T) 
 	for _, tc := range unwritableLedgers {
 		t.Run(tc.Name, func(t *testing.T) {
 			root := t.TempDir()
+			holdRegistration(t, root, "ident")
 			path := filepath.Join(root, RingDir, "ident.json")
 
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -602,5 +606,36 @@ func TestASentNoteOfAHigherMinorIsNeitherRewrittenNorListed(t *testing.T) {
 
 	if got := fileBytes(t, path); got != body {
 		t.Errorf("the note was rewritten: %q", got)
+	}
+}
+
+// holdRegistration writes a placeholder registration file, which is all Claim looks for.
+func holdRegistration(t *testing.T, root, identity string) {
+	t.Helper()
+
+	dir := filepath.Join(root, RegDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, identity+fileSuffix), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaimAndUnclaimWriteNoLedgerForAnIdentityWithoutARegistration(t *testing.T) {
+	root := t.TempDir()
+
+	fresh, err := Claim(root, "gone", []string{"mail:a"}, t0)
+	if !errors.Is(err, ErrNoRegistration) || len(fresh) != 0 {
+		t.Fatalf("Claim = %v, %v, want ErrNoRegistration and no keys", fresh, err)
+	}
+
+	if err := Unclaim(root, "gone", []string{"mail:a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, RingDir, "gone"+fileSuffix)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a ring ledger exists for an identity with no registration: %v", err)
 	}
 }

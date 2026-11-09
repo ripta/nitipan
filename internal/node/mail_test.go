@@ -664,3 +664,50 @@ func TestASocketRingThatNeverReturnsDoesNotStallTheNodesOtherMailCalls(t *testin
 		t.Fatal("listing the mail sessions waited on a ring that was still dialing")
 	}
 }
+
+// A ring decided under the mail lock runs after it. A reap in between must not leave a ring ledger
+// for a registration that no longer exists, since nothing would ever remove that ledger.
+func TestARingForARegistrationReapedAfterItWasPickedWritesNoLedger(t *testing.T) {
+	var dials atomic.Int32
+
+	old := ringDialer
+
+	ringDialer = func(mailbox.Registration, int) error {
+		dials.Add(1)
+
+		return nil
+	}
+
+	t.Cleanup(func() { ringDialer = old })
+
+	mp := newMailPair(t, nil)
+
+	path, _ := inboxSocket(t)
+	reg := mp.register(t, mp.bState, secondMachine, os.Getpid(), startA, "sess-b", path)
+
+	err := mailbox.Store(mp.bState, mailbox.Message{ID: state.NewID(), Kind: mailbox.KindMail, ToSession: "sess-b", Body: "x", StoredAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	picked := mp.b.n.pendingRings()
+	if len(picked) != 1 {
+		t.Fatalf("pendingRings = %d rings, want 1", len(picked))
+	}
+
+	if err := mailbox.RemoveRegistration(mp.bState, reg.Identity); err != nil {
+		t.Fatal(err)
+	}
+
+	before := dials.Load()
+
+	mp.b.n.ringSocket(picked[0].ad, picked[0].reg, picked[0].keys)
+
+	if got := mailbox.Rung(mp.bState, reg.Identity); len(got) != 0 {
+		t.Errorf("a ring ledger was written for a removed registration: %v", got)
+	}
+
+	if dials.Load() != before {
+		t.Error("the node rang a session whose registration was gone")
+	}
+}

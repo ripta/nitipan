@@ -113,8 +113,24 @@ func writeLedger(root string, l Ledger) error {
 	return atomicfile.Write(filepath.Join(root, RingDir), l.Identity+fileSuffix, data)
 }
 
+// ErrNoRegistration means the identity has no registration file, so no ring ledger may exist for it.
+var ErrNoRegistration = errors.New("the registration is gone")
+
+// registrationExists reports whether the identity's registration file is present, readable or not. A
+// file this binary cannot decode still owns its ledger. RemoveRegistration deletes the registration
+// and the ledger while it holds the ledger lock, so a caller that holds the lock and sees the file
+// cannot lose it before it writes.
+func registrationExists(root, identity string) bool {
+	_, err := os.Stat(filepath.Join(root, RegDir, identity+fileSuffix))
+
+	return err == nil
+}
+
 // Claim marks the keys it returns as rung and returns the ones no path rang for yet. A caller rings
 // only for what Claim returned. It prunes keys older than the retention as it writes.
+//
+// Claim writes no ledger for an identity without a registration, and returns ErrNoRegistration. A
+// reap may remove a registration between the moment a caller picks it and the moment it claims.
 //
 // A ledger this binary cannot use, or of a higher minor, is never rewritten. Claim then returns the keys
 // the ledger does not show as rung, with an error that matches ErrNotRewritten. The caller may ring for
@@ -126,6 +142,10 @@ func Claim(root, identity string, keys []string, now time.Time) ([]string, error
 	}
 
 	defer unlock()
+
+	if !registrationExists(root, identity) {
+		return nil, fmt.Errorf("ring ledger %s: %w", identity, ErrNoRegistration)
+	}
 
 	l, st := loadLedger(root, identity)
 
@@ -168,6 +188,10 @@ func Unclaim(root, identity string, keys []string) error {
 	}
 
 	defer unlock()
+
+	if !registrationExists(root, identity) {
+		return nil
+	}
 
 	l, st := loadLedger(root, identity)
 	if st != ledgerOK {

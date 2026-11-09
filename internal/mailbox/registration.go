@@ -180,7 +180,17 @@ func Live(r Registration, c *liveness.Checker) bool {
 // a file this binary can decode, of its own major and no higher minor. A registration it must leave
 // keeps its ledger and presence beside it, and a ledger or presence it must leave stays when the
 // rest goes. A leftover registration still reads as dead, so nothing rings it.
+//
+// It holds the ring ledger lock throughout, so a Claim in flight finishes first or finds the
+// registration gone.
 func RemoveRegistration(root, identity string) error {
+	unlock, err := lockLedger(root, identity)
+	if err != nil {
+		return err
+	}
+
+	defer unlock()
+
 	for _, sub := range []string{RegDir, RingDir, WaitDir} {
 		path := filepath.Join(root, sub, identity+fileSuffix)
 
@@ -200,6 +210,10 @@ func RemoveRegistration(root, identity string) error {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("removing %s/%s: %w", sub, identity, err)
 		}
+	}
+
+	if !registrationExists(root, identity) {
+		_ = os.Remove(filepath.Join(root, RingDir, identity+".lock"))
 	}
 
 	return nil

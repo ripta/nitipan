@@ -555,7 +555,8 @@ Amended 2026-10-24; see Decision Log.
 - **A rollback across the store change loses cross-user state** — likelihood: low, impact: medium.
   Mitigation: NIT-004 keeps the previous file, so an older broker starts from it. Every binding, admission,
   delegation, and grant made since is lost, and must be made again after the upgrade is retried. The kept file holds
-  the hashes of NIT-007's keys, minus every key forgotten since, until the owner confirms no rollback is wanted. Amended 2026-11-08; see Decision Log
+  the hashes of NIT-007's keys, minus every key forgotten since, until the owner confirms no rollback is wanted.
+  Amended 2026-11-08; see Decision Log
 - **The design depends on accepted proposals not yet built** — likelihood: medium, impact: medium.
   NIT-006 changes decisions in NIT-004, NIT-007, and NIT-008, all accepted and not started. A later change there can
   undo what NIT-006 relies on, such as NIT-008 ringing the refused-claim notice. Mitigation: each was amended in place
