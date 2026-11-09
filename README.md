@@ -303,6 +303,11 @@ covering leases with the broker and pushes the branches without fence refs. That
 says so. It is not fencing. An unreachable broker is "could not verify" and can be retried. A host that refuses refs under
 `refs/nitipan/fence/` fails the whole push, and the message says it is the host's ref policy.
 
+The pre-push hook trusts the flag whoever set it. An agent that runs `git config nitipan.origin.atomic false` in its
+clone gets only the lease check on that remote, not the fence. This falls under the accepted risk that hooks are
+bypassable, as `--no-verify` does. nitipan never clears the flag. A host that later gains atomic push stays on the lease
+check until you run `git config --unset nitipan.<remote>.atomic`.
+
 `make live-fence-hosts LIVE_FENCE_ARGS="<clone>"` probes each remote of a throwaway clone for atomic push and fence refs.
 It pushes and then deletes a probe branch and a probe fence ref, and is never part of `make ci`.
 
