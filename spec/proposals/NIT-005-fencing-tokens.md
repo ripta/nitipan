@@ -540,13 +540,15 @@ fenced push, so the user, agents with no covering broker lease, and a `git push 
 fence refs each needed a rule. The candidates were treating a tokenless pusher as token 0, sending every tokenless
 pusher through push rule 6, mirroring the local rule, and the same with automatic pruning of old fence refs.
 
-Decision (autonomous): mirror the local rule, and guard the fence namespace structurally.
+Decision (autonomous): mirror the local rule, and guard the fence namespace structurally. Amended 2026-11-08; see
+Decision Log
 
 - A caller with no adapter and no agent variables passes the pre-push hook with no fence update, as it passes the local
   hook. The user holds no lease, so there is no staleness to fence. Refusing the user would also teach `--no-verify`,
   which turns off every other guard on that push. At `shared` reach a second human counts the same way, under the
   accepted risk "Hooks are bypassable"
-- A caller with agent variables but no matching ancestor fails closed, as NIT-001 does locally
+- A caller with agent variables but no matching ancestor is refused when the push updates a branch or carries a fence
+  ref. A push of tags alone passes, as NIT-001's local hook passes every ref but branch and HEAD updates
 - An agent with no broker lease covering the touched paths goes through push rule 6, a lease check. Rule 6 fires only on
   paths with a fence ref at or above them, so a lease-less agent can push into a live broker lease's keys unchecked
   until that key's first fenced push. That extends the settled "A stale push that lands before the new holder's first
@@ -557,10 +559,12 @@ Decision (autonomous): mirror the local rule, and guard the fence namespace stru
   refs a pruning push deletes, and a flag can be abbreviated or hidden in an alias, so the hook cannot detect a
   pruning push. It refuses every push to a remote that holds a fence ref this clone's fence namespace lacks, or holds
   at another value, as of before the hook's own fetch. The hook then fetches the namespace, so pushing again passes.
-  The rule applies to every caller and does not depend on detecting pruning
+  The rule applies to every caller and does not depend on detecting pruning. A window stays, and is accepted: another
+  machine can create a fence ref on the remote after the hook's `ls-remote` and before this clone's pruning push
+  lands, and the push then deletes it. Only a server-side hook closes it
 - An agent's push may carry only the fence refs its own leases call for, with the tokens the plan sets. Any other
   fence ref in an agent's push is refused, so an agent cannot lock out the other holders with a ref of a chosen
-  token. The user's own terminal holds no lease and is not held to the plan. Amended 2026-11-08; see Decision Log
+  token. The user's own terminal holds no lease and is not held to the plan
 - A refused `--mirror` names the fetch to run first,
   `git fetch <remote> '+refs/nitipan/fence/*:refs/nitipan/fence/*'`. The mirror then sends equal values, which git does
   not send
@@ -1067,7 +1071,9 @@ Fences `machine` leases on one machine. Needs no broker.
   to a remote with fence refs is therefore refused once. `nitipan push` records the fence refs it writes in the local
   namespace, and `fence delete` syncs first, so neither trips the guard. The script no longer has a fast path for
   pushes of tags or of nothing: it starts nitipan on every push, since no input shows that a push deletes nothing.
-  A missing binary now fails closed for every push, which the plan's fast path did not.
+  A missing binary now fails closed for every push, which the plan's fast path did not. One window stays and is
+  accepted. Another machine can create a fence ref after the hook's `ls-remote` and before the pruning push lands, and
+  the push deletes it. The hook reads the remote once, and only a server-side hook closes the gap.
 - 2026-11-08: Amended "Installing the git hooks". Its bullet on a missing `nitipan` said "the hook fails closed for
   `refs/heads/*` and HEAD updates and passes every other ref, such as fetches, tags, and salvage pins. The script tells
   them apart without the binary." That holds for the reference-transaction hook and still does. The pre-push hook can
@@ -1114,6 +1120,16 @@ Fences `machine` leases on one machine. Needs no broker.
   on github.com, gitlab.com, git.sr.ht, and a tangled knot. Each advertised atomic push, and each took a fence ref's
   create, fast-forward, and delete. The likelihood is now low. huggingface.co was not probed, and Azure DevOps still
   lacks atomic push, so the risk stays.
+- 2026-11-08: Amended "Tokenless pushers and fence cleanup" on the agent with no matching ancestor. The text said such a
+  caller "fails closed, as NIT-001 does locally". NIT-001's local hook fails closed for branch and HEAD updates only.
+  The pre-push hook returns before the refusal when a push has no branch update and carries no fence ref, so a tag-only
+  push by an agent that cannot be identified passes. The text now says so. The decision carries one marker, which
+  covers this amendment and the three before it.
+- 2026-11-08 (run best guess): `nitipan push` and `fence delete` run git with the hook's 2 minute bound, not the 10
+  seconds of the cleaned gate. Cleaning the environment changed the bound too, so `ls-remote`, the fence `fetch`, and
+  the touched-set `rev-list` and `diff-tree` failed as "could not verify" on a slow SSH round trip or a long first push,
+  where the hook passed. No document fixes the value. The hook's bound keeps the wrapper and the hook agreeing on what
+  a slow remote is. `ExecClean` keeps 10 seconds for setup and the acquire gate. The push itself has no bound.
 
 ## References
 

@@ -275,7 +275,8 @@ with `+` to force. No pattern is accepted.
 The `pre-push` hook is the authority. It recomputes the fence refs the push needs and refuses a plain `git push` that
 lacks them, and the message names `nitipan push`. `--no-verify` skips the hook, which is the accepted risk that hooks
 can be bypassed. A caller with no agent variables, such as the user's own terminal, passes with no fence. A caller with
-agent variables and no matching ancestor is refused. An agent whose own broker leases do not cover a path that has a
+agent variables and no matching ancestor is refused when the push updates a branch or carries a fence ref. A push of
+tags alone passes, as it does at NIT-001's local hook. An agent whose own broker leases do not cover a path that has a
 fence ref at or above it must be told by the broker that no live lease covers it. When the broker cannot say, the
 push is refused as "could not verify", exit status 12, which is not a lost lease.
 
@@ -286,6 +287,9 @@ about those deletions. The hook fetches the fence refs as it refuses, so pushing
 fetch it ran:
 
     git fetch <remote> '+refs/nitipan/fence/*:refs/nitipan/fence/*'
+
+One window stays. Another machine can create a fence ref after the hook reads the remote and before a pruning push
+lands, and the push then deletes it. Only a server-side hook closes that window, so it is accepted.
 
 An agent's push may carry only the fence refs its own leases call for. Any other fence ref is refused.
 

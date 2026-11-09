@@ -153,3 +153,38 @@ Checks after the fixes: `make ci` passed, with lint at 0 issues, `internal/cli` 
 ADR candidates: none new. The unconditional prune guard, the non-atomic flag, and the user-only fence deletion each
 shape only the pre-push hook. They fail the Architecture test in `design.md`. The fence format candidate is already in
 the Decision Log, undecided.
+
+## Row review
+
+A fresh reviewer and a fresh `adr-impact` agent ran on the row's range, the commit "nitipan: fence broker leases at the
+push". `proposals.py freeze` with that commit as the row's specs commit returned `[]`. The reviewer found that every
+milestone-review fix holds. It found no divergence between the push wrapper and the hook, which share one plan. It also
+found that M1's local hook keeps the same baseline arguments after the refactor. The `adr-impact` agent found no
+conflicts, and confirmed the ADR-03 containment fix.
+
+| Finding | Verdict | Disposition |
+|---------|---------|-------------|
+| `nitipan push` and `fence delete` give network and history calls the 10 s clean-runner timeout | PLAUSIBLE | trace |
+| The amended fence-namespace bullet carries no amendment marker | proposal | fix |
+| A fence ref created on the remote between the hook's listing and a pruning push can still be deleted | PLAUSIBLE, low | trace: state the window as accepted |
+| The README says an unidentifiable agent is always refused, but a tag-only push passes | doc | fix |
+| huggingface.co was not probed for M3's host check | plan | left for the user |
+
+The As built block says plainly that huggingface.co was not probed. The risk entry stays open.
+
+### Row review fixes
+
+A fresh implementer took the row-review findings. Both traces confirmed the finding.
+
+- The push wrapper's git calls now get the hook's 2-minute bound. The clean runner keeps only its environment
+  cleaning, and setup and the `acquire` check keep 10 s. A runner seam test failed on the unfixed code with
+  `timeout = 10s, want 2m0s`, and passes with the fix. The value is a `(run best guess)` entry
+- "Tokenless pushers and fence cleanup" carries one marker, on its decision line, covering every bullet the run
+  changed. The Decision Log gives each bullet's prior meaning
+- The window between the hook's listing and a pruning push is stated as accepted in that decision, its Decision Log
+  entry, and the README. It cannot be closed without a server hook
+- The README and the proposal now say an unidentifiable agent is refused when its push updates a branch or carries a
+  fence ref. A tags-only push passes, as at NIT-001's local hook
+
+Checks: `make ci` passed, with lint at 0 issues, `internal/cli` at 433.4 s, and `internal/gitfence` at 10.3 s.
+`proposals.py check` reports only the two row-finish findings. `proposals.py freeze` returned `[]`.
