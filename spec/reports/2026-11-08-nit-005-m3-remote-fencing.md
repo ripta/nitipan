@@ -188,3 +188,8 @@ A fresh implementer took the row-review findings. Both traces confirmed the find
 
 Checks: `make ci` passed, with lint at 0 issues, `internal/cli` at 433.4 s, and `internal/gitfence` at 10.3 s.
 `proposals.py check` reports only the two row-finish findings. `proposals.py freeze` returned `[]`.
+
+## Row finish
+
+NIT-005 is `implemented`, and `index.md` says so. Row `NIT-005 M3` moved from `queue.md` to the end of `history.md`.
+`proposals.py check` then returned `[]`.
