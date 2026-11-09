@@ -195,6 +195,11 @@ func (d *Deriver) repoRoots(top string) (roots []string, text string, err error)
 		return nil, "", fmt.Errorf("%s: %w", top, ErrUnborn)
 	}
 
+	return d.rootsAt(top, head)
+}
+
+// rootsAt walks the roots of one commit, after the refusals that apply to the whole repo.
+func (d *Deriver) rootsAt(top, commit string) (roots []string, text string, err error) {
 	common, err := d.run(top, queryTimeout, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return nil, "", err
@@ -204,12 +209,12 @@ func (d *Deriver) repoRoots(top string) (roots []string, text string, err error)
 		return nil, "", fmt.Errorf("%s: %w", top, ErrGrafts)
 	}
 
-	roots, err = d.walk(top, head)
+	roots, err = d.walk(top, commit)
 	if err != nil {
 		return nil, "", err
 	}
 
-	first, err := d.run(top, d.walkTimeout(), "rev-list", "--max-parents=0", "--first-parent", "HEAD")
+	first, err := d.run(top, d.walkTimeout(), "rev-list", "--max-parents=0", "--first-parent", commit)
 	if err != nil {
 		return nil, "", err
 	}
@@ -219,7 +224,27 @@ func (d *Deriver) repoRoots(top string) (roots []string, text string, err error)
 	return roots, text, nil
 }
 
-// walk returns the whole root set at head. A cached ancestor limits the walk to the new commits.
+// RootsOf returns the whole root set and the first-parent root of one commit of the repo that holds
+// dir. A fence ref is named by the first-parent root, and a push checks the fence refs under any root
+// of the commits it touches. The commit need not be HEAD. It refuses the same repo states a claim does.
+func (d *Deriver) RootsOf(dir, commit string) (roots []string, first string, err error) {
+	top, err := d.top(dir)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if shallow, err := d.run(top, queryTimeout, "rev-parse", "--is-shallow-repository"); err != nil {
+		return nil, "", err
+	} else if shallow == "true" {
+		return nil, "", fmt.Errorf("%s: %w", top, ErrShallow)
+	}
+
+	commit = strings.ToLower(commit)
+
+	return d.rootsAt(top, commit)
+}
+
+// walk returns the whole root set at a commit. A cached ancestor limits the walk to the new commits.
 func (d *Deriver) walk(top, head string) ([]string, error) {
 	d.loadCache()
 
@@ -229,11 +254,11 @@ func (d *Deriver) walk(top, head string) ([]string, error) {
 
 	var base []string
 
-	rangeArg := "HEAD"
+	rangeArg := head
 
 	for cached, roots := range d.cache {
 		if _, err := d.run(top, queryTimeout, "merge-base", "--is-ancestor", cached, head); err == nil {
-			base, rangeArg = roots, cached+"..HEAD"
+			base, rangeArg = roots, cached+".."+head
 
 			break
 		}

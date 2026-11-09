@@ -484,3 +484,142 @@ func TestParseWorktrees(t *testing.T) {
 		t.Errorf("parseWorktrees = %+v, want %+v", got, want)
 	}
 }
+
+type remoteTouchedTest struct {
+	Name string
+
+	// Setup returns the old and new values, and the advertised branches.
+	Setup func(r *testRepo) (oldSHA, newSHA string, heads map[string]string)
+
+	Ref  string
+	Want []string
+}
+
+var remoteTouchedTests = []remoteTouchedTest{
+	{
+		Name: "new commits on an advertised branch",
+		Ref:  "refs/heads/main",
+		Setup: func(r *testRepo) (string, string, map[string]string) {
+			base := r.git("rev-parse", "HEAD")
+			r.commit("src/a.txt")
+			r.commit("docs/b.txt")
+
+			return base, r.git("rev-parse", "HEAD"), map[string]string{"refs/heads/main": base}
+		},
+		Want: []string{"docs/b.txt", "src/a.txt"},
+	},
+	{
+		Name: "a creation of a branch another advertised branch already holds touches nothing",
+		Ref:  "refs/heads/copy",
+		Setup: func(r *testRepo) (string, string, map[string]string) {
+			head := r.git("rev-parse", "HEAD")
+
+			return "", head, map[string]string{"refs/heads/main": head}
+		},
+	},
+	{
+		Name: "a rewind counts the commits the branch loses",
+		Ref:  "refs/heads/main",
+		Setup: func(r *testRepo) (string, string, map[string]string) {
+			base := r.git("rev-parse", "HEAD")
+			tip := r.commit("src/a.txt")
+
+			return tip, base, map[string]string{"refs/heads/main": tip}
+		},
+		Want: []string{"src/a.txt"},
+	},
+	{
+		Name: "a deletion counts what no other advertised branch holds",
+		Ref:  "refs/heads/topic",
+		Setup: func(r *testRepo) (string, string, map[string]string) {
+			base := r.git("rev-parse", "HEAD")
+			r.git("checkout", "-q", "-b", "topic")
+			r.commit("docs/b.txt")
+
+			tip := r.git("rev-parse", "HEAD")
+
+			return tip, "", map[string]string{"refs/heads/main": base, "refs/heads/topic": tip}
+		},
+		Want: []string{"docs/b.txt"},
+	},
+	{
+		Name: "a deletion of a branch another advertised branch still holds touches nothing",
+		Ref:  "refs/heads/topic",
+		Setup: func(r *testRepo) (string, string, map[string]string) {
+			tip := r.commit("docs/b.txt")
+
+			return tip, "", map[string]string{"refs/heads/main": tip, "refs/heads/topic": tip}
+		},
+	},
+	{
+		Name: "an advertised commit this clone lacks widens the touched set",
+		Ref:  "refs/heads/main",
+		Setup: func(r *testRepo) (string, string, map[string]string) {
+			base := r.git("rev-parse", "HEAD")
+			r.commit("src/a.txt")
+
+			return base, r.git("rev-parse", "HEAD"), map[string]string{
+				"refs/heads/main":  base,
+				"refs/heads/other": strings.Repeat("ab", 20),
+			}
+		},
+		Want: []string{"src/a.txt"},
+	},
+	{
+		Name: "no advertised branches",
+		Ref:  "refs/heads/main",
+		Setup: func(r *testRepo) (string, string, map[string]string) {
+			return "", r.git("rev-parse", "HEAD"), nil
+		},
+		Want: []string{"README", "docs/b.txt", "src/a.txt"},
+	},
+}
+
+func TestRemoteTouchedAppliesTheCommitRuleAgainstTheAdvertisedBranches(t *testing.T) {
+	for _, test := range remoteTouchedTests {
+		t.Run(test.Name, func(t *testing.T) {
+			r := newTestRepo(t)
+			oldSHA, newSHA, heads := test.Setup(r)
+
+			got, err := r.fence().RemoteTouched(test.Ref, oldSHA, newSHA, heads)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !slices.Equal(got, test.Want) {
+				t.Errorf("paths = %v, want %v", got, test.Want)
+			}
+		})
+	}
+}
+
+// A remote-tracking ref must not count as trusted on the remote side. The pusher's unpushed commits
+// are held by origin/main only because a stale tracking ref says so.
+func TestRemoteTouchedIgnoresRemoteTrackingRefs(t *testing.T) {
+	r := newTestRepo(t)
+	base := r.git("rev-parse", "HEAD")
+	tip := r.commit("src/a.txt")
+	r.git("update-ref", "refs/remotes/origin/main", tip)
+
+	got, err := r.fence().RemoteTouched("refs/heads/main", base, tip, map[string]string{"refs/heads/main": base})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(got, []string{"src/a.txt"}) {
+		t.Errorf("paths = %v, want [src/a.txt]", got)
+	}
+}
+
+func TestRemoteTouchedFailsClosedWhenTheOldValueIsNotHere(t *testing.T) {
+	r := newTestRepo(t)
+	head := r.git("rev-parse", "HEAD")
+	gone := strings.Repeat("cd", 20)
+
+	_, err := r.fence().RemoteTouched("refs/heads/main", gone, head, map[string]string{"refs/heads/main": gone})
+
+	var missing *MissingObjectError
+	if !errors.As(err, &missing) || missing.Object != gone {
+		t.Fatalf("error = %v, want a missing object %s", err, gone)
+	}
+}

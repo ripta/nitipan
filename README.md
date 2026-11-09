@@ -26,11 +26,12 @@ The first version runs on one machine, with no daemon. It has ten commands:
 - `grant` hands a requested part to the requester as a sub-lease
 - `decline` refuses a request, or withdraws one
 - `revoke` ends a sub-lease at once, and only the holder of its parent can run it
-- `setup` prints the sandbox allowance, hooks, and plugins an agent needs, and installs the git hook with
+- `setup` prints the sandbox allowance, hooks, and plugins an agent needs, and installs the git hooks with
   `setup git --install <checkout>`
 
-An eleventh command, `hook`, is called only by those agent hooks and plugins, and by the git hook that `setup git`
-installs.
+Two more commands work with a remote. `push` pushes branches with the fence refs of the broker leases the caller holds,
+and `fence delete` is the user's way to remove one fence ref. See "Pushing under a broker lease" below. A last command,
+`hook`, is called only by those agent hooks and plugins, and by the git hooks that `setup git` installs.
 
 A domain is keyed by absolute path, with optional path scopes. A claim against a dead holder succeeds. An overlapping
 claim against a live holder is refused, and the refusal names the holder.
@@ -232,6 +233,11 @@ command. Resource claims and paths outside any checkout are not affected. A tool
 is caught at the next `acquire`. `break --force` says whether the broken lease's checkout had the hook in force, so the
 user knows whether the break is fenced.
 
+The same install writes a second hook, `pre-push`. See "Pushing under a broker lease". A path claim in a git checkout
+is refused until both hooks are in force, so a checkout that has only the `reference-transaction` hook from an
+earlier version needs `setup git --install <checkout>` once more. An existing `pre-push` hook is kept and chained like
+the first.
+
 ### Fence marks
 
 A tombstone is delivered and removed on the holder's next call, so it cannot guard the keys for long. `break --force`
@@ -250,6 +256,51 @@ A holder cannot remove a mark that guards against itself. A mark nitipan cannot 
 Two mixed-binary gaps remain. An older binary's `break` writes no mark, and the mark appears when a newer binary
 delivers the tombstone. An older binary's `acquire` by the marked holder ignores the mark, though the hook still
 refuses that holder's commits on those keys.
+
+## Pushing under a broker lease
+
+A broker lease guards a domain that several machines clone. A partitioned holder commits into its own clone and
+collides with nobody. The collision is the push. Every broker grant carries a fencing token that only goes up, and a
+push compares the holder's token with the fence refs on the remote.
+
+`nitipan push <remote> [<branch> ...]` does one `git push --atomic` with the branch refs and the fence refs together. A
+fence ref is `refs/nitipan/fence/<root-sha>/<encoded-path>`, and it holds the highest token pushed for that key. The
+push fetches the fence refs, refuses when one holds a token higher than the holder's own, and otherwise writes its
+token to the refs under its keys. The fence refs go by SHA with `--force-with-lease`, so git's compare-and-swap makes the
+check and the write one step. A push that loses the compare-and-swap to a sibling push fetches again and retries, up to
+five times, and then reports contention. A refusal says the lease was granted to another session, and says to report to
+the user. With no refspec, the current branch is pushed. A refspec is a branch, `<src>:<dst>`, or `:<dst>` to delete,
+with `+` to force. No pattern is accepted.
+
+The `pre-push` hook is the authority. It recomputes the fence refs the push needs and refuses a plain `git push` that
+lacks them, and the message names `nitipan push`. `--no-verify` skips the hook, which is the accepted risk that hooks
+can be bypassed. A caller with no agent variables, such as the user's own terminal, passes with no fence. A caller with
+agent variables and no matching ancestor is refused. An agent whose own broker leases do not cover a path that has a
+fence ref at or above it must be told by the broker that no live lease covers it. When the broker cannot say, the
+push is refused as "could not verify", exit status 12, which is not a lost lease.
+
+Nothing deletes a fence ref automatically. The hook refuses any update of a fence ref that is not a creation or a
+fast-forward, for every caller. It also refuses any push to a remote that holds a fence ref this clone lacks, or holds
+at another value, because a pruning push such as `git push --mirror` would delete it, and git does not tell the hook
+about those deletions. The hook fetches the fence refs as it refuses, so pushing again passes. The refusal names the
+fetch it ran:
+
+    git fetch <remote> '+refs/nitipan/fence/*:refs/nitipan/fence/*'
+
+An agent's push may carry only the fence refs its own leases call for. Any other fence ref is refused.
+
+`nitipan fence delete <remote> <key>` removes one fence ref, for example one marked unusable after a broker restore. The
+key is `<root-sha>/<encoded-path>` or a repo name, `repo:<root-sha>#<path>`. It refuses any caller with agent variables,
+and no error an agent reads names it, because deleting a live fence lets a stale push land.
+
+A host that cannot take an atomic push cannot hold the fence and the branch in one transaction. For such a remote,
+`nitipan push` records `nitipan.<remote>.atomic = false` in the clone's config. The push then renews the holder's
+covering leases with the broker and pushes the branches without fence refs. That is a lease check, and every message
+says so. It is not fencing. An unreachable broker is "could not verify" and can be retried. A host that refuses refs under
+`refs/nitipan/fence/` fails the whole push, and the message says it is the host's ref policy.
+
+`make live-fence-hosts LIVE_FENCE_ARGS="<clone>"` probes each remote of a throwaway clone for atomic push and fence refs.
+It pushes and then deletes a probe branch and a probe fence ref, and is never part of `make ci`.
 
 ## Waiting
 

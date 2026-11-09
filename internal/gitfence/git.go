@@ -38,6 +38,23 @@ func ExecClean(dir string, stdin []byte, args ...string) ([]byte, error) {
 	return run(cleanTimeout, cleanEnv(os.Environ()), dir, stdin, args)
 }
 
+// ExecWith returns a runner that adds environment entries to the process's own. A later entry wins
+// over an earlier one of the same name. With clean set, the variables that point git at another
+// repository are dropped first, as ExecClean does.
+func ExecWith(clean bool, extra ...string) Runner {
+	return func(dir string, stdin []byte, args ...string) ([]byte, error) {
+		env := os.Environ()
+		timeout := hookTimeout
+
+		if clean {
+			env = cleanEnv(env)
+			timeout = cleanTimeout
+		}
+
+		return run(timeout, append(slices.Clone(env), extra...), dir, stdin, args)
+	}
+}
+
 // repoVars are the variables that locate a repository, an index, or a worktree. A command that
 // runs in another worktree must not inherit them.
 var repoVars = []string{

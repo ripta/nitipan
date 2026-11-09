@@ -26,6 +26,9 @@ TEST_ARGS ?=
 # Extra flags for the opencode live harness, for example --dry-run, --probe, or --only tabs.
 LIVE_OPENCODE_ARGS ?=
 
+# Arguments for the fence host probe: a clone path first, then flags such as --dry-run or --remote NAME.
+LIVE_FENCE_ARGS ?=
+
 # Extra flags for the Codex live harness, for example --dry-run, --probe, --selftest, or --only exec.
 LIVE_CODEX_ARGS ?=
 
@@ -92,6 +95,13 @@ live-opencode: ## Run the opencode live checks on this machine, e.g. make live-o
 .PHONY: live-codex
 live-codex: ## Run the Codex live checks on this machine, e.g. make live-codex LIVE_CODEX_ARGS=--probe
 	python3 scripts/live-checks/codex.py $(LIVE_CODEX_ARGS)
+
+# This target pushes a probe branch and a probe fence ref to every remote of the clone it is given, then
+# deletes both. It uses that clone's credentials, so run it from a throwaway clone, never in a checkout
+# you work in. Never part of ci. Use --dry-run to see the commands.
+.PHONY: live-fence-hosts
+live-fence-hosts: ## Probe which git hosts take a nitipan push, e.g. make live-fence-hosts LIVE_FENCE_ARGS="--dry-run /path/to/clone"
+	python3 scripts/live-checks/fence-hosts.py $(LIVE_FENCE_ARGS)
 
 ##@ CI
 

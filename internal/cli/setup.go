@@ -28,13 +28,14 @@ file that differs from the one nitipan ships, unless --replace is given.
 setup node and setup broker print the LaunchAgent that runs the per-user node, and the one that runs the
 broker, with the launchctl command that loads each. They write nothing.
 
-setup git --install <checkout> installs a git hook that refuses a branch or HEAD update touching
-paths another session holds, or that a broken lease used to cover. A path claim inside a git checkout
-is refused until the hook is in force there. The hook goes into the directory git uses for hooks, in
-every initialized submodule too, and an existing reference-transaction hook is kept and chained. A
+setup git --install <checkout> installs two git hooks. The reference-transaction hook refuses a branch
+or HEAD update touching paths another session holds, or that a broken lease used to cover. The pre-push
+hook refuses a push of a fenced branch that lacks the fence refs of nitipan push. A path claim inside
+a git checkout is refused until both are in force there. The hooks go into the directory git uses for
+hooks, in every initialized submodule too, and an existing hook of either name is kept and chained. A
 hooks directory that git tracks is never written. The hook goes under the git directory instead, the
 checkout's local core.hooksPath points at it, and every hook chains to the tracked directory.
-setup git --uninstall <checkout> removes the hook, puts back what it chained, and restores the
+setup git --uninstall <checkout> removes the hooks, puts back what it chained, and restores the
 previous core.hooksPath. A caller that is no agent, such as the user's own terminal, is never refused.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 1 {

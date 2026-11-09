@@ -88,3 +88,64 @@ fi
 
 exit 0
 `
+
+// prePushScript renders the pre-push hook. It always runs the binary. A push can delete remote refs that
+// git does not list for the hook, such as --mirror does, so no input says that a push is harmless.
+func prePushScript(executable, chained string) ([]byte, error) {
+	if strings.ContainsRune(executable, '\n') {
+		return nil, fmt.Errorf("nitipan path %q: want a path without a newline", executable)
+	}
+
+	text := strings.ReplaceAll(prePushTemplate, "@@NITIPAN@@", shellQuote(executable))
+	text = strings.ReplaceAll(text, "@@CHAINED@@", chained)
+
+	return []byte(text), nil
+}
+
+const prePushTemplate = `#!/bin/sh
+# nitipan-managed hook
+# Installed by nitipan setup git --install. Removed by nitipan setup git --uninstall, which also
+# puts back the hook this one replaced. It refuses a push of a fenced branch that lacks the fence
+# refs of nitipan push, then runs the hook it replaced, if any.
+
+here=${0%/*}
+nitipan=@@NITIPAN@@
+chained=@@CHAINED@@
+
+input=
+
+while IFS=' ' read -r lref lsha rref rsha; do
+	input="$input$lref $lsha $rref $rsha
+"
+done
+
+if [ ! -x "$nitipan" ]; then
+	nitipan=$(command -v nitipan 2>/dev/null) || nitipan=
+fi
+
+if [ -z "$nitipan" ]; then
+	echo "nitipan: git refused the push, because the nitipan binary that checks leases is missing." >&2
+	echo "Reinstall nitipan so it is on PATH, or ask the user to run: nitipan setup git --uninstall <checkout>" >&2
+	exit 1
+fi
+
+printf '%s' "$input" | "$nitipan" hook pre-push "$@"
+status=$?
+
+if [ "$status" -eq 2 ]; then
+	echo "nitipan: git refused the push, because $nitipan is too old for the hook installed in this clone." >&2
+	echo "Upgrade nitipan, or ask the user to run: nitipan setup git --uninstall <checkout>" >&2
+	exit 1
+fi
+
+if [ "$status" -ne 0 ]; then
+	exit "$status"
+fi
+
+if [ -x "$chained" ]; then
+	printf '%s' "$input" | "$chained" "$@"
+	exit $?
+fi
+
+exit 0
+`

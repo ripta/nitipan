@@ -97,6 +97,9 @@ type world struct {
 	// machine names this world's machine. The zero value is testMachine.
 	machine record.Machine
 
+	// cwd, when set, is the working directory commands see. The default is the world's root.
+	cwd string
+
 	// db answers opencode's time_suspended. Nil makes every read fail.
 	db session.OpencodeDB
 }
@@ -177,13 +180,19 @@ func (w *world) deps(c caller, stdout, stderr *bytes.Buffer) Deps {
 		StateDir:   stateDir,
 		Machine:    func() (record.Machine, error) { return w.machineOrDefault(), nil },
 		User:       func() (string, error) { return tester, nil },
-		Cwd:        func() (string, error) { return w.root, nil },
-		Now:        func() time.Time { return w.now },
-		Sleep:      w.sleep,
-		Finder:     w.finder,
-		Git:        w.git,
-		MailPoll:   20 * time.Millisecond,
-		Context:    w.ctx,
+		Cwd: func() (string, error) {
+			if w.cwd != "" {
+				return w.cwd, nil
+			}
+
+			return w.root, nil
+		},
+		Now:      func() time.Time { return w.now },
+		Sleep:    w.sleep,
+		Finder:   w.finder,
+		Git:      w.git,
+		MailPoll: 20 * time.Millisecond,
+		Context:  w.ctx,
 
 		// The real managed settings of the machine running the tests must never reach a test.
 		ManagedSettingsDirs: []string{},
