@@ -64,6 +64,15 @@ Create %[1]s:
 Without a certificate and key the broker refuses to listen on a public or wildcard address. "store" sets the
 store file, which must be on a local volume that no sync service owns. The default is under
 ~/Library/Application Support/nitipan.
+
+A new machine can send leases, but neither send nor receive mail until you approve it. On this host, run
+nitipan broker pending to list the keys that wait, then nitipan broker approve <label> <fingerprint> with the
+fingerprint the node prints (nitipan node fingerprint). Run nitipan broker forget <label> after a machine is
+wiped or reinstalled.
+
+Those commands reach the broker through a unix socket in the store's directory, and only for the OS user the
+broker runs as. No agent session may run as that OS user on this host. A session that did could approve its
+own machine, which is the proof the approval exists to require.
 `, filepath.Join(in.Home, ".config", "nitipan", "broker.json")))
 }
 

@@ -36,6 +36,11 @@ type app struct {
 
 	// hooksSeen keeps what the git hook check found for a directory during this command.
 	hooksSeen map[string]lease.GitHooks
+
+	// callerHolder is the identified holder this command acted as. After the command, it hears of its
+	// pending mail. quietRing turns that off for the commands that deliver or hide mail themselves.
+	callerHolder *adapter.Holder
+	quietRing    bool
 }
 
 func (a *app) resolver() *adapter.Resolver {
@@ -50,7 +55,23 @@ func (a *app) resolver() *adapter.Resolver {
 // holder identifies the calling agent session. A command that acts as a holder fails closed when it
 // cannot.
 func (a *app) holder() (adapter.Holder, error) {
-	return a.resolver().Resolve().RequireHolder()
+	h, err := a.resolver().Resolve().RequireHolder()
+	if err == nil {
+		a.callerHolder = &h
+	}
+
+	return h, err
+}
+
+// caller identifies the calling process for a command that needs no adapter. An identified holder
+// among them hears of its pending mail after the command.
+func (a *app) caller() (adapter.Caller, error) {
+	c, err := a.resolver().Resolve().Caller()
+	if err == nil && c.Holder != nil {
+		a.callerHolder = c.Holder
+	}
+
+	return c, err
 }
 
 // engine opens the state directory and builds the engine over it.

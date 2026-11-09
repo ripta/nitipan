@@ -5,7 +5,6 @@ package broker
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -45,6 +44,10 @@ type KeyInput struct {
 
 	// StreamLive is true when the node's stream had a heartbeat within one term.
 	StreamLive bool
+
+	// Pinned is true when the user approved a key for the node's label. A pinned label refuses every
+	// other key, whether or not its stream is live.
+	Pinned bool
 }
 
 // KeyPolicy decides whether a registering node may present its key. A nil result accepts, and the
@@ -54,10 +57,20 @@ type KeyPolicy func(KeyInput) error
 // ErrKeyConflict means a different key arrived while the old stream was live.
 var ErrKeyConflict = errors.New("a different instance key is presented while the node's stream is live")
 
-// DefaultKeyPolicy accepts a new node, the same key, and a different key once the old stream is no
-// longer live. It refuses a different key while the old stream is live.
+// ErrKeyPinned means a different key arrived for a label whose key the user approved.
+var ErrKeyPinned = errors.New("the label is pinned to another instance key. " +
+	"If this machine was reinstalled, run nitipan broker forget on the broker host, then approve its new key")
+
+// DefaultKeyPolicy accepts a new node and the same key. A pinned label refuses any other key. An
+// unpinned label accepts a different key once the old stream is no longer live, and refuses it while
+// the old stream is live.
 func DefaultKeyPolicy(in KeyInput) error {
-	if !in.Registered || in.Same || !in.StreamLive {
+	switch {
+	case !in.Registered || in.Same:
+		return nil
+	case in.Pinned:
+		return ErrKeyPinned
+	case !in.StreamLive:
 		return nil
 	}
 
@@ -90,6 +103,10 @@ type Config struct {
 
 	// Derive makes a label. Default: DeriveLabel. A test injects a collision through it.
 	Derive func(machineID string, uid int) string
+
+	// AdminSocket is the path of the unix socket that serves the approval commands. Empty serves none,
+	// and nothing can then be approved.
+	AdminSocket string
 
 	KeyPolicy KeyPolicy
 	Logger    *slog.Logger
@@ -129,6 +146,9 @@ type nodeState struct {
 	nextSeq int
 
 	user, host string
+
+	// liveSessions is the set of session IDs the node's last snapshot reported as live.
+	liveSessions map[string]bool
 }
 
 type queued struct {
@@ -139,6 +159,10 @@ type queued struct {
 type streamState struct {
 	cancel context.CancelFunc
 	wake   chan struct{}
+
+	// keyHash is the hash of the key the stream opened with. Mail goes only to a stream whose key is the
+	// one the label is pinned to, so a stream left over from an earlier key never receives it.
+	keyHash string
 }
 
 // New builds a broker over an opened store.
@@ -281,15 +305,15 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathFence, b.authed(b.handleFence))
 	mux.HandleFunc("POST "+wire.PathWhoHolds, b.authed(b.handleWhoHolds))
 	mux.HandleFunc("POST "+wire.PathWhoIs, b.authed(b.handleWhoIs))
+	mux.HandleFunc("POST "+wire.PathMailSend, b.authed(b.handleMailSend))
+	mux.HandleFunc("POST "+wire.PathMailAck, b.authed(b.handleMailAck))
+	mux.HandleFunc("POST "+wire.PathMailReport, b.authed(b.handleMailReport))
+	mux.HandleFunc("POST "+wire.PathMailStatus, b.authed(b.handleMailStatus))
 
 	return mux
 }
 
-func keyHash(key string) string {
-	sum := sha256.Sum256([]byte(key))
-
-	return hex.EncodeToString(sum[:])
-}
+func keyHash(key string) string { return wire.KeyHash(key) }
 
 func bearer(r *http.Request) string {
 	h := r.Header.Get("Authorization")
@@ -406,11 +430,21 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	reg, registered := b.store.Data().Nodes[nk.String()]
 	hash := keyHash(key)
 
-	err := b.cfg.KeyPolicy(KeyInput{
-		Registered: registered,
-		Same:       registered && sameKey(reg, hash),
-		StreamLive: b.live(ns),
-	})
+	// A key the user approved before it arrived pins on arrival, and replaces whatever key holds the label.
+	pin := b.store.Data().Pins[label]
+	awaited := pin.PinnedHash == "" && pin.Awaiting != "" && pin.Awaiting == wire.Fingerprint(hash)
+
+	var err error
+
+	if !awaited {
+		err = b.cfg.KeyPolicy(KeyInput{
+			Registered: registered,
+			Same:       registered && sameKey(reg, hash),
+			StreamLive: b.live(ns),
+			Pinned:     pin.PinnedHash != "",
+		})
+	}
+
 	if err != nil {
 		writeErr(w, http.StatusConflict, wire.CodeKeyConflict, fmt.Sprintf("node %s: %v", nk, err))
 
@@ -422,7 +456,12 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = b.commit(func(d *Data) error {
-		d.Nodes[nk.String()] = NodeRecord{KeyHash: hash, Label: label}
+		d.Nodes[nk.String()] = NodeRecord{KeyHash: hash, Label: label, MailCap: req.MailCapability, HTTPS: req.HTTPS}
+		notePending(d, label, hash, b.cfg.Now())
+
+		if awaited {
+			d.Pins[label] = PinRecord{PinnedHash: hash}
+		}
 		d.Labels[label] = LabelRecord{
 			MachineID:  req.MachineID,
 			UID:        req.UID,
@@ -485,6 +524,8 @@ func (b *Broker) handleSnapshot(w http.ResponseWriter, r *http.Request, key Node
 	ns := b.node(key)
 	ns.snapshot = req.Leases
 	ns.hasSnapshot = true
+
+	b.noteSessionsLocked(key, ns, req.Sessions)
 
 	b.beatIfStreaming(ns)
 
@@ -555,7 +596,7 @@ func (b *Broker) handleStream(w http.ResponseWriter, r *http.Request, key NodeKe
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	st := &streamState{cancel: cancel, wake: make(chan struct{}, 1)}
+	st := &streamState{cancel: cancel, wake: make(chan struct{}, 1), keyHash: keyHash(bearer(r))}
 
 	b.mu.Lock()
 
@@ -593,12 +634,17 @@ func (b *Broker) handleStream(w http.ResponseWriter, r *http.Request, key NodeKe
 	defer tick.Stop()
 
 	sent := 0
+	sentMail := map[string]bool{}
 
 	for {
 		var err error
 
 		sent, err = b.flush(w, key, sent)
 		if err != nil {
+			return
+		}
+
+		if err := b.flushMail(w, key, st.keyHash, sentMail); err != nil {
 			return
 		}
 
@@ -796,6 +842,17 @@ func (b *Broker) serveOn(ctx context.Context, ln net.Listener, certFile, keyFile
 	errc := make(chan error, 1)
 
 	go b.RunSweeper(base, max(b.cfg.Term/10, 10*time.Millisecond))
+
+	if b.cfg.AdminSocket != "" {
+		go func() {
+			if err := b.ServeAdmin(base, b.cfg.AdminSocket); err != nil {
+				select {
+				case errc <- err:
+				default:
+				}
+			}
+		}()
+	}
 
 	go func() {
 		if certFile != "" {

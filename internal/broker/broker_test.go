@@ -169,6 +169,8 @@ var keyCases = []keyCase{
 	{"same key", KeyInput{Registered: true, Same: true, StreamLive: true}, false},
 	{"different key, old stream gone", KeyInput{Registered: true}, false},
 	{"different key, old stream live", KeyInput{Registered: true, StreamLive: true}, true},
+	{"different key, pinned label, old stream gone", KeyInput{Registered: true, Pinned: true}, true},
+	{"same key, pinned label", KeyInput{Registered: true, Same: true, Pinned: true}, false},
 }
 
 func TestDefaultKeyPolicy(t *testing.T) {

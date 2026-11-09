@@ -24,7 +24,7 @@ import (
 
 // nodeCmd runs the node. launchd starts it, so it is hidden from help.
 func (a *app) nodeCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:    "node",
 		Short:  "Run the node that mirrors this machine's leases to the broker",
 		Hidden: true,
@@ -33,10 +33,14 @@ func (a *app) nodeCmd() *cobra.Command {
 			return a.runNode()
 		},
 	}
+
+	cmd.AddCommand(a.nodeFingerprintCmd())
+
+	return cmd
 }
 
 func (a *app) brokerCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "broker",
 		Short: "Run the lease broker",
 		Long: `Run the broker that nodes on several machines connect to. launchd runs it. nitipan setup broker
@@ -46,6 +50,10 @@ prints the LaunchAgent. The broker reads ~/.config/nitipan/broker.json.`,
 			return a.runBroker()
 		},
 	}
+
+	cmd.AddCommand(a.brokerAdminCmds()...)
+
+	return cmd
 }
 
 func (a *app) runNode() error {
@@ -152,9 +160,10 @@ func (a *app) runBroker() error {
 	defer store.Close()
 
 	b := broker.New(broker.Config{
-		Store:   store,
-		Version: version.Version,
-		Logger:  slog.New(slog.NewTextHandler(a.deps.Stderr, nil)),
+		Store:       store,
+		AdminSocket: broker.AdminSocketPath(path),
+		Version:     version.Version,
+		Logger:      slog.New(slog.NewTextHandler(a.deps.Stderr, nil)),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -188,6 +197,8 @@ func (a *app) runSetupDaemon(daemon string) error {
 	text := setup.NodeText(in)
 	if daemon == setup.Broker {
 		text = setup.BrokerText(in)
+	} else {
+		text += a.approvalText()
 	}
 
 	_, err = fmt.Fprint(a.deps.Stdout, text)
@@ -221,4 +232,19 @@ func (a *app) requireNode() (handoff.Presence, error) {
 	}
 
 	return p, nil
+}
+
+// approvalText tells the user how to approve the node for mail. It reads the node's key when one exists
+// and creates nothing, since setup writes nothing.
+func (a *app) approvalText() string {
+	dir, err := a.deps.StateDir()
+	if err == nil {
+		if fp, ok := node.ExistingFingerprint(dir); ok {
+			return fmt.Sprintf("\nThis node's key fingerprint is %[1]s. Once the node runs, the broker lists the key under its label.\n"+
+				"Approve it on the broker host with: nitipan broker approve <label> %[1]s\n", fp)
+		}
+	}
+
+	return "\nMail needs the broker host's user to approve this node's key. Once the node has run, print its fingerprint with:\n\n" +
+		"  nitipan node fingerprint\n\nand approve it on the broker host with: nitipan broker approve <label> <fingerprint>\n"
 }

@@ -75,11 +75,15 @@ type WhoIs struct {
 
 // Found is one lease that answers a discovery query.
 type Found struct {
-	Lease     string `json:"lease"`
-	Qualified string `json:"qualified"`
-	Reach     string `json:"reach"`
-	State     string `json:"state"`
-	Stale     bool   `json:"stale,omitempty"`
+	Lease string `json:"lease"`
+
+	// Qualified is the holder's mail address, <mail name>@<label>. It is empty when the holder is not
+	// mailable, and NotMailable says why. A discovery answer never falls back to the holder's handle.
+	Qualified   string `json:"qualified"`
+	NotMailable string `json:"not_mailable,omitempty"`
+	Reach       string `json:"reach"`
+	State       string `json:"state"`
+	Stale       bool   `json:"stale,omitempty"`
 
 	Holder Holder `json:"holder"`
 	Node   string `json:"node"`

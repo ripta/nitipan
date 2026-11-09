@@ -44,6 +44,42 @@ type Adapter struct {
 	//
 	// A command name alone is never enough. Claude Code installed from npm runs as `node`.
 	Signature func(name string, args []string) bool
+
+	// Delivery says how mail reaches this agent. It is data only: the node holds the code for each
+	// mechanism, so this package stays free of node code and a new agent cannot gain an adapter and
+	// silently lack a wake mechanism.
+	Delivery Delivery
+}
+
+// Mechanisms of a delivery descriptor.
+const (
+	// PushSocket is the Claude Code inbox socket. PushCodexQueue is `codex queue`.
+	PushSocket     = "socket"
+	PushCodexQueue = "codex-queue"
+)
+
+// Registration fields a push mechanism needs in a session's registration.
+const (
+	FieldSocket = "socket"
+)
+
+// Delivery names the wake mechanisms of an agent and the registration fields its endpoint needs.
+type Delivery struct {
+	// Watcher is true when a process inside the session watches its mailbox and rings from there: the
+	// Claude Code waiter hook, or the opencode plugin.
+	Watcher bool
+
+	// Push names the mechanism the node uses to ring the session, or the empty string when the node
+	// does not push.
+	Push string
+
+	// EndpointVar names the variable that carries the session's delivery endpoint. A process inside
+	// the session writes it into the registration.
+	EndpointVar string
+
+	// RequiredFields lists the registration fields the push needs. A registration that lacks one gets
+	// no push, and `mail status` says why.
+	RequiredFields []string
 }
 
 // vars lists every variable that signals this agent.
@@ -71,6 +107,12 @@ func Claude() Adapter {
 		PermissionModes: []string{"default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"},
 		PIDVar:          "CLAUDE_PID",
 		SessionVar:      "CLAUDE_CODE_SESSION_ID",
+		Delivery: Delivery{
+			Watcher:        true,
+			Push:           PushSocket,
+			EndpointVar:    "CLAUDE_CODE_MESSAGING_SOCKET",
+			RequiredFields: []string{FieldSocket},
+		},
 	}
 }
 
@@ -92,6 +134,7 @@ func Codex() Adapter {
 		SessionVar: "CODEX_SESSION_ID",
 		Markers:    []string{"CODEX_THREAD_ID", "CODEX_VERSION"},
 		Signature:  codexSignature,
+		Delivery:   Delivery{Push: PushCodexQueue},
 	}
 }
 
@@ -109,6 +152,7 @@ func Opencode() Adapter {
 		SessionVar:      "OPENCODE_SESSION_ID",
 		Markers:         []string{"OPENCODE_TERMINAL"},
 		Signature:       opencodeSignature,
+		Delivery:        Delivery{Watcher: true},
 	}
 }
 
@@ -162,4 +206,15 @@ func opencodeSignature(_ string, args []string) bool {
 // The TUI signature is any opencode process whose arguments do not start with `serve`.
 func OpencodeIsServe(args []string) bool {
 	return opencodeSignature("", args) && len(args) > 1 && args[1] == "serve"
+}
+
+// ByName returns the adapter with a name.
+func ByName(name string) (Adapter, bool) {
+	for _, a := range All() {
+		if a.Name == name {
+			return a, true
+		}
+	}
+
+	return Adapter{}, false
 }

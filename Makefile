@@ -19,6 +19,10 @@ LINUX_ARCH ?= amd64
 # Package import path that carries the injected version string.
 VERSION_PKG ?= github.com/space-armada/nitipan/internal/version
 
+# Packages and extra flags for the test target, for example make test TEST_PKGS=./internal/broker TEST_ARGS='-run Mail'.
+TEST_PKGS ?= ./...
+TEST_ARGS ?=
+
 # Extra flags for the opencode live harness, for example --dry-run, --probe, or --only tabs.
 LIVE_OPENCODE_ARGS ?=
 
@@ -47,7 +51,7 @@ clean: ## Remove build artifacts
 
 .PHONY: test
 test: ## Run the tests with the race detector
-	$(GO) test -race ./...
+	$(GO) test -race $(TEST_ARGS) $(TEST_PKGS)
 
 ##@ Lint
 

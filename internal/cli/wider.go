@@ -148,8 +148,12 @@ func replyErr(kind string, rep handoff.Reply) error {
 	case handoff.CodeTooOld:
 		return fmt.Errorf("%s", rep.Error.Message)
 	case handoff.CodeBrokerTooOld:
-		return fmt.Errorf("%w: the broker does not serve the %s call. Upgrade the broker, or use machine reach (%s)", ErrBrokerTooOld,
-			kind, rep.Error.Message)
+		hint := "Upgrade the broker, or use machine reach"
+		if strings.HasPrefix(kind, "mail") {
+			hint = "Upgrade the broker, since only a broker that serves mail can carry it"
+		}
+
+		return fmt.Errorf("%w: the broker does not serve the %s call. %s (%s)", ErrBrokerTooOld, kind, hint, rep.Error.Message)
 	case handoff.CodeExpired:
 		return fmt.Errorf("%w. Run the command again", handoff.ErrRequestExpired)
 	}

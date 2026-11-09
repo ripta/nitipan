@@ -18,6 +18,7 @@ import (
 	"github.com/space-armada/nitipan/internal/handoff"
 	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/liveness"
+	"github.com/space-armada/nitipan/internal/mailbox"
 	"github.com/space-armada/nitipan/internal/monoclock"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/rootset"
@@ -114,6 +115,10 @@ type Options struct {
 	WakeGap    time.Duration
 	ReplyGrace time.Duration
 
+	// MailEvery is how often the node expires and prunes mail, and reaps dead registrations. Default:
+	// DefaultMailEvery.
+	MailEvery time.Duration
+
 	// Warn receives warnings, such as plain HTTP. Nil drops them.
 	Warn func(string)
 
@@ -139,6 +144,14 @@ type Node struct {
 	book       *leaseBook
 	deadlineMu sync.Mutex
 	written    map[string]bool
+
+	// ringAfter holds, for each registration, the time before which a failed socket ring is not tried again.
+	ringMu    sync.Mutex
+	ringAfter map[string]time.Time
+
+	// mailMu serializes the mail code that reads registrations and judges their liveness. The stream
+	// goroutine and the main loop both do.
+	mailMu sync.Mutex
 }
 
 // New validates the options. It touches no file and opens no connection.
@@ -181,13 +194,18 @@ func New(opts Options) (*Node, error) {
 		opts.WakeGap = DefaultWakeGap
 	}
 
+	if opts.MailEvery == 0 {
+		opts.MailEvery = DefaultMailEvery
+	}
+
 	n := &Node{
 		opts:  opts,
 		https: https,
 		seen:  map[string]struct{}{},
 		book:  newBook(),
 
-		written: map[string]bool{},
+		written:   map[string]bool{},
+		ringAfter: map[string]time.Time{},
 		cl: &client{
 			base:      base,
 			http:      newHTTPClient(tr),
@@ -198,6 +216,7 @@ func New(opts Options) (*Node, error) {
 
 	n.forwrd = map[string]Forwarder{KindPing: n.forwardPing}
 	n.registerLeaseKinds()
+	n.registerMailKinds()
 
 	for k, f := range opts.Forward {
 		n.forwrd[k] = f
@@ -320,6 +339,9 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 
 	n.book.setConnected(true)
 
+	// What the node stored and read goes first, so the broker resends only what it did not store.
+	n.reportMail(ctx)
+
 	defer func() {
 		n.book.setConnected(false)
 		n.publishDeadlinesNow()
@@ -343,9 +365,9 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 		streamErr <- n.stream(sctx)
 	}()
 
-	changes, err := n.opts.Watch(sctx, n.leasesPath())
+	changes, regChanges, err := n.watchState(sctx)
 	if err != nil {
-		return fmt.Errorf("watching the leases directory: %w", err)
+		return err
 	}
 
 	if err := n.sendSnapshot(sctx); err != nil {
@@ -370,6 +392,9 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 	reqTick := time.NewTicker(250 * time.Millisecond)
 	defer reqTick.Stop()
 
+	mailTick := time.NewTicker(n.opts.MailEvery)
+	defer mailTick.Stop()
+
 	var pending <-chan time.Time
 
 	for {
@@ -379,6 +404,10 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 		case err := <-streamErr:
 			return fmt.Errorf("the stream ended: %w", err)
 		case <-changes:
+			if pending == nil {
+				pending = time.After(debounce)
+			}
+		case <-regChanges:
 			if pending == nil {
 				pending = time.After(debounce)
 			}
@@ -409,12 +438,33 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 
 			n.serveRequests(sctx)
 			n.deliverLate()
+			n.ringMail()
+			n.reportReads(sctx)
+		case <-mailTick.C:
+			n.serviceMail(sctx)
 		case <-execTick.C:
 			if n.executableChanged(exe) {
 				return ErrExecutableChanged
 			}
 		}
 	}
+}
+
+// watchState watches the leases directory, and the mail registrations. A new or changed registration
+// reports its session IDs to the broker without waiting for the next heartbeat, so mail sent to a fresh
+// session does not fail as "no such session".
+func (n *Node) watchState(ctx context.Context) (leases, registrations <-chan struct{}, err error) {
+	leases, err = n.opts.Watch(ctx, n.leasesPath())
+	if err != nil {
+		return nil, nil, fmt.Errorf("watching the leases directory: %w", err)
+	}
+
+	registrations, err = n.opts.Watch(ctx, n.opts.StateDir+"/"+mailbox.RegDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("watching the mail registrations: %w", err)
+	}
+
+	return leases, registrations, nil
 }
 
 func (n *Node) leasesPath() string {
@@ -445,6 +495,8 @@ func (n *Node) register(ctx context.Context) (wire.Registered, error) {
 		Host:        n.opts.Machine.Host,
 		NodeVersion: n.opts.Version,
 		HTTPS:       n.https,
+
+		MailCapability: wire.MailCapability,
 	}, &out)
 	if err != nil {
 		return out, fmt.Errorf("registering: %w", err)

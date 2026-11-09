@@ -109,7 +109,7 @@ func TestARotatedSessionIDStillMatchesItsOwnLeaseAndIsRewritten(t *testing.T) {
 	id := w.acquireOK(c, "--checkout", w.dir("repo"))
 	handle := w.leaseByID(id).Holder.Handle
 
-	rotated := c.withEnv("CLAUDE_CODE_SESSION_ID", "after-clear")
+	rotated := c.withSession("after-clear")
 
 	res := w.run(rotated, "acquire", "--checkout", w.dir("repo"))
 	wantStatus(t, res, exitcode.OK)
@@ -119,6 +119,6 @@ func TestARotatedSessionIDStillMatchesItsOwnLeaseAndIsRewritten(t *testing.T) {
 		t.Errorf("lease = session %q, handle %q; %d records", got.Holder.SessionID, got.Holder.Handle, len(w.leases()))
 	}
 
-	third := c.withEnv("CLAUDE_CODE_SESSION_ID", "after-another-clear")
+	third := c.withSession("after-another-clear")
 	wantStatus(t, w.run(third, "release", id), exitcode.OK)
 }

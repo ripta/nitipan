@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -41,13 +42,14 @@ type caller struct {
 	env      map[string]string
 }
 
-func (c caller) withEnv(key, value string) caller {
+// withSession returns the caller as it reads after a /clear gave its Claude Code process a new session ID.
+func (c caller) withSession(id string) caller {
 	env := map[string]string{}
 	for k, v := range c.env {
 		env[k] = v
 	}
 
-	env[key] = value
+	env["CLAUDE_CODE_SESSION_ID"] = id
 	c.env = env
 
 	return c
@@ -79,6 +81,9 @@ type world struct {
 
 	// stdin is the input the next command reads, as a hook would get it.
 	stdin string
+
+	// ctx ends a mail waiter. Nil never ends it.
+	ctx context.Context
 
 	// exe is the nitipan path the hook entries name.
 	exe string
@@ -161,22 +166,28 @@ func (w *world) deps(c caller, stdout, stderr *bytes.Buffer) Deps {
 	}
 
 	return Deps{
-		Stdout:       stdout,
-		Stderr:       stderr,
-		Stdin:        strings.NewReader(w.stdin),
-		Executable:   func() (string, error) { return w.exe, nil },
-		UserHome:     func() (string, error) { return filepath.Join(w.root, "userhome"), nil },
-		OpencodeDB:   w.db,
-		Getenv:       func(k string) string { return c.env[k] },
-		Procs:        w.table,
-		StateDir:     stateDir,
-		Machine:      func() (record.Machine, error) { return w.machineOrDefault(), nil },
-		User:         func() (string, error) { return tester, nil },
-		Cwd:          func() (string, error) { return w.root, nil },
-		Now:          func() time.Time { return w.now },
-		Sleep:        w.sleep,
-		Finder:       w.finder,
-		Git:          w.git,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		Stdin:      strings.NewReader(w.stdin),
+		Executable: func() (string, error) { return w.exe, nil },
+		UserHome:   func() (string, error) { return filepath.Join(w.root, "userhome"), nil },
+		OpencodeDB: w.db,
+		Getenv:     func(k string) string { return c.env[k] },
+		Procs:      w.table,
+		StateDir:   stateDir,
+		Machine:    func() (record.Machine, error) { return w.machineOrDefault(), nil },
+		User:       func() (string, error) { return tester, nil },
+		Cwd:        func() (string, error) { return w.root, nil },
+		Now:        func() time.Time { return w.now },
+		Sleep:      w.sleep,
+		Finder:     w.finder,
+		Git:        w.git,
+		MailPoll:   20 * time.Millisecond,
+		Context:    w.ctx,
+
+		// The real managed settings of the machine running the tests must never reach a test.
+		ManagedSettingsDirs: []string{},
+
 		StateOptions: state.Options{LockBudget: w.budget, LockPoll: 10 * time.Millisecond, Sleep: w.lockSleep},
 		Hooks:        w.hooks,
 		HandoffWait:  w.handoffWait,

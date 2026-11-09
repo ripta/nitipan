@@ -286,7 +286,7 @@ func TestDeadHolderEndsItsLeasesAtOnce(t *testing.T) {
 		t.Fatal("the claim must be granted")
 	}
 
-	delete(lr.table.Procs, 4242)
+	lr.table.Remove(4242)
 
 	eventually(t, "the broker to end the dead holder's lease", func() bool { return len(lr.b.Leases()) == 0 })
 
@@ -301,7 +301,7 @@ func TestUnknownLivenessKeepsRenewingAndShowsUnknown(t *testing.T) {
 	lr := newLeaseRig(t, nil)
 	grantedLease(t, mustReply(lr.claim(anchorA, "/work/a", "mystery-kind")))
 
-	delete(lr.table.Procs, 4242)
+	lr.table.Remove(4242)
 
 	eventually(t, "the broker to show the holder as unknown", func() bool {
 		ls := lr.b.Leases()

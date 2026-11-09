@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-24
+**Updated:** 2026-11-08
 
 ## Dependencies
 
@@ -206,11 +206,13 @@ NIT-007's rings cover pending notices and pending requests, not only mail:
 - A turn hook's ring does not wake, so it may repeat. A waking path rings once per notice or request, keyed by its ID
   and its write time, so a replaced `recalled` notice rings again. Those keys join NIT-007's per-identity ring ledger
 - The ledger is one file per mailbox registration, beside it in the state directory, so a waiter with no node running
-  still rings once. It carries NIT-001's envelope with `major.minor`, is published through the temp-file scheme, and is
-  removed with its registration. A ledger a path cannot use reads as empty, so the path may ring again, which ADR-06
-  allows. A session with no registration has no waking path, and gets only the turn hooks' rings
-- A node built before M3 keeps its own ledger for mail and never rings for notices. It may ring a second time for mail a
-  new waiter already rang. A ring repeated loses nothing under ADR-06
+  still rings once. It carries a `major.minor` version and its registration's identity, is published through the
+  temp-file scheme, and is removed with its registration. A ledger a path cannot use reads as empty, so the path may
+  ring again, which ADR-06 allows. A session with no registration has no waking path, and gets only the turn hooks'
+  rings. Amended 2026-11-08; see Decision Log
+- NIT-007 M1 builds the ledger as this file, keyed by message ID, and every NIT-007 wake path rings through it. A node
+  built before M3 therefore never rings for notices or requests, and never rings twice for one message. M3 adds their
+  keys to the same file. Amended 2026-11-08; see Decision Log
 
 A busy sub-lessee hears on its next tool call or commit, and an idle one is woken where its agent allows. With none of
 NIT-005 and NIT-007 built, the notice and the parent's message still reach it.
@@ -363,6 +365,14 @@ None.
   a coworker's `shared` claim. That notice never rings, since a refused claim is free to make and would otherwise
   wake the holder's agent with no mail grant.
 - 2026-10-24: Scheduled as NIT-008 M1-M4 in queue.md.
+- 2026-11-08 (autonomous): NIT-007 M1 built the ring ledger. The text of "Telling the sub-lessee" said "A node built
+  before M3 keeps its own ledger for mail and never rings for notices. It may ring a second time for mail a new waiter
+  already rang." That left the waiter and the node with two ledgers for one message, and M1's check that each message
+  wakes a session at most once needs one shared file. M1 therefore writes the file in this proposal's format, keyed by
+  message ID. M3 adds the notice and request keys. A ring repeated by a pre-M3 node is no longer possible. The same
+  entry corrects the file's header. The text said the ledger "carries NIT-001's envelope with `major.minor`". That
+  envelope is a lease record's footprint, liveness, and holder, which a ledger of rung keys has no use for. The ledger
+  carries a `major.minor` version and its registration's identity, and ADR-04's reader rules apply to the version.
 
 ## References
 

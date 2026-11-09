@@ -60,6 +60,8 @@ func (a *app) hookCmd() *cobra.Command {
 		a.hookRefTransaction(),
 	)
 
+	cmd.AddCommand(a.hookMailCmds()...)
+
 	return cmd
 }
 

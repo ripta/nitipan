@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -20,7 +21,10 @@ import (
 // StoreVersion is the store format this binary writes and the highest it reads. A store of a higher
 // major or a higher minor is refused at start. A rewrite would drop the fields this binary does not
 // know, and a broker that cannot write cannot register a node.
-var StoreVersion = record.Version{Major: 1, Minor: 0}
+//
+// Minor 1 added pins, reported sessions, and mail. A 1.0 store reads under a 1.1 broker with those empty,
+// and an older broker refuses the 1.1 store, since a rewrite would drop the mail it holds.
+var StoreVersion = record.Version{Major: 1, Minor: 1}
 
 // Errors returned by the store.
 var (
@@ -55,6 +59,76 @@ type Data struct {
 	Leases   map[string]json.RawMessage `json:"leases,omitempty"`
 	Outcomes map[string]json.RawMessage `json:"outcomes,omitempty"`
 	Counter  uint64                     `json:"counter,omitempty"`
+
+	// Pins holds the approval state of each label: the pinned key hash, the keys waiting for approval,
+	// and whether the label was forgotten.
+	Pins map[string]PinRecord `json:"pins,omitempty"`
+
+	// Sessions holds every session ID each label ever reported, keyed by label and then session ID. An
+	// address resolves against it, so a stored copy of an address never strands.
+	Sessions map[string]map[string]SessionRecord `json:"sessions,omitempty"`
+
+	// Mail holds the messages that are queued for a node, and the stage of each one it has sent on.
+	Mail map[string]MailRecord `json:"mail,omitempty"`
+}
+
+// PinRecord is the approval state of one label.
+type PinRecord struct {
+	// PinnedHash is the hash of the key the user approved. A pinned label refuses every other key,
+	// whether or not its stream is live.
+	PinnedHash string `json:"pinned_hash,omitempty"`
+
+	// Pending maps the hash of each key a node presented since the last approval to when it did.
+	Pending map[string]time.Time `json:"pending,omitempty"`
+
+	// Awaiting is the fingerprint of a key the user approved before it reached the broker. The label pins
+	// the first key that presents it. Without this, a host that floods the label with keys while the real
+	// machine sleeps could evict the real key from Pending before the user approves it.
+	Awaiting string `json:"awaiting,omitempty"`
+
+	Forgotten   bool      `json:"forgotten,omitempty"`
+	ForgottenAt time.Time `json:"forgotten_at,omitzero"`
+}
+
+// SessionRecord is one session ID a node reported for its label.
+type SessionRecord struct {
+	Agent string `json:"agent"`
+
+	// NameVersion is the mail name derivation that applied when the broker first saw the session.
+	NameVersion int       `json:"name_version"`
+	FirstSeen   time.Time `json:"first_seen"`
+}
+
+// MailRecord is one message the broker holds. Its body is dropped once the recipient's node stored it.
+type MailRecord struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+
+	FromLabel   string `json:"from_label,omitempty"`
+	FromAgent   string `json:"from_agent,omitempty"`
+	FromSession string `json:"from_session,omitempty"`
+	FromAddress string `json:"from_address,omitempty"`
+	ToLabel     string `json:"to_label"`
+	ToSession   string `json:"to_session"`
+	ToAddress   string `json:"to_address"`
+
+	Body     string `json:"body,omitempty"`
+	Verified bool   `json:"verified,omitempty"`
+
+	// Stage is queued, stored, or read. Sent is true once the broker wrote the message to a stream, and
+	// is what keeps a message the broker sent from bouncing as unsent.
+	Stage   string    `json:"stage"`
+	Sent    bool      `json:"sent,omitempty"`
+	StageAt time.Time `json:"stage_at"`
+
+	EnqueuedAt time.Time `json:"enqueued_at"`
+
+	// Reason and Orig are set on a bounce. Bounced and BounceReason are set on the message that bounced.
+	Reason       string `json:"reason,omitempty"`
+	Orig         string `json:"orig,omitempty"`
+	BodyDropped  bool   `json:"body_dropped,omitempty"`
+	Bounced      bool   `json:"bounced,omitempty"`
+	BounceReason string `json:"bounce_reason,omitempty"`
 }
 
 // NodeRecord is what the broker keeps to authenticate one node.
@@ -62,6 +136,11 @@ type NodeRecord struct {
 	// KeyHash is the SHA-256 of the instance key. The key itself is never stored.
 	KeyHash string `json:"key_hash"`
 	Label   string `json:"label"`
+
+	// MailCap and HTTPS are what the node reported at its last registration. They let the broker answer
+	// "recipient node too old" and refuse mail for a plain HTTP node while the node is offline.
+	MailCap int  `json:"mail_cap,omitempty"`
+	HTTPS   bool `json:"https,omitempty"`
 }
 
 // LabelRecord is one row of the seen-label table.
@@ -86,6 +165,10 @@ func newData() *Data {
 		Version: StoreVersion,
 		Nodes:   map[string]NodeRecord{},
 		Labels:  map[string]LabelRecord{},
+
+		Pins:     map[string]PinRecord{},
+		Sessions: map[string]map[string]SessionRecord{},
+		Mail:     map[string]MailRecord{},
 	}
 }
 
@@ -115,6 +198,21 @@ func (d *Data) clone() *Data {
 			out.Outcomes[k] = v
 		}
 	}
+
+	out.Pins = make(map[string]PinRecord, len(d.Pins))
+
+	for k, v := range d.Pins {
+		v.Pending = maps.Clone(v.Pending)
+		out.Pins[k] = v
+	}
+
+	out.Sessions = make(map[string]map[string]SessionRecord, len(d.Sessions))
+
+	for k, v := range d.Sessions {
+		out.Sessions[k] = maps.Clone(v)
+	}
+
+	out.Mail = maps.Clone(d.Mail)
 
 	return &out
 }
@@ -285,9 +383,23 @@ func (s *Store) load() error {
 		d.Labels = map[string]LabelRecord{}
 	}
 
+	if d.Mail == nil {
+		d.Mail = map[string]MailRecord{}
+	}
+
+	if d.Pins == nil {
+		d.Pins = map[string]PinRecord{}
+	}
+
+	if d.Sessions == nil {
+		d.Sessions = map[string]map[string]SessionRecord{}
+	}
+
 	s.data = &d
 
-	if head.Version.Major < cur.Major {
+	// A store of an older minor is stamped with this broker's version as it loads. The fields this
+	// binary adds are written from the first persist on, and an older broker must refuse the file then.
+	if head.Version.Major < cur.Major || head.Version.Minor < cur.Minor {
 		d.Version = cur
 
 		return s.Persist(&d)

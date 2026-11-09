@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -450,5 +451,53 @@ func TestAnOverlapTheCLIPrintedGivesNoSecondNotice(t *testing.T) {
 
 	if got := countNoticesContaining(lr, "names repo files"); got != 0 {
 		t.Fatalf("the CLI printed the warning, so the grant's holder needs no notice: %d", got)
+	}
+}
+
+// TestADerivationNeverRewritesASidecarItCannotReadThatAppearedWhileItRan holds the node inside its
+// derivation, plants a sidecar of a higher major, and lets the derivation finish. Before the fix the
+// node wrote its own file over the planted one. The interleaving is forced, so no timing is involved.
+func TestADerivationNeverRewritesASidecarItCannotReadThatAppearedWhileItRan(t *testing.T) {
+	g, _ := newFakeGit(t)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	var once, free sync.Once
+
+	t.Cleanup(func() { free.Do(func() { close(release) }) })
+
+	deriver := &rootset.Deriver{Run: func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		once.Do(func() { close(started) })
+		<-release
+
+		return g.run(ctx, dir, args...)
+	}}
+
+	lr := newLeaseRig(t, func(o *Options) { o.Roots = deriver })
+
+	id, _ := writeRecord(t, lr.state, filepath.Join(g.top, "svc"))
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the node never began deriving")
+	}
+
+	future := []byte(`{"version":"2.0","id":"` + id + `"}`)
+	if err := atomicfile.Write(filepath.Join(lr.state, handoff.DerivedDir), id+".json", future); err != nil {
+		t.Fatal(err)
+	}
+
+	free.Do(func() { close(release) })
+
+	m := mirrorOfLease(t, lr, id)
+	if m.Derived != nil {
+		t.Errorf("the lease reads as derived: %+v, want unknown", m.Derived)
+	}
+
+	got, err := os.ReadFile(filepath.Join(lr.state, handoff.DerivedDir, id+".json"))
+	if err != nil || string(got) != string(future) {
+		t.Errorf("the planted sidecar was rewritten: %q, %v", got, err)
 	}
 }

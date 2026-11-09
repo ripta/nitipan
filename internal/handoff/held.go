@@ -409,6 +409,8 @@ func KindSince(kind string) int {
 		return 1
 	case KindWhoHolds, KindWhoIs:
 		return 3
+	case KindMailSend, KindMailStatus:
+		return 4
 	}
 
 	return 2
@@ -461,4 +463,24 @@ func RemoveOrphan(l *state.Locked, id string) error {
 	}
 
 	return nil
+}
+
+// Request kinds for mail. A node of request version 3 or lower does not know them.
+const (
+	KindMailSend   = "mail-send"
+	KindMailStatus = "mail-status"
+)
+
+// MailSendBody is the body of a mail-send request. The request ID is the message ID. FromSession is
+// the sender's session, which the node reports to the broker from the sender's registration.
+type MailSendBody struct {
+	To          string `json:"to"`
+	Body        string `json:"body"`
+	FromAgent   string `json:"from_agent"`
+	FromSession string `json:"from_session"`
+}
+
+// MailStatusBody is the body of a mail-status request.
+type MailStatusBody struct {
+	ID string `json:"id"`
 }

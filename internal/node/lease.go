@@ -25,6 +25,10 @@ var ErrBrokerTooOld = errors.New("broker too old")
 // sleep and renews at once.
 const DefaultWakeGap = 5 * time.Second
 
+// DefaultMailEvery is how often the node expires and prunes mail. Expiry is measured in days, so a
+// minute is fine.
+const DefaultMailEvery = time.Minute
+
 // DefaultReplyGrace is how long a reply may wait unread before the node delivers its outcome as a
 // notice. It outlasts the CLI's own wait.
 const DefaultReplyGrace = 90 * time.Second
@@ -280,6 +284,10 @@ func (n *Node) lost(sc handoff.Sidecar, l wire.Lease, rev uint64, detail string)
 
 // handleEvent applies a lease event and then hands every event to the node's own handler.
 func (n *Node) handleEvent(ev wire.Event) error {
+	if ev.Kind == wire.EventStage {
+		return n.handleStage(ev)
+	}
+
 	if ev.Kind == wire.EventLease {
 		var l wire.Lease
 		if err := json.Unmarshal(ev.Data, &l); err != nil {
@@ -643,6 +651,7 @@ func (n *Node) sendSnapshotAck(ctx context.Context) error {
 	}
 
 	snap.Acked = n.book.takeAcked()
+	snap.Sessions = n.mailSessions()
 
 	var ack wire.SnapshotAck
 

@@ -118,6 +118,10 @@ type Register struct {
 	// broker over TLS.
 	NodeVersion string `json:"node_version"`
 	HTTPS       bool   `json:"https"`
+
+	// MailCapability is the mail protocol level the node speaks. A node that predates mail sends none,
+	// which reads as zero, and the broker sends it no mail event kind.
+	MailCapability int `json:"mail_capability,omitempty"`
 }
 
 // Registered answers a registration.
@@ -168,6 +172,10 @@ type Snapshot struct {
 	// Acked lists the end facts the node has handled, so the broker can drop them. An older broker
 	// ignores it and keeps resending, which a node tolerates.
 	Acked []string `json:"acked,omitempty"`
+
+	// Sessions lists the session IDs of the node's mailbox registrations, live or not. The broker keeps
+	// every ID a label ever reported, and treats the live ones as the sessions a message can reach now.
+	Sessions []MailSession `json:"sessions,omitempty"`
 }
 
 // Heartbeat tells the broker the node's stream is alive.

@@ -9,6 +9,7 @@
 package setup
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -43,7 +44,7 @@ type Input struct {
 func Text(agent string, in Input) (string, error) {
 	switch agent {
 	case Claude:
-		return claude(in.StateDir), nil
+		return claude(in), nil
 	case Codex:
 		return codex(in), nil
 	case Opencode:
@@ -53,7 +54,11 @@ func Text(agent string, in Input) (string, error) {
 	}
 }
 
-func claude(dir string) string {
+func claude(in Input) string {
+	return claudeAccess(in.StateDir) + claudeMail(in)
+}
+
+func claudeAccess(dir string) string {
 	return fmt.Sprintf(`Claude Code needs write access to the nitipan state directory, %[1]s.
 
 In your Claude Code settings, add to permissions.allow:
@@ -72,6 +77,77 @@ If the sandbox also blocks creating the directory, create it first from a termin
 
   mkdir -p -m 700 %[1]s
 `, dir)
+}
+
+// MailWaitTimeoutSeconds is the timeout the printed waiter hooks carry. Claude Code documents no
+// maximum for a hook timeout, so the waiter asks for a day. When it times out, the session has no
+// waiter until its next Stop, and the node's socket ring covers the gap.
+const MailWaitTimeoutSeconds = 86400
+
+// hookTypeCommand is the type of a Claude Code command hook.
+const hookTypeCommand = "command"
+
+// hookEntry is one command hook of Claude Code's settings.
+type hookEntry struct {
+	Type        string `json:"type"`
+	Command     string `json:"command"`
+	AsyncRewake bool   `json:"asyncRewake,omitempty"`
+	Timeout     int    `json:"timeout,omitempty"`
+}
+
+type hookGroup struct {
+	Hooks []hookEntry `json:"hooks"`
+}
+
+type hookSettings struct {
+	Hooks map[string][]hookGroup `json:"hooks"`
+}
+
+// ClaudeMailHooks returns the hooks mail needs, as the JSON for Claude Code's settings.
+func ClaudeMailHooks(exe string) (string, error) {
+	cmd := shellWord(exe)
+
+	wait := hookEntry{Type: hookTypeCommand, Command: cmd + " hook mail-wait", AsyncRewake: true, Timeout: MailWaitTimeoutSeconds}
+
+	settings := hookSettings{Hooks: map[string][]hookGroup{
+		"SessionStart": {{Hooks: []hookEntry{{Type: hookTypeCommand, Command: cmd + " hook mail-register"}, wait}}},
+		"Stop":         {{Hooks: []hookEntry{wait}}},
+		"UserPromptSubmit": {{Hooks: []hookEntry{
+			{Type: hookTypeCommand, Command: cmd + " hook mail-ring --event UserPromptSubmit"},
+		}}},
+		"PostToolUse": {{Hooks: []hookEntry{
+			{Type: hookTypeCommand, Command: cmd + " hook mail-ring --event PostToolUse"},
+		}}},
+	}}
+
+	out, err := json.MarshalIndent(settings, "  ", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encoding the mail hooks: %w", err)
+	}
+
+	return string(out), nil
+}
+
+func claudeMail(in Input) string {
+	hooks, err := ClaudeMailHooks(in.Executable)
+	if err != nil {
+		return ""
+	}
+
+	return fmt.Sprintf(`
+Mail between sessions needs four hooks. Merge this into the "hooks" key of your Claude Code settings:
+
+  %[1]s
+
+SessionStart registers the session's mailbox, so mail sent to it reaches it, and arms a waiter. The waiter
+and the Stop hook wake an idle session when mail arrives. The waiter asks for a %[2]d second timeout, since
+Claude Code documents no maximum. When it expires, the node's ring to the session's inbox socket covers
+the gap. UserPromptSubmit and PostToolUse tell a busy session that mail is pending. None of them reads or
+removes mail. Only nitipan mail read does.
+
+The waiter stands down when any Claude Code settings scope you can read sets crossSessionInbound to
+refuse. Mail then waits until the session's next prompt, tool call, or nitipan call.
+`, hooks, MailWaitTimeoutSeconds)
 }
 
 func codex(in Input) string {
