@@ -16,7 +16,7 @@ approved plan is `/Users/ripta/.claude/plans/tidy-baking-wozniak.md`.
 
 | Milestone | Run status | Commit |
 |-----------|------------|--------|
-| NIT-005 M3 | DONE | "nitipan: fence broker leases at the push" |
+| NIT-005 M3 | DONE | "nitipan: fence broker leases at the push", fixes in "nitipan: give push's git calls the hook's time to reach a remote" |
 
 ## Best guesses from the plan
 
@@ -193,3 +193,42 @@ Checks: `make ci` passed, with lint at 0 issues, `internal/cli` at 433.4 s, and 
 
 NIT-005 is `implemented`, and `index.md` says so. Row `NIT-005 M3` moved from `queue.md` to the end of `history.md`.
 `proposals.py check` then returned `[]`.
+
+## Final review
+
+A fresh reviewer and a fresh `adr-impact` agent ran over the whole run, from the base commit to the row finish. This
+was also the run's ADR review. The run added and edited no ADR file. No ADR is in conflict or superseded. Every ADR
+candidate in the Decision Log carries an outcome. The timeout fix, its test, the row finish, and the final text and
+As built of the proposal all matched the code.
+
+| Finding | Disposition |
+|---------|-------------|
+| The fence format candidate's update entry says it "stays undecided until the end of the run", and the original entry still waits on NIT-004 reaching `accepted` | fixed in part, see below |
+| The fence format candidate names a format, not an invariant | left for the user |
+
+The freeze allows no text change inside the Decision Log of an `implemented` proposal except an ADR candidate's dated
+outcome. A correction of fact does not pass there. The update entry's "until the end of the run" therefore stays as
+written. The original 2026-10-24 candidate's outcome now reads "Undecided on 2026-11-08". It says the waits are spent,
+and that the candidate needs lifting to an invariant before it is weighed. `proposals.py freeze` with the run's three
+commits returned `[]`, and `proposals.py check` returned `[]`.
+
+## Commits
+
+In order, all in the code repo, which also holds the specs:
+
+1. "nitipan: fence broker leases at the push"
+2. "nitipan: give push's git calls the hook's time to reach a remote"
+3. "spec: mark NIT-005 implemented and move its last queue row to history"
+4. "spec: settle NIT-005's fence format candidate and finish the M3 report"
+
+## Left for the user
+
+- huggingface.co was not probed for the M3 host check. The As built block and the risk entry say so
+- An agent can set `nitipan.<remote>.atomic=false` in its clone and get only the lease check on that remote. This falls
+  under the accepted risk "Hooks are bypassable". The README may want to say the flag is trusted
+- The fence format ADR candidate is undecided. It names a format. A lifted form is "fence state on a remote is
+  versioned, and older and newer binaries refuse or preserve what they do not understand"
+- The user's own terminal may push a well-formed fence ref by hand, since it passes the pre-push hook with no fence
+  update, as the settled text has it
+- A fence ref created on the remote between the hook's listing and a pruning push can still be deleted. It cannot be
+  closed without a server hook, and the proposal states it as accepted

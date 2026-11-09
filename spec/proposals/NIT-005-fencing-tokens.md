@@ -791,9 +791,9 @@ Fences `machine` leases on one machine. Needs no broker.
   fence, with disclosure flagged as the user's to decide. Answer: a refusal asks the broker for the holder, so naming
   survives whenever the broker answers. Converged in one pass on the critic's hardened option.
 - 2026-10-24: ADR candidate (hard to reverse): the fence ref namespace, its name encoding, and the fence object format.
-  It is stored data on remotes the user may not control, and every binary reads it. Waits on the proposal loop's
-  check of the encoding and counter durability, and on NIT-004 reaching `accepted`, since the key mapping relies on its
-  name syntax.
+  It is stored data on remotes the user may not control, and every binary reads it. Undecided on 2026-11-08: its waits
+  are spent, since NIT-004 is `implemented` and the encoding and counter durability shipped. It still names a format,
+  so it needs lifting to the invariant it serves before it is weighed.
 - 2026-10-24 (autonomous): The whole-proposal review reopened the touched-path rule from "Local fencing for NIT-001"
   and "Token scope". A finished rebase, `reset`, a detached-HEAD commit landed by `update-ref`, and a salvage pin each
   passed the hook. A force-push rewind or a deletion carried no fence update. Added the open questions "Touched set for
