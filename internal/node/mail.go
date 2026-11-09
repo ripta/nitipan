@@ -515,6 +515,9 @@ func (n *Node) ringSocket(ad adapter.Adapter, r mailbox.Registration, keys []str
 	fresh, err := mailbox.Claim(n.opts.StateDir, r.Identity, keys, now)
 
 	switch {
+	case errors.Is(err, mailbox.ErrNoRegistration):
+		// A reap removed the registration after it was picked. There is no session left to ring.
+		return
 	case errors.Is(err, mailbox.ErrNotRewritten):
 		// The ledger cannot record this ring, so a repeat is possible. Ring at most once in a while.
 		n.warn(err.Error())

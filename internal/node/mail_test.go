@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -680,7 +681,19 @@ func TestARingForARegistrationReapedAfterItWasPickedWritesNoLedger(t *testing.T)
 
 	t.Cleanup(func() { ringDialer = old })
 
-	mp := newMailPair(t, nil)
+	var (
+		warnMu sync.Mutex
+		warned []string
+	)
+
+	mp := newMailPair(t, func(o *Options) {
+		o.Warn = func(m string) {
+			warnMu.Lock()
+			defer warnMu.Unlock()
+
+			warned = append(warned, m)
+		}
+	})
 
 	path, _ := inboxSocket(t)
 	reg := mp.register(t, mp.bState, secondMachine, os.Getpid(), startA, "sess-b", path)
@@ -709,5 +722,14 @@ func TestARingForARegistrationReapedAfterItWasPickedWritesNoLedger(t *testing.T)
 
 	if dials.Load() != before {
 		t.Error("the node rang a session whose registration was gone")
+	}
+
+	warnMu.Lock()
+	defer warnMu.Unlock()
+
+	for _, m := range warned {
+		if strings.Contains(m, "claiming the ring ledger") {
+			t.Errorf("a reaped registration is a benign race, but the node warned: %s", m)
+		}
 	}
 }
