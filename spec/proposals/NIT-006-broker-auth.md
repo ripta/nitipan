@@ -575,7 +575,7 @@ Amended 2026-10-24; see Decision Log.
 
 ### M1: User identity and label binding
 
-**Status:** IN PROGRESS
+**Status:** NOT STARTED
 
 - Every call on the node API carries the node credential, and the broker refuses a call without one. A forwarded
   session request acts as the label's bound user, whatever user its attestation or record names
