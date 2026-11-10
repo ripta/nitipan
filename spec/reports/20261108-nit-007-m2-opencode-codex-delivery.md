@@ -2,15 +2,15 @@
 
 **Date:** 2026-11-08
 
-NIT-007 M2 is in progress. This report records the approved work-queue run in the local macOS checkout at
-`/Users/ripta/projects/nitipan`. Implementation and its checks passed. Independent review found two issues; fix round 1 passed. Row and final reviews remain pending.
+NIT-007 M2 is complete. Codex and opencode delivery, turn reminders, and reviewed failure recovery passed their
+checks in the local macOS checkout at `/Users/ripta/projects/nitipan`. The approved next-one run finished on 2026-11-09.
 
 ## Run state
 
-- Run: default `next 1`, NIT-007 M2 only. Milestone status: DONE; row complete; final review pending.
+- Run: default `next 1`, NIT-007 M2 only. Milestone status: DONE; row and final review fixes complete.
 - Dependency: NIT-007 M1 is DONE. Proposal accepted; era 3. No skipped, held, or blocked rows.
 - Code and specs share this repository. Base commit subject: `nitipan: say the pre-push hook trusts the atomic flag, and how to clear it`.
-- Row base is the same as the run base. Run commit subjects: `nitipan: wake Codex and opencode sessions for pending mail`.
+- Row base is the same as the run base. Run commit subjects are listed under Final commits below.
 - Machine-local state tracks commit identifiers outside committed documentation.
 
 ## Approved plan and authorization
@@ -75,7 +75,7 @@ Applicable ADRs: 01, 04, 05, 06, 07, and 08. No new ADR candidate is currently i
 
 ## Reviews and results
 
-Initial implementation checks passed. Independent milestone and ADR reviews completed; fix round 1 passed. Row and final reviews remain pending. No stash is recorded.
+Implementation checks and the independent milestone, row, and final reviews are complete. Every actionable finding was fixed and verified. No stash is recorded.
 
 Final focused live evidence, inspected directly on 2026-11-08:
 
@@ -188,10 +188,10 @@ Two empty lock files have unknown ownership. They were left untouched, not attri
 Final owned host/TUI processes were confirmed absent. The reg, inbox, read, and wait mail directories were empty.
 No other unrelated edit was reported. All implementer commands finished before the implementation report.
 
-## Status
+## Milestone state before row review
 
-M2 is DONE in the proposal, with As built and amendments. The run remains IN PROGRESS through row and final reviews.
-The proposal remains accepted and its queue row remains until the row review completes. The milestone is committed; fresh row code and ADR reviews are running.
+At the milestone commit, M2 was DONE with As built and amendments. The proposal remained accepted and its queue row
+remained scheduled until row review. The later completion and final-fix sections record the finished state.
 
 ## Fix round completion and recovery
 
@@ -229,7 +229,7 @@ idle session emits no new lifecycle event. Disposition: fix. A fresh row impleme
 eventually complete discovery with bounded processing and a regression proving wake without user activity.
 
 The row reviewer confirmed the prior foreign-machine liveness and non-waking reminder fixes. No finding was dismissed.
-The row remains under review until its discovery fix and checks pass. Proposal completion remains pending.
+At this point row completion awaited its discovery fix and checks; the following sections record their completion.
 
 ## Row fix 1 results
 
@@ -316,3 +316,36 @@ test server. The successful trial used the command approval mechanism.
 The implemented proposal received an As built correction with a Decision Log quoting the prior claim. No settled
 design changed. Newer/unusable files remain untouched. No new ADR candidate, unresolved trace, unrelated edit, or
 blocker remains. No finding was dismissed. Final ADR review found no conflict; no ADR file was added or edited.
+
+## Final commits
+
+All code, specs, and this report belong to the same repository. The run made these commits in order:
+
+1. `nitipan: wake Codex and opencode sessions for pending mail`
+2. `nitipan: rediscover idle opencode mail recipients`
+3. `spec: mark session mail implemented and finish its queue row`
+4. `nitipan: isolate mail delivery failures between sessions`
+
+The report's last amendments are committed separately; git log on this path identifies that carrying commit.
+
+## Final decisions and limits
+
+The choices most useful to review are per-session Codex/opencode registrations with unchanged Claude aliases,
+comparison-only Codex home data under trusted node startup inputs, five-second one-page discovery traversal, and
+bounded rotating rollback retries after healthy deliveries. These follow the approved plan and existing adapters,
+ADRs 04–07, and the measured regressions. A different polling or retry policy would change latency, not mail identity
+or explicit-read ownership. No ADR candidate passed beyond the already accepted invariants; no ADR was written.
+
+The known tabs.enabled=false probe mismatch remains outside this work and is reproducible on the committed original
+harness/plugin. The focused mailbox proofs pass independently. The two unknown empty ring-lock files listed above
+remain untouched. No freeze hunk or finding about another session's edit was found. No held/blocked row or stash
+exists in this run. Other queued proposals remain outside its approved next-one scope.
+
+## Status
+
+Complete on 2026-11-09. NIT-007 is implemented; M2 is DONE and its row is in history. Milestone, row, and final review
+findings are fixed with pre-fix regression evidence and passing final checks. Final CI session 7518 passed; final
+proposal check and freeze returned no findings. All child commands finished. No push, pull request, branch change,
+destructive operation, or edit outside the run's owned files was performed. Only the documented preexisting probe
+mismatch and unknown lock files remain open; neither blocks delivery checks. The machine-local recovery state is
+removed when the report's final amendments are committed.
