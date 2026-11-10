@@ -837,7 +837,7 @@ func TestTheNetworkHandlerServesNoApprovalRoute(t *testing.T) {
 	}
 }
 
-func TestAStore10ReadsUnder11AndAnOlderBrokerRefusesA11Store(t *testing.T) {
+func TestAStore10ReadsUnder20AndAnOlderBrokerRefusesA20Store(t *testing.T) {
 	dir, err := os.MkdirTemp("", "nitipan-store")
 	if err != nil {
 		t.Fatal(err)
@@ -854,9 +854,14 @@ func TestAStore10ReadsUnder11AndAnOlderBrokerRefusesA11Store(t *testing.T) {
 
 	_ = old.Close()
 
-	cur, err := OpenStore(path, StoreOptions{Volume: localVolume{}})
+	cur, err := OpenStore(path, StoreOptions{
+		Volume: localVolume{},
+		Migrations: map[int]Migration{
+			1: MigrateV1ToV2,
+		},
+	})
 	if err != nil {
-		t.Fatalf("a 1.1 broker could not read a 1.0 store: %v", err)
+		t.Fatalf("a 2.0 broker could not read a 1.0 store: %v", err)
 	}
 
 	if cur.Data().Mail == nil || cur.Data().Pins == nil {

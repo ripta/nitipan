@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,11 @@ var (
 	// ErrAdminPeer means the process on the admin socket is not the broker's OS user.
 	ErrAdminPeer = errors.New("the admin socket accepts only the broker's own OS user")
 )
+
+// fingerprintMatches returns true if the hash's fingerprint equals the fingerprint, in constant time.
+func fingerprintMatches(hash, fingerprint string) bool {
+	return subtle.ConstantTimeCompare([]byte(wire.Fingerprint(hash)), []byte(fingerprint)) == 1
+}
 
 // notePending records a key a node presented, unless the label is pinned to it. It runs inside a
 // commit.
@@ -142,7 +148,7 @@ func (b *Broker) Approve(label, fingerprint string) (pinned bool, err error) {
 	}
 
 	if pin := b.store.Data().Pins[label]; pin.PinnedHash != "" {
-		if wire.Fingerprint(pin.PinnedHash) == fingerprint {
+		if fingerprintMatches(pin.PinnedHash, fingerprint) {
 			return true, nil
 		}
 
@@ -152,7 +158,7 @@ func (b *Broker) Approve(label, fingerprint string) (pinned bool, err error) {
 	var hash string
 
 	for h := range b.store.Data().Pins[label].Pending {
-		if wire.Fingerprint(h) == fingerprint {
+		if fingerprintMatches(h, fingerprint) {
 			hash = h
 		}
 	}
@@ -210,6 +216,11 @@ func (b *Broker) Forget(label string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	return b.forgetLocked(label)
+}
+
+func (b *Broker) forgetLocked(label string) error {
+
 	row, ok := b.store.Data().Labels[label]
 	if !ok {
 		return fmt.Errorf("label %q: %w", label, ErrUnknownLabel)
@@ -221,6 +232,12 @@ func (b *Broker) Forget(label string) error {
 	err := b.commit(func(d *Data) error {
 		d.Pins[label] = PinRecord{Forgotten: true, ForgottenAt: now}
 		delete(d.Nodes, nk.String())
+
+		binding, bound := d.Bindings[label]
+		if bound {
+			binding.LastBoundUser = binding.UserID
+			d.Bindings[label] = binding
+		}
 
 		for id, m := range d.Mail {
 			if m.ToLabel != label || m.Bounced {
@@ -252,6 +269,10 @@ func (b *Broker) Forget(label string) error {
 		}
 
 		ns.liveSessions = nil
+	}
+
+	if err := b.store.StripHashFromKeptFile(label); err != nil {
+		b.cfg.Logger.Error("stripping hash from kept file", "label", label, "error", err)
 	}
 
 	return nil
@@ -315,9 +336,16 @@ type AdminPending struct {
 
 // Paths the admin socket serves. They exist only there. The network handler serves none of them.
 const (
-	AdminPathPending = "/pending"
-	AdminPathApprove = "/approve"
-	AdminPathForget  = "/forget"
+	AdminPathPending        = "/pending"
+	AdminPathApprove        = "/approve"
+	AdminPathForget         = "/forget"
+	AdminPathConfirmUpgrade = "/confirm-upgrade"
+	AdminPathAdmissions     = "/admissions"
+	AdminPathAdmit          = "/admit"
+	AdminPathLink           = "/link"
+	AdminPathBindings       = "/bindings"
+	AdminPathRevokeUser     = "/revoke-user"
+	AdminPathCrossUser      = "/cross-user"
 )
 
 // AdminHandler serves the approval commands. It is mounted on the admin socket only.
@@ -327,39 +355,194 @@ func (b *Broker) AdminHandler() http.Handler {
 	mux.HandleFunc("GET "+AdminPathPending, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, AdminPending{Labels: b.Pending()})
 	})
-
-	mux.HandleFunc("POST "+AdminPathApprove, func(w http.ResponseWriter, r *http.Request) {
-		var req adminApprove
-
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
-
-			return
-		}
-
-		pinned, err := b.Approve(req.Label, req.Fingerprint)
-		if err != nil {
-			b.adminResult(w, err)
-
-			return
-		}
-
-		writeJSON(w, http.StatusOK, AdminApproved{Pinned: pinned})
-	})
-
-	mux.HandleFunc("POST "+AdminPathForget, func(w http.ResponseWriter, r *http.Request) {
-		var req adminForget
-
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
-
-			return
-		}
-
-		b.adminResult(w, b.Forget(req.Label))
-	})
+	mux.HandleFunc("POST "+AdminPathApprove, b.handleAdminApprove)
+	mux.HandleFunc("POST "+AdminPathForget, b.handleAdminForget)
+	mux.HandleFunc("POST "+AdminPathConfirmUpgrade, b.handleAdminConfirmUpgrade)
+	mux.HandleFunc("GET "+AdminPathAdmissions, b.handleAdminAdmissions)
+	mux.HandleFunc("POST "+AdminPathAdmit, b.handleAdminAdmit)
+	mux.HandleFunc("POST "+AdminPathLink, b.handleAdminLink)
+	mux.HandleFunc("GET "+AdminPathBindings, b.handleAdminBindings)
+	mux.HandleFunc("POST "+AdminPathRevokeUser, b.handleAdminRevokeUser)
+	mux.HandleFunc("POST "+AdminPathCrossUser, b.handleAdminCrossUser)
 
 	return mux
+}
+
+func (b *Broker) handleAdminApprove(w http.ResponseWriter, r *http.Request) {
+	var req adminApprove
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	pinned, err := b.Approve(req.Label, req.Fingerprint)
+	if err != nil {
+		b.adminResult(w, err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AdminApproved{Pinned: pinned})
+}
+
+func (b *Broker) handleAdminForget(w http.ResponseWriter, r *http.Request) {
+	var req adminForget
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	b.adminResult(w, b.Forget(req.Label))
+}
+
+func (b *Broker) handleAdminConfirmUpgrade(w http.ResponseWriter, _ *http.Request) {
+	if err := b.store.DeleteKeptFile(); err != nil {
+		writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (b *Broker) handleAdminAdmissions(w http.ResponseWriter, _ *http.Request) {
+	b.mu.Lock()
+	admissions := b.store.Data().PendingAdmissions
+	b.mu.Unlock()
+
+	var list []AdmissionRecord
+	for _, a := range admissions {
+		list = append(list, a)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"admissions": list})
+}
+
+func (b *Broker) handleAdminAdmit(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Issuer string `json:"issuer"`
+		Sub    string `json:"sub"`
+		Email  string `json:"email"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	user, err := b.AdmitUser(req.Issuer, req.Sub, req.Email, time.Now())
+	if err != nil {
+		b.adminResult(w, err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (b *Broker) handleAdminLink(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Issuer string `json:"issuer"`
+		Sub    string `json:"sub"`
+		UserID string `json:"user_id"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	if err := b.LinkIssuerSub(req.Issuer, req.Sub, req.UserID); err != nil {
+		b.adminResult(w, err)
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (b *Broker) handleAdminBindings(w http.ResponseWriter, _ *http.Request) {
+	b.mu.Lock()
+	bindings := b.store.Data().Bindings
+	users := b.store.Data().Users
+	labels := b.store.Data().Labels
+	b.mu.Unlock()
+
+	type binding struct {
+		Label     string    `json:"label"`
+		UserID    string    `json:"user_id"`
+		UserLabel string    `json:"user_label"`
+		Email     string    `json:"email"`
+		Host      string    `json:"host"`
+		User      string    `json:"user"`
+		LastSeen  time.Time `json:"last_seen"`
+		BoundAt   time.Time `json:"bound_at"`
+	}
+
+	var list []binding
+	for label, bind := range bindings {
+		user := users[bind.UserID]
+		labelRec := labels[label]
+
+		list = append(list, binding{
+			Label:     label,
+			UserID:    bind.UserID,
+			UserLabel: user.UserLabel,
+			Email:     user.Email,
+			Host:      labelRec.Host,
+			User:      labelRec.User,
+			LastSeen:  labelRec.LastSeen,
+			BoundAt:   bind.BoundAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"bindings": list})
+}
+
+func (b *Broker) handleAdminRevokeUser(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	if err := b.RevokeUser(req.UserID); err != nil {
+		b.adminResult(w, err)
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (b *Broker) handleAdminCrossUser(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enable bool `json:"enable"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	if err := b.SetCrossUserEnabled(req.Enable); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (b *Broker) adminResult(w http.ResponseWriter, err error) {

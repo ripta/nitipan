@@ -24,7 +24,11 @@ import (
 //
 // Minor 1 added pins, reported sessions, and mail. A 1.0 store reads under a 1.1 broker with those empty,
 // and an older broker refuses the 1.1 store, since a rewrite would drop the mail it holds.
-var StoreVersion = record.Version{Major: 1, Minor: 1}
+//
+// Major 2 adds user identity, bindings, admissions, delegations, mail grants, and conversations. The
+// migration binds every pinned label to the owner, creates the owner user, and rewrites acting_for on
+// leases held by those labels. An older broker refuses the 2.0 store.
+var StoreVersion = record.Version{Major: 2, Minor: 0}
 
 // Errors returned by the store.
 var (
@@ -70,6 +74,46 @@ type Data struct {
 
 	// Mail holds the messages that are queued for a node, and the stage of each one it has sent on.
 	Mail map[string]MailRecord `json:"mail,omitempty"`
+
+	// OwnerID is the broker owner's stable user ID, assigned when the broker is first configured.
+	// Every label pinned under NIT-007 is bound to it on upgrade to store 2.0.
+	OwnerID string `json:"owner_id,omitempty"`
+
+	// Users maps each user ID to their record. The owner is one of these.
+	Users map[string]UserRecord `json:"users,omitempty"`
+
+	// IssuerSubs maps each issuer plus sub to the user ID it resolves to. The key is
+	// "<issuer>\x00<sub>", so no issuer can be shifted into the sub part.
+	IssuerSubs map[string]string `json:"issuer_subs,omitempty"`
+
+	// PendingAdmissions maps each unadmitted issuer plus sub to when it first signed in and its email.
+	PendingAdmissions map[string]AdmissionRecord `json:"pending_admissions,omitempty"`
+
+	// Bindings maps each label to its binding: the bound user ID, the last bound user, and the
+	// derivation version used.
+	Bindings map[string]BindingRecord `json:"bindings,omitempty"`
+
+	// Delegations maps each user ID to the set of labels they delegated to. The inner map is keyed
+	// by label for fast lookup.
+	Delegations map[string]map[string]time.Time `json:"delegations,omitempty"`
+
+	// MailGrants maps each user ID to the set of user IDs they granted mail from. The inner map is
+	// keyed by sender user ID for fast lookup.
+	MailGrants map[string]map[string]time.Time `json:"mail_grants,omitempty"`
+
+	// Conversations holds cross-user mail conversation state for reply authorization.
+	Conversations map[string]ConversationRecord `json:"conversations,omitempty"`
+
+	// CrossUserEnabled is true once the owner turns cross-user features on. It stays false while no
+	// identity provider is configured or while any label reported plain HTTP.
+	CrossUserEnabled bool `json:"cross_user_enabled,omitempty"`
+
+	// SchemeReports maps each label to the scheme it last reported at registration: "http" or "https".
+	SchemeReports map[string]string `json:"scheme_reports,omitempty"`
+
+	// PairingCodes maps each label to its active pairing code hash and expiry. The node sends the hash
+	// with its pending key.
+	PairingCodes map[string]PairingCodeRecord `json:"pairing_codes,omitempty"`
 }
 
 // PinRecord is the approval state of one label.
@@ -160,6 +204,69 @@ type LabelRecord struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
+// UserRecord is one user the broker knows. The owner is one of these.
+type UserRecord struct {
+	ID string `json:"id"`
+
+	// UserLabel is the four-word label derived from the user ID. It names the user in acting_for,
+	// cross-user mail, delegations, and grants.
+	UserLabel string `json:"user_label"`
+
+	// LabelDerivation is the version of the user label derivation.
+	LabelDerivation int `json:"label_derivation"`
+
+	// Email is what the identity provider reported, for display only.
+	Email string `json:"email,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AdmissionRecord is one unadmitted issuer plus sub that signed in.
+type AdmissionRecord struct {
+	Issuer string `json:"issuer"`
+	Sub    string `json:"sub"`
+	Email  string `json:"email"`
+
+	FirstSeen time.Time `json:"first_seen"`
+}
+
+// BindingRecord is one label's binding to a user.
+type BindingRecord struct {
+	// UserID is the user the label is bound to.
+	UserID string `json:"user_id"`
+
+	// LastBoundUser is the user the label was bound to before this, or the current one if never rebound.
+	// Forget and revoke-user keep it, so a rebind can detect a user change.
+	LastBoundUser string `json:"last_bound_user"`
+
+	// DerivationVersion is the user label derivation version that applied when this binding was made.
+	DerivationVersion int `json:"derivation_version"`
+
+	BoundAt time.Time `json:"bound_at"`
+}
+
+// ConversationRecord tracks one cross-user mail conversation for reply authorization.
+type ConversationRecord struct {
+	SenderUser    string `json:"sender_user"`
+	RecipientUser string `json:"recipient_user"`
+
+	// LastMessageRead is when the last message of the conversation was read. Replies are admitted for
+	// 7 days after this.
+	LastMessageRead time.Time `json:"last_message_read"`
+}
+
+// PairingCodeRecord is one label's active pairing code.
+type PairingCodeRecord struct {
+	// Hash is the SHA-256 of the pairing code the node printed.
+	Hash string `json:"hash"`
+
+	ExpiresAt time.Time `json:"expires_at"`
+
+	// WrongAttempts counts the wrong codes one signer submitted for this label. Five locks the signer
+	// out of this label until expiry.
+	WrongAttempts map[string]int `json:"wrong_attempts,omitempty"`
+}
+
 func newData() *Data {
 	return &Data{
 		Version: StoreVersion,
@@ -169,6 +276,16 @@ func newData() *Data {
 		Pins:     map[string]PinRecord{},
 		Sessions: map[string]map[string]SessionRecord{},
 		Mail:     map[string]MailRecord{},
+
+		Users:             map[string]UserRecord{},
+		IssuerSubs:        map[string]string{},
+		PendingAdmissions: map[string]AdmissionRecord{},
+		Bindings:          map[string]BindingRecord{},
+		Delegations:       map[string]map[string]time.Time{},
+		MailGrants:        map[string]map[string]time.Time{},
+		Conversations:     map[string]ConversationRecord{},
+		SchemeReports:     map[string]string{},
+		PairingCodes:      map[string]PairingCodeRecord{},
 	}
 }
 
@@ -213,6 +330,30 @@ func (d *Data) clone() *Data {
 	}
 
 	out.Mail = maps.Clone(d.Mail)
+
+	out.Users = maps.Clone(d.Users)
+	out.IssuerSubs = maps.Clone(d.IssuerSubs)
+	out.PendingAdmissions = maps.Clone(d.PendingAdmissions)
+	out.Bindings = maps.Clone(d.Bindings)
+
+	out.Delegations = make(map[string]map[string]time.Time, len(d.Delegations))
+	for k, v := range d.Delegations {
+		out.Delegations[k] = maps.Clone(v)
+	}
+
+	out.MailGrants = make(map[string]map[string]time.Time, len(d.MailGrants))
+	for k, v := range d.MailGrants {
+		out.MailGrants[k] = maps.Clone(v)
+	}
+
+	out.Conversations = maps.Clone(d.Conversations)
+	out.SchemeReports = maps.Clone(d.SchemeReports)
+
+	out.PairingCodes = make(map[string]PairingCodeRecord, len(d.PairingCodes))
+	for k, v := range d.PairingCodes {
+		v.WrongAttempts = maps.Clone(v.WrongAttempts)
+		out.PairingCodes[k] = v
+	}
 
 	return &out
 }
@@ -395,6 +536,42 @@ func (s *Store) load() error {
 		d.Sessions = map[string]map[string]SessionRecord{}
 	}
 
+	if d.Users == nil {
+		d.Users = map[string]UserRecord{}
+	}
+
+	if d.IssuerSubs == nil {
+		d.IssuerSubs = map[string]string{}
+	}
+
+	if d.PendingAdmissions == nil {
+		d.PendingAdmissions = map[string]AdmissionRecord{}
+	}
+
+	if d.Bindings == nil {
+		d.Bindings = map[string]BindingRecord{}
+	}
+
+	if d.Delegations == nil {
+		d.Delegations = map[string]map[string]time.Time{}
+	}
+
+	if d.MailGrants == nil {
+		d.MailGrants = map[string]map[string]time.Time{}
+	}
+
+	if d.Conversations == nil {
+		d.Conversations = map[string]ConversationRecord{}
+	}
+
+	if d.SchemeReports == nil {
+		d.SchemeReports = map[string]string{}
+	}
+
+	if d.PairingCodes == nil {
+		d.PairingCodes = map[string]PairingCodeRecord{}
+	}
+
 	s.data = &d
 
 	// A store of an older minor is stamped with this broker's version as it loads. The fields this
@@ -461,6 +638,65 @@ func (s *Store) Persist(d *Data) error {
 // Swap installs d as the current state. Call it after Persist succeeded.
 func (s *Store) Swap(d *Data) {
 	s.data = d
+}
+
+// StripHashFromKeptFile removes the key hash for a label from the kept .v1 file, so a rollback
+// refuses it. The kept file holds the hashes of NIT-007 keys from before the migration to major 2.
+// It does what v1's Forget did: sets forgotten=true and deletes the node record.
+func (s *Store) StripHashFromKeptFile(label string) error {
+	keptPath := fmt.Sprintf("%s.v1", s.path)
+
+	raw, err := os.ReadFile(keptPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("reading the kept file %s: %w", keptPath, err)
+	}
+
+	var full map[string]interface{}
+	if err := json.Unmarshal(raw, &full); err != nil {
+		return fmt.Errorf("decoding the kept file: %w", err)
+	}
+
+	labelRec := s.data.Labels[label]
+	nk := NodeKey{MachineID: labelRec.MachineID, UID: labelRec.UID}
+
+	nodes, _ := full["nodes"].(map[string]interface{})
+	if nodes != nil {
+		delete(nodes, nk.String())
+	}
+
+	pins, _ := full["pins"].(map[string]interface{})
+	if pins != nil {
+		if pinRec, ok := pins[label].(map[string]interface{}); ok {
+			pinRec["forgotten"] = true
+			pinRec["pinned_hash"] = ""
+		}
+	}
+
+	updated, err := json.Marshal(full)
+	if err != nil {
+		return fmt.Errorf("encoding the kept file: %w", err)
+	}
+
+	if err := writeFileSynced(keptPath, append(updated, '\n')); err != nil {
+		return fmt.Errorf("writing the kept file: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteKeptFile removes the kept .v1 file. Once it is removed, a rollback is impossible.
+func (s *Store) DeleteKeptFile() error {
+	keptPath := fmt.Sprintf("%s.v1", s.path)
+
+	if err := os.Remove(keptPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing the kept file %s: %w", keptPath, err)
+	}
+
+	return nil
 }
 
 // removeLeftovers deletes this store's own temp file, left by a crash between write and rename.

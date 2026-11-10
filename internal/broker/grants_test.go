@@ -571,3 +571,61 @@ func TestOldNodeSnapshotWithNoAckedFieldStillWorks(t *testing.T) {
 		t.Fatalf("the snapshot must not disturb the lease: %+v", h.b.Leases())
 	}
 }
+
+// TestSubstituteActingForPreventsCrossUserClaiming tests that a label bound to U1 cannot claim
+// in U2's scope by naming U2's label in acting_for. M1 has no delegations, so substitute
+// everything except the label's own bound user's label.
+func TestSubstituteActingForPreventsCrossUserClaiming(t *testing.T) {
+	h := newHarness(t, nil)
+	h.twoNodes()
+
+	u1ID := "user1"
+	u1Label := DeriveUserLabel(u1ID)
+	u2ID := "user2"
+	u2Label := DeriveUserLabel(u2ID)
+
+	d := h.store.Data()
+	next := d.clone()
+	next.OwnerID = u1ID
+	next.Users[u1ID] = UserRecord{
+		ID:              u1ID,
+		UserLabel:       u1Label,
+		LabelDerivation: UserLabelDerivation,
+	}
+	next.Users[u2ID] = UserRecord{
+		ID:              u2ID,
+		UserLabel:       u2Label,
+		LabelDerivation: UserLabelDerivation,
+	}
+
+	laptopLabel := next.Nodes[laptop.key().String()].Label
+	next.Bindings[laptopLabel] = BindingRecord{
+		UserID:            u1ID,
+		LastBoundUser:     u1ID,
+		DerivationVersion: UserLabelDerivation,
+	}
+
+	if err := h.store.Persist(next); err != nil {
+		t.Fatal(err)
+	}
+	h.store.Swap(next)
+
+	var res wire.Result
+	req := wire.Claim{
+		Version: wire.Current, ID: "L1", Reach: wire.ReachUser, Derivation: 1, Anchor: "anchor-L1",
+		Entries: name("svc"), Holder: holder("a"), ActingFor: u2Label,
+	}
+
+	if h.call(laptop, wire.PathClaim, req, &res) != http.StatusOK || res.Code != wire.CodeGranted {
+		t.Fatalf("claim failed: %+v", res)
+	}
+
+	leases := h.b.Leases()
+	if len(leases) != 1 {
+		t.Fatalf("lease count = %d, want 1", len(leases))
+	}
+
+	if leases[0].ActingFor != u1Label {
+		t.Errorf("stored lease ActingFor = %q, want %q (the label's bound user, not the claimed user)", leases[0].ActingFor, u1Label)
+	}
+}

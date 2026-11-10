@@ -394,6 +394,24 @@ func validRequestID(id string) bool {
 	return id != "" && len(id) <= 64 && !strings.ContainsAny(id, "/\x00")
 }
 
+// substituteActingFor rewrites acting_for to the label's bound user unless it already names that user.
+// A request from before NIT-006 carries an OS user name in acting_for, which the broker substitutes
+// with the node's bound user. M1 has no delegations, so substitute everything except the label's own
+// bound user's label.
+func (b *Broker) substituteActingFor(label, actingFor string) string {
+	binding, bound := b.store.Data().Bindings[label]
+	if !bound {
+		return actingFor
+	}
+
+	user := b.store.Data().Users[binding.UserID]
+	if actingFor != "" && actingFor == user.UserLabel {
+		return actingFor
+	}
+
+	return user.UserLabel
+}
+
 func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKey) {
 	var req wire.Claim
 
@@ -475,10 +493,12 @@ func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKe
 	rec := b.store.Data().Nodes[node.String()]
 	taker := holderText(req.Holder) + " on " + rec.Label
 
+	actingFor := b.substituteActingFor(rec.Label, req.ActingFor)
+
 	fresh := &grant{
 		Lease: wire.Lease{
 			ID: req.ID, Reach: req.Reach, State: wire.StateLive, Revision: 1,
-			Entries: req.Entries, Anchor: req.Anchor, Holder: req.Holder, ActingFor: req.ActingFor,
+			Entries: req.Entries, Anchor: req.Anchor, Holder: req.Holder, ActingFor: actingFor,
 			Description: req.Description, Node: rec.Label, Liveness: wire.LiveAlive,
 		},
 		Machine: node.MachineID, UID: node.UID, Derivation: req.Derivation,

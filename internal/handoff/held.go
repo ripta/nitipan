@@ -32,6 +32,7 @@ const (
 	// KindWhoHolds and KindWhoIs are the discovery queries.
 	KindWhoHolds = "who-holds"
 	KindWhoIs    = "who-is"
+	KindWhoAmI   = "who-am-i"
 )
 
 // Directories beside the request directories. A V1 binary never scans broker/.
@@ -402,18 +403,20 @@ type ReleaseReply struct {
 }
 
 // KindSince is the request version that introduced a kind. A request older than that is refused, since
-// no CLI of that version could have written it.
+// no CLI of that version could have written it. Returns 0 for unknown kinds.
 func KindSince(kind string) int {
 	switch kind {
 	case "ping":
 		return 1
+	case KindClaim, KindRelease, KindBreak, KindRenew, KindList, KindFence:
+		return 2
 	case KindWhoHolds, KindWhoIs:
 		return 3
-	case KindMailSend, KindMailStatus:
+	case KindMailSend, KindMailStatus, KindWhoAmI:
 		return 4
 	}
 
-	return 2
+	return 0
 }
 
 // OrphanDir holds the anchors of claims whose refusal reached the CLI too late.

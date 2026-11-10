@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/space-armada/nitipan/internal/monoclock"
+	"github.com/space-armada/nitipan/internal/oidc"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
@@ -108,6 +109,15 @@ type Config struct {
 	// and nothing can then be approved.
 	AdminSocket string
 
+	// OIDCConfig configures the OIDC identity provider. When nil, only the broker owner can bind labels.
+	OIDCConfig *oidc.Config
+
+	// Listen is the broker's listen address, used to check whether cross-user features can be enabled.
+	Listen string
+
+	// TLS reports whether the broker serves with TLS.
+	TLS bool
+
 	KeyPolicy KeyPolicy
 	Logger    *slog.Logger
 }
@@ -117,6 +127,8 @@ type Broker struct {
 	cfg   Config
 	store *Store
 	boot  string
+
+	signInMgr *SignInManager
 
 	mu    sync.Mutex
 	nodes map[NodeKey]*nodeState
@@ -211,6 +223,15 @@ func New(cfg Config) *Broker {
 		done:  make(chan struct{}),
 	}
 
+	if cfg.OIDCConfig != nil {
+		oidcClient, err := oidc.NewClient(*cfg.OIDCConfig)
+		if err != nil {
+			b.fail(fmt.Errorf("initializing OIDC client: %w", err))
+		} else {
+			b.signInMgr = NewSignInManager(b, oidcClient)
+		}
+	}
+
 	if err := b.startGrants(); err != nil {
 		b.fail(err)
 	}
@@ -297,6 +318,7 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathSnapshot, b.authed(b.handleSnapshot))
 	mux.HandleFunc("POST "+wire.PathHeartbeat, b.authed(b.handleHeartbeat))
 	mux.HandleFunc("POST "+wire.PathPing, b.authed(b.handlePing))
+	mux.HandleFunc("POST "+wire.PathPair, b.authed(b.handlePair))
 	mux.HandleFunc("POST "+wire.PathClaim, b.authed(b.handleClaim))
 	mux.HandleFunc("POST "+wire.PathRenew, b.authed(b.handleRenew))
 	mux.HandleFunc("POST "+wire.PathRelease, b.authed(b.handleRelease))
@@ -305,10 +327,18 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathFence, b.authed(b.handleFence))
 	mux.HandleFunc("POST "+wire.PathWhoHolds, b.authed(b.handleWhoHolds))
 	mux.HandleFunc("POST "+wire.PathWhoIs, b.authed(b.handleWhoIs))
+	mux.HandleFunc("POST "+wire.PathWhoAmI, b.authed(b.handleWhoAmI))
 	mux.HandleFunc("POST "+wire.PathMailSend, b.authed(b.handleMailSend))
 	mux.HandleFunc("POST "+wire.PathMailAck, b.authed(b.handleMailAck))
 	mux.HandleFunc("POST "+wire.PathMailReport, b.authed(b.handleMailReport))
 	mux.HandleFunc("POST "+wire.PathMailStatus, b.authed(b.handleMailStatus))
+
+	if b.signInMgr != nil {
+		mux.HandleFunc("GET /signin", b.handleSignInPage)
+		mux.HandleFunc("POST /bind", b.handleBindLabel)
+		mux.HandleFunc("GET /callback", b.handleCallback)
+		mux.HandleFunc("POST /bind-submit", b.handleBindSubmit)
+	}
 
 	return mux
 }
@@ -358,7 +388,7 @@ func decodeBody(w http.ResponseWriter, r *http.Request, into any, version func()
 type nodeHandler func(w http.ResponseWriter, r *http.Request, key NodeKey)
 
 // authed refuses a request unless its bearer key matches the key registered for the machine ID and
-// uid in its headers.
+// uid in its headers. When cross-user features are enabled, it also refuses unbound labels.
 func (b *Broker) authed(next nodeHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid, err := strconv.Atoi(r.Header.Get(wire.HeaderUID))
@@ -370,6 +400,21 @@ func (b *Broker) authed(next nodeHandler) http.HandlerFunc {
 
 			return
 		}
+
+		b.mu.Lock()
+		d := b.store.Data()
+		if d.CrossUserEnabled {
+			label := d.Nodes[key.String()].Label
+			if _, bound := d.Bindings[label]; !bound {
+				b.mu.Unlock()
+				writeErr(w, http.StatusForbidden, wire.CodeForbidden, "this label is not bound to a user. "+
+					"Bind it on the broker host with 'nitipan broker approve', or on the broker's sign-in page with "+
+					"'nitipan node pair' and the pairing code")
+
+				return
+			}
+		}
+		b.mu.Unlock()
 
 		next(w, r, key)
 	}
@@ -432,7 +477,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// A key the user approved before it arrived pins on arrival, and replaces whatever key holds the label.
 	pin := b.store.Data().Pins[label]
-	awaited := pin.PinnedHash == "" && pin.Awaiting != "" && pin.Awaiting == wire.Fingerprint(hash)
+	awaited := pin.PinnedHash == "" && pin.Awaiting != "" && fingerprintMatches(hash, pin.Awaiting)
 
 	var err error
 
@@ -471,6 +516,12 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 			LastSeen:   b.cfg.Now(),
 		}
 
+		if req.HTTPS {
+			d.SchemeReports[label] = "https"
+		} else {
+			d.SchemeReports[label] = "http"
+		}
+
 		return nil
 	})
 	if err != nil {
@@ -484,6 +535,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	b.cfg.Logger.Info("node registered", "label", label, "uid", req.UID, "node_version", req.NodeVersion, "https", req.HTTPS)
 
+	crossUserEnabled := b.store.Data().CrossUserEnabled
+
 	writeJSON(w, http.StatusOK, wire.Registered{
 		Version:         wire.Current,
 		Label:           label,
@@ -491,6 +544,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		BrokerVersion:   b.cfg.Version,
 		TermMillis:      b.cfg.Term.Milliseconds(),
 		KeepaliveMillis: b.cfg.Keepalive.Milliseconds(),
+		CrossUser:       crossUserEnabled,
 	})
 }
 
@@ -583,6 +637,36 @@ func (b *Broker) handlePing(w http.ResponseWriter, r *http.Request, key NodeKey)
 	b.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, wire.Pong{Version: wire.Current, Label: label})
+}
+
+func (b *Broker) handlePair(w http.ResponseWriter, r *http.Request, key NodeKey) {
+	var req struct {
+		PairingHash string `json:"pairing_hash"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	if req.PairingHash == "" {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, "missing pairing_hash")
+
+		return
+	}
+
+	b.mu.Lock()
+	label := b.store.Data().Nodes[key.String()].Label
+	b.mu.Unlock()
+
+	if err := b.StorePairingCode(label, req.PairingHash, time.Now().Add(PairingCodeExpiry)); err != nil {
+		writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (b *Broker) handleStream(w http.ResponseWriter, r *http.Request, key NodeKey) {

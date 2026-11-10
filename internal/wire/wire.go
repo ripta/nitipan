@@ -24,6 +24,7 @@ const (
 	PathSnapshot  = Prefix + "/snapshot"
 	PathHeartbeat = Prefix + "/heartbeat"
 	PathPing      = Prefix + "/ping"
+	PathPair      = Prefix + "/pair"
 )
 
 // Headers a node sends on every request after registration. The broker checks the bearer key
@@ -85,6 +86,7 @@ func (v Version) Check() error {
 // Error codes the broker returns in an Error body.
 const (
 	CodeUnauthorized  = "unauthorized"
+	CodeForbidden     = "forbidden"
 	CodeKeyConflict   = "key_conflict"
 	CodeLabelConflict = "label_collision"
 	CodeBadRequest    = "bad_request"
@@ -139,6 +141,10 @@ type Registered struct {
 	// is how often the stream carries a comment, so the node can tell a dead stream from a quiet one.
 	TermMillis      int64 `json:"term_ms"`
 	KeepaliveMillis int64 `json:"keepalive_ms"`
+
+	// CrossUser is true when the broker has cross-user features enabled. Once a node sees this set,
+	// it refuses to send its key over plain HTTP.
+	CrossUser bool `json:"cross_user,omitempty"`
 }
 
 // MirroredLease is one lease of the machine's state directory, as the node saw it. A record the node

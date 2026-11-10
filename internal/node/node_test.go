@@ -65,12 +65,12 @@ func TestNodeSendsItsInstanceKeyOnEveryRequest(t *testing.T) {
 func TestNodeKeepsItsKeyAcrossRestarts(t *testing.T) {
 	dir := t.TempDir()
 
-	first, err := loadKey(dir)
+	first, err := LoadKey(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	second, err := loadKey(dir)
+	second, err := LoadKey(dir)
 	if err != nil || first != second || len(first) < 32 {
 		t.Errorf("keys = %q, %q, %v", first, second, err)
 	}
@@ -79,7 +79,7 @@ func TestNodeKeepsItsKeyAcrossRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := loadKey(dir); err == nil {
+	if _, err := LoadKey(dir); err == nil {
 		t.Error("a world-readable key was accepted")
 	}
 }

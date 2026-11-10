@@ -56,7 +56,20 @@ senders without its body.`,
 		},
 	}
 
-	return []*cobra.Command{pending, approve, forget}
+	confirmUpgrade := &cobra.Command{
+		Use:   "confirm-upgrade",
+		Short: "Delete the kept previous store file, making a rollback impossible",
+		Long: `Delete the broker.json.v1 file kept beside the store after the migration to store 2.0. After this runs,
+a rollback to a pre-NIT-006 broker is impossible. The pre-upgrade keys and every key forgotten since the
+upgrade are refused after a rollback.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.runBrokerAdmin(cmd, broker.AdminPathConfirmUpgrade, nil,
+				"confirmed the upgrade. A rollback is now impossible.\n")
+		},
+	}
+
+	return []*cobra.Command{pending, approve, forget, confirmUpgrade}
 }
 
 // adminClient talks to the broker's admin socket. No network path reaches it.
@@ -256,4 +269,115 @@ func (a *app) nodeFingerprint() (string, error) {
 	}
 
 	return fp, nil
+}
+
+func (a *app) nodePairCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "pair",
+		Short: "Print the fingerprint and a fresh pairing code for binding this node on the broker page",
+		Long: `Print the fingerprint of this node's key and a fresh four-word pairing code. The code expires in 10 minutes.
+Bind the node on the broker's sign-in page by entering the label and this code.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			home, err := a.deps.UserHome()
+			if err != nil {
+				return err
+			}
+
+			cfg, err := config.LoadNode(home, os.Getuid())
+			if err != nil {
+				return err
+			}
+
+			dir, err := a.deps.StateDir()
+			if err != nil {
+				return fmt.Errorf("resolving the state directory: %w", err)
+			}
+
+			fp, err := node.Fingerprint(dir)
+			if err != nil {
+				return fmt.Errorf("%w: %w", exitcode.ErrUsage, err)
+			}
+
+			code := broker.GeneratePairingCode()
+			hash := broker.HashPairingCode(code)
+
+			cl := &http.Client{}
+			reqBody := map[string]string{
+				"pairing_hash": hash,
+			}
+
+			data, err := json.Marshal(reqBody)
+			if err != nil {
+				return fmt.Errorf("encoding the request: %w", err)
+			}
+
+			req, err := http.NewRequest(http.MethodPost, cfg.Broker+wire.PathPair, bytes.NewReader(data))
+			if err != nil {
+				return fmt.Errorf("building the request: %w", err)
+			}
+
+			key, err := node.LoadKey(dir)
+			if err != nil {
+				return err
+			}
+
+			req.Header.Set("Authorization", "Bearer "+key)
+
+			resp, err := cl.Do(req)
+			if err != nil {
+				return fmt.Errorf("sending pairing code to broker: %w", err)
+			}
+
+			defer resp.Body.Close()
+
+			if resp.StatusCode/100 != 2 {
+				return fmt.Errorf("broker refused the pairing code: %d", resp.StatusCode)
+			}
+
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Fingerprint: %s\n", fp)
+			fmt.Fprintf(out, "Pairing code: %s\n\n", code)
+			fmt.Fprintln(out, "This code expires in 10 minutes. Bind the node on the broker's sign-in page with:")
+			fmt.Fprintf(out, "  Label: (your machine's label from the broker)\n")
+			fmt.Fprintf(out, "  Code: %s\n", code)
+
+			return nil
+		},
+	}
+}
+
+func (a *app) nodeRekeyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rekey",
+		Short: "Generate a new instance key for a forgotten label",
+		Long: `Remove the old instance key and generate a fresh random one. Use this after the broker owner ran
+'nitipan broker forget' on your label. After rekeying, approve the new key on the broker host or bind
+it through the sign-in page with a fresh pairing code from 'nitipan node pair'.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			dir, err := a.deps.StateDir()
+			if err != nil {
+				return fmt.Errorf("resolving the state directory: %w", err)
+			}
+
+			if err := node.Rekey(dir); err != nil {
+				return fmt.Errorf("%w: %w", exitcode.ErrUsage, err)
+			}
+
+			fp, err := node.Fingerprint(dir)
+			if err != nil {
+				return fmt.Errorf("%w: %w", exitcode.ErrUsage, err)
+			}
+
+			out := cmd.OutOrStdout()
+			fmt.Fprintln(out, "Generated a new instance key.")
+			fmt.Fprintf(out, "New fingerprint: %s\n\n", fp)
+			fmt.Fprintln(out, "Approve the new key with:")
+			fmt.Fprintln(out, "  On the broker host: nitipan broker approve <label> "+fp)
+			fmt.Fprintln(out, "  Or on the sign-in page: nitipan node pair, then bind with the code")
+
+			return nil
+		},
+	}
 }

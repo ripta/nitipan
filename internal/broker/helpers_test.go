@@ -44,6 +44,8 @@ func (c *wallClock) Set(t time.Time) {
 
 var wallStart = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 
+// memStore is an in-memory Store for testing without disk I/O.
+
 type harness struct {
 	t     *testing.T
 	b     *Broker

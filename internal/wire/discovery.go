@@ -10,6 +10,7 @@ import (
 const (
 	PathWhoHolds = Prefix + "/who/holds"
 	PathWhoIs    = Prefix + "/who/is"
+	PathWhoAmI   = Prefix + "/who/am-i"
 )
 
 // Derivation states of a mirrored lease's repo entries.
@@ -129,4 +130,15 @@ type Overlap struct {
 	ID     string `json:"id"`
 	Grant  Found  `json:"grant"`
 	Mirror Found  `json:"mirror"`
+}
+
+// WhoAmI asks the broker for the caller's user label.
+type WhoAmI struct {
+	Version Version `json:"version"`
+}
+
+// WhoAmIAnswer answers a WhoAmI with the caller's user label.
+type WhoAmIAnswer struct {
+	Version   Version `json:"version"`
+	UserLabel string  `json:"user_label"`
 }

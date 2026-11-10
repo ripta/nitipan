@@ -141,8 +141,10 @@ func TestRequestMovesFromPendingToClaimedToAnswered(t *testing.T) {
 		t.Fatalf("pending = %v", ids)
 	}
 
+	// Submit writes the lowest request version that carries each request, which is KindSince for
+	// its kind. Ping was introduced in version 1.
 	req, err := Claim(root, id)
-	if err != nil || req.Version != RequestVersion || req.Kind != "ping" {
+	if err != nil || req.Version != 1 || req.Kind != "ping" {
 		t.Fatalf("Claim = %+v, %v", req, err)
 	}
 

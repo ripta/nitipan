@@ -232,7 +232,12 @@ func Require(root string, checker *liveness.Checker, install string) (Presence, 
 
 // Submit publishes a request into pending. It takes no lock, and the request appears all at once.
 func Submit(root string, req Request) error {
-	return SubmitVersion(root, req, RequestVersion)
+	version := KindSince(req.Kind)
+	if version == 0 {
+		version = RequestVersion
+	}
+
+	return SubmitVersion(root, req, version)
 }
 
 // SubmitVersion is Submit with an explicit request version. A test stands in for an older CLI with it.

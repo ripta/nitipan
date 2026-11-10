@@ -373,6 +373,109 @@ and `mail status` reports missing or stale presence. Restart the service after r
 on one shared host keep separate mailboxes and ring ledgers. Every wake path only signals; the session runs
 `nitipan mail read` to consume its mail.
 
+## Broker authentication
+
+The broker authenticates users whose machines call it. Each node keeps a pinned bearer key. The broker binds each key's
+label to one user. The broker owner is the user approved on the broker host. Other users sign in through OIDC on a page
+the broker serves.
+
+### Broker configuration
+
+The broker config names an OIDC identity provider in its `oidc` block:
+
+```json
+{
+  "store": "...",
+  "listen": "...",
+  "oidc": {
+    "issuer": "https://idp.example.com",
+    "client_id": "nitipan-broker",
+    "client_secret": "...",
+    "redirect_url": "https://broker.example.com/callback",
+    "ca_file": "/path/to/ca.pem"
+  }
+}
+```
+
+The `issuer` and `redirect_url` must be `https`. Loopback addresses are exempt for tests. The `client_secret` lives
+only in the broker config on the broker host. No node or agent sandbox reaches it. The `ca_file` is optional. Use it
+for a self-hosted issuer with a private CA.
+
+### Upgrading to store 2.0
+
+On upgrade, the broker store becomes version 2.0. Every pinned label is bound to the broker owner in one step. The
+broker keeps the previous store file beside it for rollback. After you confirm the upgrade with
+`nitipan broker confirm-upgrade` on the broker host, a rollback is impossible. The command deletes the kept file.
+
+### Binding a coworker's machine
+
+A coworker whose machine needs broker access is admitted on the broker host, then binds their label through the
+broker's sign-in page.
+
+On the broker host, list pending admissions with `nitipan broker admissions`, then admit the user with
+`nitipan broker admit <issuer> <sub> <email>`. The issuer and `sub` come from the identity provider. The broker maps
+them to a broker-assigned user ID.
+
+On the coworker's machine, run `nitipan node pair`. It prints the label's fingerprint and a four-word pairing code.
+The code expires in 10 minutes. The coworker opens the broker's sign-in page, signs in with their identity provider,
+and enters the label and the pairing code on the form. The binding pins the label's key and discards other pending keys
+for that label. Five wrong codes from one signed-in user for one label lock that user out of that label until the code
+expires.
+
+After a machine is forgotten with `nitipan broker forget <label>`, run `nitipan node rekey` on that machine to
+generate a new key. Then approve the new key on the broker host or bind it through the sign-in page with a fresh
+pairing code from `nitipan node pair`.
+
+### Broker-host commands
+
+These commands run on the broker host only. No node or network path reaches them.
+
+```
+nitipan broker pending                         # list unapproved labels with fingerprints
+nitipan broker approve <label> <fingerprint>   # pin the key, bind the label to the broker owner
+nitipan broker forget <label>                  # unpin a label whose machine was reinstalled
+nitipan broker confirm-upgrade                 # delete the kept v1 file, making rollback impossible
+nitipan broker admissions                      # list users who signed in but are not admitted
+nitipan broker admit <issuer> <sub> <email>    # admit a user by their issuer plus sub
+nitipan broker link <issuer> <sub> <user-id>   # map a new issuer plus sub to an existing user
+nitipan broker bindings                        # list all label bindings with last-seen times
+nitipan broker revoke-user <user-id>           # forget all of a user's labels and remove their admission
+nitipan broker cross-user <enable>             # turn cross-user features on or off
+```
+
+The `approve` command binds the label to the broker owner when run on the broker host. A coworker binds through the
+sign-in page instead.
+
+### Turning cross-user features on
+
+Cross-user features stay off until the broker owner turns them on with `nitipan broker cross-user true` on the broker
+host. The command refuses when:
+
+- No OIDC provider is configured in the broker config. Configure an `oidc` block and retry.
+- The upgrade binding has not run. The broker store must be at version 2.0 with every pinned label bound to the owner.
+- The broker's listener is neither on a loopback address nor serving TLS itself. Set `cert_file` and `key_file` in the
+  broker config to serve TLS, or listen on `127.0.0.1` or `::1`. An ingress on another host may terminate TLS and
+  re-encrypt to the broker. An ingress that speaks plain HTTP to the broker over a private hop is not enough.
+- Any bound label reported plain HTTP to the broker. Once a node sends its key over plain HTTP, that key may have been
+  read on the LAN. Forget each such label with `nitipan broker forget <label>` on the broker host, then have the node
+  run `nitipan node rekey` and approve its new key.
+- Any bound label never reported its scheme. This label is from an older node. Forget it, upgrade the node's nitipan
+  binary, and approve the label again.
+
+Once cross-user features are on, an unbound label is refused for leases and mail. A node records the flag and never
+sends its key over plain HTTP again, even when a later response omits the flag.
+
+### Checking your user label
+
+`nitipan who am-i` prints the caller's user label through the node. The user label is what `acting_for`, cross-user
+mail, delegations, and grants use to name users.
+
+### Running the broker safely
+
+Run the broker as an OS user, or on a host, where no agent session runs. The broker-host commands act on the broker
+directly as its OS user. An agent session running as that OS user on that host could run them and approve its own
+machine.
+
 ## Codex and opencode
 
 Run `nitipan setup codex` or `nitipan setup opencode` to print what each agent needs. Neither command edits a settings

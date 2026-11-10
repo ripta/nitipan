@@ -435,3 +435,24 @@ func (b *Broker) labelOfLocked(k NodeKey) string {
 func (b *Broker) matchesName(h wire.Holder, label, name string) bool {
 	return h.Handle == name || b.holderMailName(h, label) == name
 }
+
+func (b *Broker) handleWhoAmI(w http.ResponseWriter, r *http.Request, key NodeKey) {
+	var req wire.WhoAmI
+
+	if !decodeBody(w, r, &req, func() wire.Version { return req.Version }) {
+		return
+	}
+
+	b.mu.Lock()
+	label := b.store.Data().Nodes[key.String()].Label
+	binding, hasBind := b.store.Data().Bindings[label]
+	var userLabel string
+	if hasBind {
+		if user, ok := b.store.Data().Users[binding.UserID]; ok {
+			userLabel = user.UserLabel
+		}
+	}
+	b.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, wire.WhoAmIAnswer{Version: wire.Current, UserLabel: userLabel})
+}

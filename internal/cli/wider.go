@@ -88,7 +88,12 @@ func (a *app) nodeFor(kind string) error {
 		return err
 	}
 
-	if err := p.Supports(kind, handoff.RequestVersion); err != nil {
+	version := handoff.KindSince(kind)
+	if version == 0 {
+		version = handoff.RequestVersion
+	}
+
+	if err := p.Supports(kind, version); err != nil {
 		return fmt.Errorf("%w. Upgrade the node's nitipan: it restarts on its own when its executable changes", err)
 	}
 

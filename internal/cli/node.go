@@ -40,6 +40,8 @@ func (a *app) nodeCmd() *cobra.Command {
 	cmd.Flags().String("codex-path", "", "trusted Codex executable from the LaunchAgent")
 	cmd.Flags().String("codex-home", "", "trusted Codex home from the LaunchAgent")
 	cmd.AddCommand(a.nodeFingerprintCmd())
+	cmd.AddCommand(a.nodePairCmd())
+	cmd.AddCommand(a.nodeRekeyCmd())
 
 	return cmd
 }
@@ -163,7 +165,11 @@ func (a *app) runBroker() error {
 		path = broker.DefaultStorePath(home)
 	}
 
-	store, err := broker.OpenStore(path, broker.StoreOptions{})
+	store, err := broker.OpenStore(path, broker.StoreOptions{
+		Migrations: map[int]broker.Migration{
+			1: broker.MigrateV1ToV2,
+		},
+	})
 	if err != nil {
 		return err
 	}
@@ -174,6 +180,8 @@ func (a *app) runBroker() error {
 		Store:       store,
 		AdminSocket: broker.AdminSocketPath(path),
 		Version:     version.Version,
+		Listen:      cfg.Listen,
+		TLS:         cfg.CertFile != "" && cfg.KeyFile != "",
 		Logger:      slog.New(slog.NewTextHandler(a.deps.Stderr, nil)),
 	})
 

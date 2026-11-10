@@ -64,6 +64,19 @@ type Broker struct {
 
 	// Store is the path of the store file. Empty means the default under Application Support.
 	Store string `json:"store,omitempty"`
+
+	// OIDC configures the OIDC identity provider for user sign-ins. When absent, only the broker
+	// owner can use the broker.
+	OIDC *OIDCConfig `json:"oidc,omitempty"`
+}
+
+// OIDCConfig configures an OIDC identity provider.
+type OIDCConfig struct {
+	Issuer       string `json:"issuer"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret,omitempty"`
+	RedirectURL  string `json:"redirect_url"`
+	CAFile       string `json:"ca_file,omitempty"`
 }
 
 // LoadNode reads the node config under home.
