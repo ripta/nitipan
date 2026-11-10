@@ -1,6 +1,6 @@
 # NIT-007: Session Mailbox
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
 **Updated:** 2026-11-09
 

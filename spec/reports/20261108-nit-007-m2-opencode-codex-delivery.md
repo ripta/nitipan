@@ -7,7 +7,7 @@ NIT-007 M2 is in progress. This report records the approved work-queue run in th
 
 ## Run state
 
-- Run: default `next 1`, NIT-007 M2 only. Milestone status: DONE; row review IN PROGRESS.
+- Run: default `next 1`, NIT-007 M2 only. Milestone status: DONE; row complete; final review pending.
 - Dependency: NIT-007 M1 is DONE. Proposal accepted; era 3. No skipped, held, or blocked rows.
 - Code and specs share this repository. Base commit subject: `nitipan: say the pre-push hook trusts the atomic flag, and how to clear it`.
 - Row base is the same as the run base. Run commit subjects: `nitipan: wake Codex and opencode sessions for pending mail`.
@@ -261,3 +261,10 @@ cache-tracking fix: formatting, lint with zero issues, Linux vet, race tests, an
 setup took 8.871 seconds. Diff check passed; freeze returned no findings; proposal check has only the two deliberate
 completion transitions. All implementer commands finished and its four-file list matches coordinator status apart
 from this report. No new ADR candidate, unrelated edit, or blocker was reported.
+
+## Row completion
+
+The discovery fix landed as `nitipan: rediscover idle opencode mail recipients`. The row review finding is fixed;
+no unresolved trace or new ADR candidate remains. On 2026-11-09 the coordinator marked NIT-007 implemented, updated
+its index row, and moved NIT-007 M2 to the end of history with its cells unchanged. The other queue rows are outside
+this next-one run and remain scheduled. Final whole-run code and ADR review follows the completion commit.
