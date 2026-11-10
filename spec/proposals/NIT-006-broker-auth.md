@@ -520,11 +520,8 @@ Amended 2026-10-24; see Decision Log.
   The key lives in the 0700 state directory, which every agent sandbox can read under ADR-07. A prompt-injected
   session can copy it and act as its label from another host: in its user's scope, toward coworkers who granted that
   user, and under any delegation the label holds. Every node credential option shares this. Mitigation: "forget
-  label" and "revoke user" close the label's stream at once, and "list bindings" shows each label's last-seen time. A
-  key the node holds but cannot export, through the Secure Enclave or a Keychain item whose access list names the
-  node binary, would close it. Whether an ad-hoc-signed Go binary can hold one is unproven.
-  **Revisit:** before NIT-006 M1 starts, when a design spike records whether the node can hold a non-exportable key
-  on macOS
+  label" and "revoke user" close the label's stream at once, and "list bindings" shows each label's last-seen time.
+  nitipan never moves the key into the Secure Enclave or the Keychain. Amended 2026-11-09; see Decision Log.
 - **A user removed from the identity provider keeps the broker** — likelihood: medium, impact: medium.
   A binding never expires, so a departed coworker keeps their labels, delegations, and grants until the owner runs
   "revoke user". Mitigation: "revoke user" closes every stream, removes the admission, and drops every grant and
@@ -578,7 +575,7 @@ Amended 2026-10-24; see Decision Log.
 
 ### M1: User identity and label binding
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS
 
 - Every call on the node API carries the node credential, and the broker refuses a call without one. A forwarded
   session request acts as the label's bound user, whatever user its attestation or record names
@@ -780,6 +777,10 @@ Amended 2026-10-24; see Decision Log.
   file holds the hashes. The rule that "forget label" and "revoke user" also remove them from the kept file stays,
   since a retained hash would still let a forgotten key authenticate after a rollback. NIT-007 M1's row review found
   the stale wording.
+- 2026-11-09: The user dropped the Secure Enclave and Keychain idea from the "A session reads the node key" risk.
+  nitipan never reaches for either. The risk's revisit hook, which waited on a spike, is removed. Its mitigation
+  stays "forget label", "revoke user", and "list bindings". A spike ran against the user's login keychain that day
+  and was stopped. Its findings were never reviewed and are not recorded.
 
 ## References
 
