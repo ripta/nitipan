@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-11-08
+**Updated:** 2026-11-09
 
 ## Dependencies
 
@@ -695,6 +695,11 @@ Check to test, by the bullet order above:
   reminder. The installed context hook now adds a text object to the model's system context through a separate
   non-claiming helper. The repaired trial confirms both requests contain the reminder, no new wake is queued, and only
   explicit read consumes the message.
+- Row review found that one failed initial session lookup, or an idle recipient beyond the first page, could leave
+  that recipient unwatched indefinitely. Discovery now advances one page on each periodic tick, restarts after a
+  failed lookup, and starts again after the last page. Known sessions keep being polled during lookup failures. An
+  injected-clock regression reproduces both failures before the fix and reaches the idle recipient without a session
+  event afterward.
 - The Codex live harness needed a macOS Python fallback for non-reaping child exit observation. It uses the operating
   system's waitid through libc when Python exposes no os.waitid, so cleanup still owns each process group until reap.
 - The opencode probe's tabs check failed with tabs disabled on the installed CLI. The committed harness and committed
@@ -886,6 +891,11 @@ Check to test, by the bullet order above:
   an enrolled production broker or a real model provider.
 - 2026-11-08: "Per-agent delivery adapters" said embedded Codex queue delivery was unverified. The M2 scripted trial on
   Codex 0.167.0 observed queue exit 0, a ring-triggered mail read, and no control socket before or after the command.
+- 2026-11-09 (run best guess): The opencode watcher discovers one page of sessions every five seconds, following the
+  installed SDK's cursor.next token. A traversal starts again after its last page or a lookup failure. This replaces
+  the one-time recent-session snapshot, which could never recover a failed lookup or reach an idle recipient beyond
+  its first 200 entries. Existing sessions still poll while discovery is unavailable; a page limits lookup work rather
+  than the set of recipients the plugin can watch.
 
 ## References
 

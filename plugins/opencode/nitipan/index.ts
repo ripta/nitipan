@@ -248,18 +248,29 @@ export default {
       } catch (e) { note(`mail watcher failed: ${e}`) }
       finally { mailBusy = false }
     }
+    let discoveryBusy = false
+    let mailCursor: string | undefined
+    // Advance one page per tick so old idle sessions are eventually watched without an unbounded
+    // startup scan. Restarting a failed traversal also recovers an expired cursor.
     const discoverMail = async () => {
+      if (controller.signal.aborted || discoveryBusy) return
+      discoveryBusy = true
       try {
-        const page = await ctx.session.list({ limit: SCAN_LIMIT, order: "desc" })
+        const page = await ctx.session.list({ limit: SCAN_LIMIT, order: "desc", cursor: mailCursor })
+        if (controller.signal.aborted) return
         for (const s of page?.data ?? []) if (typeof s?.id === "string") mailSessions.add(s.id)
-        await pollMail()
-      } catch (e) { note(`mail session discovery failed: ${e}`) }
+        mailCursor = page?.cursor?.next
+      } catch (e) {
+        mailCursor = undefined
+        note(`mail session discovery failed: ${e}`)
+      } finally { discoveryBusy = false }
+      await pollMail()
     }
     const inbox = join(STATE_DIR, "mail", "inbox")
     mkdirSync(inbox, { recursive: true, mode: 0o700 })
     const mailWatcher = watch(inbox, () => { void pollMail() })
     mailWatcher.on("error", (e) => note(`mail watch failed: ${e}`))
-    const mailTimer = setInterval(() => { void pollMail() }, 5000)
+    const mailTimer = setInterval(() => { void discoverMail() }, 5000)
     void discoverMail()
 
     const watchEvents = async () => {

@@ -7,10 +7,10 @@ NIT-007 M2 is in progress. This report records the approved work-queue run in th
 
 ## Run state
 
-- Run: default `next 1`, NIT-007 M2 only. Status: IN PROGRESS.
+- Run: default `next 1`, NIT-007 M2 only. Milestone status: DONE; row review IN PROGRESS.
 - Dependency: NIT-007 M1 is DONE. Proposal accepted; era 3. No skipped, held, or blocked rows.
 - Code and specs share this repository. Base commit subject: `nitipan: say the pre-push hook trusts the atomic flag, and how to clear it`.
-- Row base is the same as the run base. Run commit subjects: none yet.
+- Row base is the same as the run base. Run commit subjects: `nitipan: wake Codex and opencode sessions for pending mail`.
 - Machine-local state tracks commit identifiers outside committed documentation.
 
 ## Approved plan and authorization
@@ -191,7 +191,7 @@ No other unrelated edit was reported. All implementer commands finished before t
 ## Status
 
 M2 is DONE in the proposal, with As built and amendments. The run remains IN PROGRESS through row and final reviews.
-The proposal remains accepted and its queue row remains until the row review completes. No commit has been made yet.
+The proposal remains accepted and its queue row remains until the row review completes. The milestone is committed; fresh row code and ADR reviews are running.
 
 ## Fix round completion and recovery
 
@@ -211,3 +211,53 @@ make live-opencode 'LIVE_OPENCODE_ARGS=--only mail,mail-reminder --results /tmp/
 Both milestone review findings are fixed. No finding was dismissed or left unresolved. The final file list matched
 coordinator git status apart from this coordinator-owned report. Freeze returned no findings. Proposal check has only
 the two completion transitions deliberately reserved until row review. No new ADR candidate was identified.
+
+## Milestone commit and row review
+
+The milestone and its review fixes landed together as `nitipan: wake Codex and opencode sessions for pending mail`.
+Code and specs share that commit. The coordinator checked the subject against repository history and Forbidden Openers,
+staged explicit paths, and committed explicit paths. Git status was clean afterward. The base remains an ancestor.
+Freeze with the row's specs commit returned `[]`. Fresh code and ADR agents are reviewing the entire row range.
+
+## Row review finding
+
+The fresh row ADR review returned no conflicts and no uncovered decisions across ADR-01, 04, 05, 06, 07, and 08.
+The row code reviewer found one confirmed correctness/plan issue at plugins/opencode/nitipan/index.ts:251:
+initial session discovery runs only once. If its list call fails, or a live idle recipient sits beyond the first 200
+results, that recipient may never enter the watched session set. Later polling does not recover discovery, and an
+idle session emits no new lifecycle event. Disposition: fix. A fresh row implementer is repairing recoverable,
+eventually complete discovery with bounded processing and a regression proving wake without user activity.
+
+The row reviewer confirmed the prior foreign-machine liveness and non-waking reminder fixes. No finding was dismissed.
+The row remains under review until its discovery fix and checks pass. Proposal completion remains pending.
+
+## Row fix 1 results
+
+The discovery finding is fixed. A fresh implementer reproduced both the failed-initial-list and beyond-first-200
+cases before repair. The production plugin now requests one page every five seconds, follows the installed SDK's
+cursor.next, and resets after the last page or an error. It retains known sessions through lookup errors, guards
+concurrent discovery, and stops queued callbacks after teardown. The five-second traversal is a run best guess based
+on the existing polling interval and the requirement for bounded, eventually complete idle delivery.
+
+`make test TEST_PKGS=./internal/setup TEST_ARGS='-run TestOpencodeMailDiscoveryRecoversAndReachesLaterPages -count=1 -v'`
+passed uncached in 1.189 seconds. The test loads the production plugin at its external SDK/process boundary, uses a
+manual clock, and proves recovery, later-page delivery without session events, bounded discovery, reset, and teardown.
+It explicitly skips when Node lacks TypeScript stripping; this adds no production dependency.
+
+The Go wrapper now reads the .mjs fixture and sends it to Node through stdin so Go observes the test dependency.
+A repeated command produced a cached pass. An intentional fixture-only unique error then caused the same command to
+fail instead of reusing stale success. The fixture was restored in finally before the final checks.
+
+```sh
+make live-opencode 'LIVE_OPENCODE_ARGS=--only mail,mail-reminder --results /tmp/nitipan-opencode-discovery-final.md'
+```
+
+Run 8b6ad7dc (opencode 2.2.6, macOS 26.6.2) passed 14 checks with no failures/errors/skips and zero real model turns.
+Owned server/TUI PIDs 45984, 45986, and 46252 were confirmed absent. Its real-agent proof complements the deterministic
+SDK-boundary discovery test.
+
+Initial CI session 1209 passed (CLI 422.922 seconds, setup 10.057 seconds). Final CI session 85507 passed after the
+cache-tracking fix: formatting, lint with zero issues, Linux vet, race tests, and build. Unchanged packages cached;
+setup took 8.871 seconds. Diff check passed; freeze returned no findings; proposal check has only the two deliberate
+completion transitions. All implementer commands finished and its four-file list matches coordinator status apart
+from this report. No new ADR candidate, unrelated edit, or blocker was reported.
