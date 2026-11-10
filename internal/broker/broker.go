@@ -243,8 +243,10 @@ func New(cfg Config) *Broker {
 		done:  make(chan struct{}),
 	}
 
+	// The client fetches the provider's discovery document on the first sign-in, so a provider that is down
+	// now delays only sign-ins. A config the client refuses, such as a plain-HTTP issuer, fails the broker.
 	if cfg.OIDCConfig != nil {
-		oidcClient, err := oidc.NewClient(*cfg.OIDCConfig)
+		oidcClient, err := oidc.New(*cfg.OIDCConfig)
 		if err != nil {
 			b.fail(fmt.Errorf("initializing OIDC client: %w", err))
 		} else {
@@ -338,7 +340,7 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathSnapshot, b.authed(b.handleSnapshot))
 	mux.HandleFunc("POST "+wire.PathHeartbeat, b.authed(b.handleHeartbeat))
 	mux.HandleFunc("POST "+wire.PathPing, b.authed(b.handlePing))
-	mux.HandleFunc("POST "+wire.PathPair, b.authed(b.handlePair))
+	mux.HandleFunc("POST "+wire.PathPair, b.handlePair)
 	mux.HandleFunc("POST "+wire.PathClaim, b.authed(b.handleClaim))
 	mux.HandleFunc("POST "+wire.PathRenew, b.authed(b.handleRenew))
 	mux.HandleFunc("POST "+wire.PathRelease, b.authed(b.handleRelease))
@@ -415,34 +417,44 @@ func decodeBody(w http.ResponseWriter, r *http.Request, into any, version func()
 
 type nodeHandler func(w http.ResponseWriter, r *http.Request, key NodeKey)
 
+// unboundRefusal is what the broker tells a label nobody bound once cross-user features are on.
+const unboundRefusal = "this label is not bound to a user. Bind it on the broker host with 'nitipan broker approve', " +
+	"or on the broker's sign-in page with 'nitipan node pair' and the pairing code"
+
+// crossUserOffRefusal is what the broker tells a label bound to a user other than its owner while
+// cross-user features are off.
+const crossUserOffRefusal = "this label is bound to another user, and cross-user features are off on this broker. " +
+	"The broker owner turns them on with 'nitipan broker cross-user true' on the broker host"
+
+// nodeKeyOf reads the machine ID and uid a request names in its headers.
+func nodeKeyOf(r *http.Request) (NodeKey, bool) {
+	uid, err := strconv.Atoi(r.Header.Get(wire.HeaderUID))
+	machine := r.Header.Get(wire.HeaderMachine)
+
+	return NodeKey{MachineID: machine, UID: uid}, err == nil && machine != ""
+}
+
 // authed refuses a request unless its bearer key matches the key registered for the machine ID and
-// uid in its headers. When cross-user features are enabled, it also refuses unbound labels.
+// uid in its headers, and the label acts in a scope. See scopeRefusalLocked for which labels act in none.
 func (b *Broker) authed(next nodeHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		uid, err := strconv.Atoi(r.Header.Get(wire.HeaderUID))
-		machine := r.Header.Get(wire.HeaderMachine)
-		key := NodeKey{MachineID: machine, UID: uid}
+		key, ok := nodeKeyOf(r)
 
-		if err != nil || machine == "" || !b.checkKey(key, bearer(r)) {
+		if !ok || !b.checkKey(key, bearer(r)) {
 			writeErr(w, http.StatusUnauthorized, wire.CodeUnauthorized, "the instance key does not match the one registered for this node")
 
 			return
 		}
 
 		b.mu.Lock()
-		d := b.store.Data()
-		if d.CrossUserEnabled {
-			label := d.Nodes[key.String()].Label
-			if _, bound := d.Bindings[label]; !bound {
-				b.mu.Unlock()
-				writeErr(w, http.StatusForbidden, wire.CodeForbidden, "this label is not bound to a user. "+
-					"Bind it on the broker host with 'nitipan broker approve', or on the broker's sign-in page with "+
-					"'nitipan node pair' and the pairing code")
-
-				return
-			}
-		}
+		refusal := b.scopeRefusalLocked(b.store.Data().Nodes[key.String()].Label)
 		b.mu.Unlock()
+
+		if refusal != "" {
+			writeErr(w, http.StatusForbidden, wire.CodeForbidden, refusal)
+
+			return
+		}
 
 		next(w, r, key)
 	}
@@ -587,11 +599,7 @@ func (b *Broker) recordRegistrationLocked(req wire.Register, label, hash string,
 			LastSeen:   b.cfg.Now(),
 		}
 
-		if req.HTTPS {
-			d.SchemeReports[label] = "https"
-		} else {
-			d.SchemeReports[label] = "http"
-		}
+		noteScheme(d, hash, req.HTTPS)
 
 		switch {
 		case next != nil:
@@ -617,6 +625,27 @@ func (b *Broker) recordRegistrationLocked(req wire.Register, label, hash string,
 	}
 
 	return nil
+}
+
+// Schemes a key can be marked with in KeySchemes.
+const (
+	schemeHTTP       = "http"
+	schemeHTTPS      = "https"
+	schemeUnreported = "unreported"
+)
+
+// noteScheme records the scheme a key reported at registration. Only an https mark gives way, to http.
+// A key that once crossed plain HTTP, or came from a store before scheme reports, keeps its mark, since it
+// may have been read on a plain hop. It runs inside a commit.
+func noteScheme(d *Data, hash string, https bool) {
+	cur, seen := d.KeySchemes[hash]
+
+	switch {
+	case !seen && https:
+		d.KeySchemes[hash] = schemeHTTPS
+	case !https && (!seen || cur == schemeHTTPS):
+		d.KeySchemes[hash] = schemeHTTP
+	}
 }
 
 func sameKey(rec NodeRecord, hash string) bool {
@@ -710,34 +739,66 @@ func (b *Broker) handlePing(w http.ResponseWriter, r *http.Request, key NodeKey)
 	writeJSON(w, http.StatusOK, wire.Pong{Version: wire.Current, Label: label})
 }
 
-func (b *Broker) handlePair(w http.ResponseWriter, r *http.Request, key NodeKey) {
-	var req struct {
-		PairingHash string `json:"pairing_hash"`
-	}
+// handlePair stores the hash of a pairing code the node printed, tied to the key that sent it, and answers
+// with the label the code binds. A pending key sends it, which the label presented at registration and
+// nobody approved yet, so the route needs no binding. That is the state pairing exists to leave.
+func (b *Broker) handlePair(w http.ResponseWriter, r *http.Request) {
+	key, ok := nodeKeyOf(r)
+	hash := keyHash(bearer(r))
 
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+	if !ok || bearer(r) == "" {
+		writeErr(w, http.StatusUnauthorized, wire.CodeUnauthorized, "pair with the node's key and its machine headers")
 
 		return
 	}
 
+	var req wire.Pair
+
+	if !decodeBody(w, r, &req, func() wire.Version { return req.Version }) {
+		return
+	}
+
 	if req.PairingHash == "" {
-		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, "missing pairing_hash")
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, "the pairing request carries no code hash")
 
 		return
 	}
 
 	b.mu.Lock()
-	label := b.store.Data().Nodes[key.String()].Label
-	b.mu.Unlock()
+	defer b.mu.Unlock()
 
-	if err := b.StorePairingCode(label, req.PairingHash, b.cfg.Now().Add(PairingCodeExpiry)); err != nil {
-		writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
+	rec, registered := b.store.Data().Nodes[key.String()]
+	pinned := b.store.Data().Pins[rec.Label].PinnedHash
+
+	switch {
+	case !registered:
+		writeErr(w, http.StatusUnauthorized, wire.CodeUnauthorized, "no node registered for this machine and user. Run the node, then pair again")
+
+		return
+	case pinned != "" && subtle.ConstantTimeCompare([]byte(pinned), []byte(hash)) == 1:
+		writeErr(w, http.StatusConflict, wire.CodeKeyConflict, fmt.Sprintf("label %s is already approved under this key. "+
+			"If its machine was reinstalled, run nitipan broker forget on the broker host first", rec.Label))
+
+		return
+	case !b.pendingKeyLocked(rec.Label, hash):
+		writeErr(w, http.StatusUnauthorized, wire.CodeUnauthorized, "this key is not waiting for approval under the node's label. "+
+			"Run the node so it registers the key, then pair again")
 
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	err := b.commit(func(d *Data) error {
+		d.PairingCodes[rec.Label] = PairingCodeRecord{Hash: req.PairingHash, KeyHash: hash, ExpiresAt: b.cfg.Now().Add(PairingCodeExpiry)}
+
+		return nil
+	})
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, wire.CodeUnavailable, err.Error())
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, wire.Paired{Version: wire.Current, Label: rec.Label})
 }
 
 func (b *Broker) handleStream(w http.ResponseWriter, r *http.Request, key NodeKey) {

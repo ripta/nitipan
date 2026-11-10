@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,6 +31,7 @@ var (
 	ErrTokenEndpointHTTP   = errors.New("token endpoint must be https (except loopback)")
 	ErrIssuerHTTP          = errors.New("issuer must be https (except loopback)")
 	ErrRedirectingEndpoint = errors.New("token endpoint redirected")
+	ErrRedirectURLHTTP     = errors.New("redirect_url must be set and https (except loopback)")
 )
 
 // Config configures an OIDC client.
@@ -65,7 +67,10 @@ type Claims struct {
 type Client struct {
 	cfg        Config
 	httpClient *http.Client
-	discovery  *discoveryDocument
+
+	// mu guards discovery. A fetch that fails leaves it nil, so the next call fetches again.
+	mu        sync.Mutex
+	discovery *discoveryDocument
 }
 
 type discoveryDocument struct {
@@ -74,9 +79,15 @@ type discoveryDocument struct {
 	TokenEndpoint         string `json:"token_endpoint"`
 }
 
-// NewClient creates an OIDC client and fetches the discovery document.
-func NewClient(cfg Config) (*Client, error) {
+// New creates an OIDC client from its config and fetches nothing. The discovery document is fetched on
+// the first sign-in and kept once it is fetched, so a provider that is down when the broker starts
+// delays only sign-ins.
+func New(cfg Config) (*Client, error) {
 	if err := checkHTTPS(cfg.Issuer, "issuer"); err != nil {
+		return nil, err
+	}
+
+	if err := checkHTTPS(cfg.RedirectURL, "redirect_url"); err != nil {
 		return nil, err
 	}
 
@@ -98,16 +109,26 @@ func NewClient(cfg Config) (*Client, error) {
 		Timeout: 30 * time.Second,
 	}
 
-	c := &Client{
-		cfg:        cfg,
-		httpClient: httpClient,
+	return &Client{cfg: cfg, httpClient: httpClient}, nil
+}
+
+// discover returns the discovery document, fetching it when no fetch has succeeded yet.
+func (c *Client) discover() (*discoveryDocument, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.discovery != nil {
+		return c.discovery, nil
 	}
 
-	if err := c.fetchDiscovery(); err != nil {
+	doc, err := c.fetchDiscovery()
+	if err != nil {
 		return nil, err
 	}
 
-	return c, nil
+	c.discovery = doc
+
+	return doc, nil
 }
 
 func loadRootCAs(caFile string) (*x509.CertPool, error) {
@@ -135,8 +156,11 @@ func checkHTTPS(urlStr, name string) error {
 	}
 
 	if u.Scheme != "https" && !isLoopback(u.Host) {
-		if name == "issuer" {
+		switch name {
+		case "issuer":
 			return fmt.Errorf("%s: %w", urlStr, ErrIssuerHTTP)
+		case "redirect_url":
+			return fmt.Errorf("%q: %w", urlStr, ErrRedirectURLHTTP)
 		}
 
 		return fmt.Errorf("%s: %w", urlStr, ErrTokenEndpointHTTP)
@@ -160,40 +184,44 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func (c *Client) fetchDiscovery() error {
+func (c *Client) fetchDiscovery() (*discoveryDocument, error) {
 	discoveryURL := strings.TrimSuffix(c.cfg.Issuer, "/") + "/.well-known/openid-configuration"
 
 	resp, err := c.httpClient.Get(discoveryURL)
 	if err != nil {
-		return fmt.Errorf("fetching discovery document: %w", err)
+		return nil, fmt.Errorf("fetching discovery document: %w", err)
 	}
 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("discovery document: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("discovery document: HTTP %d", resp.StatusCode)
 	}
 
 	var doc discoveryDocument
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return fmt.Errorf("decoding discovery document: %w", err)
+		return nil, fmt.Errorf("decoding discovery document: %w", err)
 	}
 
 	if doc.Issuer != c.cfg.Issuer {
-		return fmt.Errorf("discovery issuer %q != configured %q: %w", doc.Issuer, c.cfg.Issuer, ErrInvalidIssuer)
+		return nil, fmt.Errorf("discovery issuer %q != configured %q: %w", doc.Issuer, c.cfg.Issuer, ErrInvalidIssuer)
 	}
 
 	if err := checkHTTPS(doc.TokenEndpoint, "token endpoint"); err != nil {
-		return err
+		return nil, err
 	}
 
-	c.discovery = &doc
-
-	return nil
+	return &doc, nil
 }
 
-// AuthorizationURL returns the authorization URL with state, nonce, and PKCE verifier.
-func (c *Client) AuthorizationURL(state, nonce, verifier string) string {
+// AuthorizationURL returns the authorization URL with state, nonce, and PKCE verifier. It fails when the
+// discovery document cannot be fetched.
+func (c *Client) AuthorizationURL(state, nonce, verifier string) (string, error) {
+	doc, err := c.discover()
+	if err != nil {
+		return "", err
+	}
+
 	challenge := pkceChallenge(verifier)
 
 	params := url.Values{
@@ -207,7 +235,7 @@ func (c *Client) AuthorizationURL(state, nonce, verifier string) string {
 		"code_challenge_method": {"S256"},
 	}
 
-	return c.discovery.AuthorizationEndpoint + "?" + params.Encode()
+	return doc.AuthorizationEndpoint + "?" + params.Encode(), nil
 }
 
 // GenerateState generates a random state parameter.
@@ -242,6 +270,11 @@ func pkceChallenge(verifier string) string {
 
 // Exchange exchanges an authorization code for an ID token and validates its claims.
 func (c *Client) Exchange(ctx context.Context, code, verifier, nonce string) (*Claims, error) {
+	doc, err := c.discover()
+	if err != nil {
+		return nil, err
+	}
+
 	params := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
@@ -254,7 +287,7 @@ func (c *Client) Exchange(ctx context.Context, code, verifier, nonce string) (*C
 		params.Set("client_secret", c.cfg.ClientSecret)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.discovery.TokenEndpoint, strings.NewReader(params.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, doc.TokenEndpoint, strings.NewReader(params.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("building token request: %w", err)
 	}

@@ -6,11 +6,11 @@ import (
 	"time"
 )
 
-func TestCreateUserAssignsIDAndDerivesUserLabel(t *testing.T) {
+func TestAdmitUserAssignsIDAndDerivesUserLabel(t *testing.T) {
 	h := newHarness(t, nil)
 
 	now := time.Now()
-	user, err := h.b.CreateUser("test@example.com", now)
+	user, err := h.b.AdmitUser(createIssuer, "test@example.com", "test@example.com", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestLinkIssuerSubMapsToExistingUser(t *testing.T) {
 	h := newHarness(t, nil)
 
 	now := time.Now()
-	user, err := h.b.CreateUser("user@example.com", now)
+	user, err := h.b.AdmitUser(createIssuer, "user@example.com", "user@example.com", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,12 +96,12 @@ func TestLinkIssuerSubRefusesExistingMapping(t *testing.T) {
 	h := newHarness(t, nil)
 
 	now := time.Now()
-	user1, err := h.b.CreateUser("user1@example.com", now)
+	user1, err := h.b.AdmitUser(createIssuer, "user1@example.com", "user1@example.com", now)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	user2, err := h.b.CreateUser("user2@example.com", now)
+	user2, err := h.b.AdmitUser(createIssuer, "user2@example.com", "user2@example.com", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +115,9 @@ func TestLinkIssuerSubRefusesExistingMapping(t *testing.T) {
 	}
 }
 
+// TestGeneratePairingCodeProducesFourWords proves a pairing code is four words joined by dashes, as the
+// node prints it and the user types it. It catches a generator that returns an empty code or changes its
+// shape, which the page's form and the user's instructions no longer match.
 func TestGeneratePairingCodeProducesFourWords(t *testing.T) {
 	code := GeneratePairingCode()
 
@@ -128,6 +131,9 @@ func TestGeneratePairingCodeProducesFourWords(t *testing.T) {
 	}
 }
 
+// TestHashPairingCodeProducesConsistentHash proves the hash a node sends for a code is stable and is a
+// SHA-256 hex digest. It catches a salted or truncated hash, which the broker's check of the typed code
+// would never match.
 func TestHashPairingCodeProducesConsistentHash(t *testing.T) {
 	code := "word1-word2-word3-word4"
 
@@ -144,125 +150,5 @@ func TestHashPairingCodeProducesConsistentHash(t *testing.T) {
 
 	if len(hash1) != 64 {
 		t.Errorf("hash length = %d, want 64 (SHA-256 hex)", len(hash1))
-	}
-}
-
-func TestCheckPairingCodeAcceptsCorrectCode(t *testing.T) {
-	h := newHarness(t, nil)
-
-	code := GeneratePairingCode()
-	hash := HashPairingCode(code)
-
-	now := time.Now()
-	expiresAt := now.Add(PairingCodeExpiry)
-
-	if err := h.b.StorePairingCode("test-label", hash, expiresAt); err != nil {
-		t.Fatal(err)
-	}
-
-	ok, err := h.b.CheckPairingCode("test-label", code, "user1", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !ok {
-		t.Error("correct code was rejected")
-	}
-}
-
-func TestCheckPairingCodeRejectsWrongCode(t *testing.T) {
-	h := newHarness(t, nil)
-
-	code := GeneratePairingCode()
-	hash := HashPairingCode(code)
-
-	now := time.Now()
-	expiresAt := now.Add(PairingCodeExpiry)
-
-	if err := h.b.StorePairingCode("test-label", hash, expiresAt); err != nil {
-		t.Fatal(err)
-	}
-
-	ok, err := h.b.CheckPairingCode("test-label", "wrong-wrong-wrong-wrong", "user1", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if ok {
-		t.Error("wrong code was accepted")
-	}
-}
-
-func TestCheckPairingCodeRejectsExpiredCode(t *testing.T) {
-	h := newHarness(t, nil)
-
-	code := GeneratePairingCode()
-	hash := HashPairingCode(code)
-
-	now := time.Now()
-	expiresAt := now.Add(PairingCodeExpiry)
-
-	if err := h.b.StorePairingCode("test-label", hash, expiresAt); err != nil {
-		t.Fatal(err)
-	}
-
-	afterExpiry := expiresAt.Add(time.Second)
-	ok, err := h.b.CheckPairingCode("test-label", code, "user1", afterExpiry)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if ok {
-		t.Error("expired code was accepted")
-	}
-}
-
-func TestCheckPairingCodeLocksOutAfterMaxWrongAttempts(t *testing.T) {
-	h := newHarness(t, nil)
-
-	code := GeneratePairingCode()
-	hash := HashPairingCode(code)
-
-	now := time.Now()
-	expiresAt := now.Add(PairingCodeExpiry)
-
-	if err := h.b.StorePairingCode("test-label", hash, expiresAt); err != nil {
-		t.Fatal(err)
-	}
-
-	for i := 0; i < MaxWrongPairingAttempts; i++ {
-		_, _ = h.b.CheckPairingCode("test-label", "wrong-wrong-wrong-wrong", "user1", now)
-	}
-
-	_, err := h.b.CheckPairingCode("test-label", code, "user1", now)
-	if err == nil {
-		t.Error("user was not locked out after max wrong attempts")
-	}
-}
-
-func TestCheckPairingCodeTracksWrongAttemptsPerUser(t *testing.T) {
-	h := newHarness(t, nil)
-
-	code := GeneratePairingCode()
-	hash := HashPairingCode(code)
-
-	now := time.Now()
-	expiresAt := now.Add(PairingCodeExpiry)
-
-	if err := h.b.StorePairingCode("test-label", hash, expiresAt); err != nil {
-		t.Fatal(err)
-	}
-
-	for i := 0; i < MaxWrongPairingAttempts; i++ {
-		_, _ = h.b.CheckPairingCode("test-label", "wrong-wrong-wrong-wrong", "user1", now)
-	}
-
-	ok, err := h.b.CheckPairingCode("test-label", code, "user2", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !ok {
-		t.Error("user2 was locked out by user1's wrong attempts")
 	}
 }

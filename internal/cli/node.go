@@ -17,6 +17,7 @@ import (
 	"github.com/space-armada/nitipan/internal/handoff"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/node"
+	"github.com/space-armada/nitipan/internal/oidc"
 	"github.com/space-armada/nitipan/internal/session"
 	"github.com/space-armada/nitipan/internal/setup"
 	"github.com/space-armada/nitipan/internal/state"
@@ -176,19 +177,37 @@ func (a *app) runBroker() error {
 
 	defer store.Close()
 
-	b := broker.New(broker.Config{
-		Store:       store,
-		AdminSocket: broker.AdminSocketPath(path),
-		Version:     version.Version,
-		Listen:      cfg.Listen,
-		TLS:         cfg.CertFile != "" && cfg.KeyFile != "",
-		Logger:      slog.New(slog.NewTextHandler(a.deps.Stderr, nil)),
-	})
+	b := broker.New(brokerConfig(cfg, store, path, slog.New(slog.NewTextHandler(a.deps.Stderr, nil))))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	return b.Serve(ctx, cfg.Listen, cfg.CertFile, cfg.KeyFile)
+}
+
+// brokerConfig turns the broker's config file into the broker's own config, over a store opened at
+// storePath. Everything the broker takes from the file passes through here.
+func brokerConfig(cfg config.Broker, store *broker.Store, storePath string, logger *slog.Logger) broker.Config {
+	out := broker.Config{
+		Store:       store,
+		AdminSocket: broker.AdminSocketPath(storePath),
+		Version:     version.Version,
+		Listen:      cfg.Listen,
+		TLS:         cfg.CertFile != "" && cfg.KeyFile != "",
+		Logger:      logger,
+	}
+
+	if o := cfg.OIDC; o != nil {
+		out.OIDCConfig = &oidc.Config{
+			Issuer:       o.Issuer,
+			ClientID:     o.ClientID,
+			ClientSecret: o.ClientSecret,
+			RedirectURL:  o.RedirectURL,
+			CAFile:       o.CAFile,
+		}
+	}
+
+	return out
 }
 
 // daemonInput describes this nitipan for the LaunchAgent text.

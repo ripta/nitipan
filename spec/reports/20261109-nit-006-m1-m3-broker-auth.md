@@ -314,3 +314,105 @@ report leaves queued bounces "node too old" at once, without waiting for the exp
 
 Checks: `make ci` exited 0. The broker and node tests passed three runs in a row. `proposals.py check` reported only
 the row-finish findings. `freeze` returned no findings. The coordinator reran `make ci` before committing.
+
+## Row review
+
+The row review covered the range from the run base through M3. The `adr-impact` agent found the range consistent
+with ADR-01 and ADR-03 through ADR-08. It listed seven decisions that no ADR records. NIT-006's settled decisions
+record all seven. The 2026-10-24 Decision Log entry already declined the broadest one: limit refusals to the detail
+that discovery shows. No new ADR candidate is recorded.
+
+The reviewer, run on Opus, found that the three milestones did not hold together in the shipped binary. Each
+milestone's tests built the broker config by hand, so the defects passed every milestone review.
+
+Confirmed findings:
+
+1. `runBroker` never passed the configured OIDC block to the broker. The sign-in page was never mounted, and
+   `cross-user true` always refused. Nothing cross-user worked outside tests.
+2. Forget and revoke-user left the label bound. A forgotten key could re-register and act as the old user while
+   cross-user features were on. The rule that decides whether a label is bound had drifted into three different
+   answers across the milestones.
+3. `nitipan node pair` could not reach a real broker. It sent no machine or uid headers, was gated on a binding, and
+   skipped the node's TLS checks.
+4. The page bind pinned an arbitrary pending key, not the key that sent the pairing code.
+5. With the switch off, a bound coworker could act in the owner's single scope. Mail treated the same label as
+   another user.
+6. The plain-HTTP gate was overwritten on each registration. A key that had crossed plain HTTP could re-report
+   HTTPS and pass. A forgotten machine could block the switch forever.
+7. `cross-user true` logged the unbound labels instead of showing them.
+8. Revoke-user did not end the leases an agent held for the revoked user. It ran across many commits. One of its
+   delete loops did nothing.
+9. The page bind checked admission outside its lock.
+
+The review also found proposal and README drift, test files and comments named by milestone or plan item,
+near-duplicate tests, tests that reach into internals, and comment-craft issues.
+
+Best guess for finding 5. NIT-006 never weighed a coworker bound while the switch is off, or the switch turned off
+after it was on. The run takes the reading that keeps the proposal's "one owner scope while off" true: while
+cross-user features are off, the broker serves only the owner's labels and unbound labels. A coworker's bound label
+is refused until the switch is on, with an error that says so. A coworker can still bind on the page while the
+switch is off, so setup can happen before it is turned on. Turning the switch off later refuses coworkers again and
+leaves their state intact. If this guess is wrong, the alternatives are to refuse page actions while the switch is
+off, or to refuse turning it off while a coworker is bound.
+
+The fixes run in two rounds. Part A covers findings 1 to 4, 6, 7, 9, and the unified bound-label rule. Part B covers
+findings 5 and 8, the docs and proposal text, the test hygiene, and comment craft.
+
+Row review fix rounds. Each code fix has a regression test that failed on the unfixed code, with three exceptions
+noted below.
+
+Part A:
+
+- The broker config builder now carries the OIDC block, the listener, and TLS into the broker. A new test drives that
+  wiring through a local test issuer that requires the client secret. Before the fix, the sign-in page answered 404
+  in every listener case.
+- With OIDC wired, the broker fetched the discovery document at start. A provider outage then stopped the broker,
+  which NIT-006's accepted outage risk rules out. Discovery now waits for the first sign-in and retries after a
+  failure. While the provider is down, the page answers 503.
+- One rule now decides whether a label is bound: it has a user and is pinned under its node's current key. One rule
+  decides its scope. Every caller uses them. Forget clears the user and keeps the last bound user. A forgotten key
+  that registers again acts for nobody. Before the fix, it could claim, list, break, and receive `whoami` answers
+  as the old user.
+- `nitipan node pair` goes through the node's own client. It works for an unbound label while cross-user features
+  are on, and prints the real label. The page bind pins exactly the key that sent the code. The test for that caught
+  the bug in only 1 of 12 runs on the unfixed code, because the wrong key was picked by map order.
+- The plain-HTTP mark is sticky per key. `cross-user true` returns and prints the unbound labels.
+- The test for the bind's admission check passed on the unfixed code. The race cannot be timed without a hook
+  inside the handler, so that test pins the rule, not the bug.
+- `CreateUser`, a test-only export, was removed.
+
+Part B:
+
+- The switch-off rule above is implemented in the scope rule. About 40 existing tests had run coworker labels with
+  the switch off. Their setup was fixed rather than their assertions.
+- Revoke-user is now one commit. It ends every lease held for the user or by the user's labels, and drops
+  delegations in both directions. The single-write test passed on the unfixed code, because there the first write
+  fails cleanly too. A failure in the middle cannot be injected without a seam.
+- The broker-host commands `admissions`, `admit`, `link`, `bindings`, and `revoke-user` existed only as admin-socket
+  routes, with no CLI, although the README documented them. They now exist.
+- The migration and store read an injected clock.
+- `redirect_url` must be https off loopback.
+
+Unowned flake: `TestLostToAnotherHolderWritesANotice` (internal/node) failed once during a three-package `-count=2`
+run. Renew answered 503, then the claim was refused. It passed alone at `-count=10`, in its own package at
+`-count=2`, and in two `make ci` runs. No node code changed in that round. Whether it fails on the base commit is
+uncertain. Part C makes one bounded attempt to reproduce it.
+
+Part C covered text and test hygiene. It made no product change.
+
+- The three As built blocks are now prose. The Decision Log split is fixed. The milestone-named test files were split
+  into files named for their contracts: revoke, delegation, cross-user mail, migrate, scope, approve, and broker.
+- Each near-duplicate test was retired only where a kept test proves everything it did. Where a kept test proved
+  less, the retired test's checks were folded in. The overlap test gained the positive control it lacked.
+- Binding and pairing tests now drive the real pair route and the sign-in page through a local test issuer. The
+  internal shortcuts are gone. The direct store writes that remain set up a precondition no current route can
+  produce, and each one says so.
+- One M1 check is not proven: colliding user labels are refused. Its old test wrote a colliding user and never
+  called the refusal. Proving it needs an injectable user-label derivation, like the machine-label seam. That goes
+  to the final review's fix round.
+- The node flake did not reproduce in two attempts. An unconfirmed hypothesis: a renewal already past the test's
+  intercept can reach the broker after the clock advances, which keeps the lease fresh. The fix would be a
+  completion signal for in-flight renewals. It stays open.
+
+Checks: `make ci` exited 0, and the coordinator reran it before committing. `freeze` returned no findings.
+`proposals.py check` reported only the row-finish findings.

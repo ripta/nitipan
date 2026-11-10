@@ -101,23 +101,36 @@ exists.
 - The command that turns cross-user features on refuses while any label has reported plain HTTP, or is too old to
   report, unless that label has since been forgotten and approved again under a new key. A key that once crossed a
   plain hop may have been read there, and keys never rotate on their own. `nitipan node rekey` makes a new key for a
-  forgotten label
+  forgotten label. The mark belongs to the key, and a later report or a forget does not clear it. The command judges
+  each label by its current key, so a forgotten label no longer blocks, and approving it again under the same key
+  blocks again. Amended 2026-11-10; see Decision Log
 - On upgrade, every label NIT-007 pinned is bound in one step to the broker owner's identity. Those labels were
   approved on the owner's broker host, so they are the owner's by construction. Cross-user features stay off
   broker-wide until that step runs, so no unbound label ever meets a second user's scope. The label and its key do not
   change, so ADR-05's migration rules are never triggered, and queued mail is untouched
 - A label the broker saw but nobody approved, such as a lease-only node on plain HTTP, keeps NIT-004's behavior while
-  cross-user features are off. The broker-host command that turns them on first lists every such label. Once they are
-  on, an unbound label is refused for leases and mail, with an error that names the approve step. Otherwise a
-  coworker's host could register a fresh label, or take over a sleeping laptop's unpinned one, and act in the owner's
-  scope
+  cross-user features are off. The broker-host command that turns them on answers with every label that can still
+  reach the broker and is bound to nobody, and prints them before its result. Once they are on, an unbound label is
+  refused for leases and mail, with an error that names the approve step. Otherwise a coworker's host could register a
+  fresh label, or take over a sleeping laptop's unpinned one, and act in the owner's scope. Amended 2026-11-10; see
+  Decision Log
+- While cross-user features are off, the broker serves only the owner's labels and unbound labels. A label bound to
+  any other user is refused for every node-API call but register and pair. The error says cross-user features are off
+  on this broker, and that the broker owner turns them on with `nitipan broker cross-user true`. A coworker can still
+  bind on the page while they are off, so setup happens before they are turned on. Turning them off later refuses the
+  coworker again, and leaves the coworker's binding, leases, and grants as they are. Amended 2026-11-10; see Decision
+  Log
 - Approving a label on the broker host binds it to the broker owner, and the approve output says so. A coworker's
   machine is bound through the page instead. Approve refuses a label a coworker bound until it is forgotten, so a
   repeat approval never takes the coworker's label and bounces their mail. Amended 2026-11-10; see Decision Log
 - A label bound to a different user than it was before, such as a reissued Mac whose hardware UUID and uid repeat,
   starts clean. Mail queued for the label bounces to its senders, and every delegation to the label is dropped. The
   new user never receives the old user's mail or acts under the old user's delegations. "Forget label" and "revoke
-  user" keep the label's last bound user, so the next binding has something to compare against
+  user" clear the label's user and keep its last bound user, so the next binding has something to compare against. A
+  label counts as bound only while it is pinned under its node's current key. A forgotten key that registers again
+  then acts for nobody once cross-user features are on, and in the owner's one scope while they are off. Delegations
+  to a forgotten label stay and act on nothing until it is bound again. A binding to the same user keeps them, as for
+  a reinstalled machine. Amended 2026-11-10; see Decision Log
 - The store change is a new major version of NIT-004's broker store. NIT-004 keeps the previous file beside it, so a
   rollback starts an older broker from the pre-upgrade state. A rollback loses every binding, admission, delegation,
   and grant made since, and turns cross-user features off with them. An older broker can never read a coworker's
@@ -231,7 +244,8 @@ user only under that user's standing delegation. Amended 2026-11-10; see Decisio
   label may break any lease, and discovery hides nothing. Amended 2026-11-10; see Decision Log
 - Overlap reports between wider-reach leases and mirrored `machine` leases, under NIT-004's "Machine leases and user
   leases on the same path", never show another user's mirror, at any reach. An overlap shows to the asker only when
-  discovery shows the asker both leases. Across users they would leak the mirrored paths discovery hides. Amended 2026-11-10; see Decision Log
+  discovery shows the asker both leases. Across users they would leak the mirrored paths discovery hides. Amended
+  2026-11-10; see Decision Log
 
 This leaves one residual. The node keeps renewing a holder whose liveness reads unknown, under NIT-004's "Lease term
 and renewal". A coworker's `shared` lease on such a holder then never ends by term or death report. Only that coworker
@@ -263,11 +277,14 @@ to grant or revoke a delegation, since no session signs in.
 - Other users sign in on the broker's approval page with OIDC authorization code flow and PKCE, against an issuer the
   broker config names. To bind a label, the user enters the label and the one-time pairing code their node printed
   beside its fingerprint. The node made the code at random, four words from NIT-001's word list, and sent only its
-  hash with its pending key. The code expires after 10 minutes. Five wrong codes from one signed-in user for one label
-  lock that user out of that label until the code expires, so a coworker cannot discard someone else's pending key.
+  hash, under its pending key. The broker ties the code to that key, and a bind by the code pins that key and no
+  other. A pending key may send a code while its label is bound to nobody, with cross-user features on or off. The
+  broker answers with the label, which `nitipan node pair` prints. The code expires after 10 minutes. Five wrong
+  codes from one signed-in user for one label lock that user out of that label until the code expires, so a coworker
+  cannot discard someone else's pending key.
   `nitipan node pair` prints a fresh code and sends its hash, for a code that expired. The page never lists pending
   labels, so a user can bind only a machine whose output they can see. The page also grants and revokes delegations
-  and mail grants. No token ever reaches a node. Amended 2026-10-24; see Decision Log
+  and mail grants. No token ever reaches a node. Amended 2026-11-10; see Decision Log
 - Each page action runs its own OIDC round trip, with a fresh `state`, nonce, and PKCE verifier, and the page keeps
   no session cookie. The page accepts an action's parameters only on a form it renders after the callback. That form
   starts empty: the user types the label, the code, or the user label the action names, and the page shows the
@@ -440,8 +457,9 @@ Node and broker:
 
 CLI and node:
 
-- New CLI to old node: a claim for another user, a cross-user reply, and `whoami` are new request versions, so an old
-  node answers "node too old". None is forwarded under an old version, where the broker would read it differently
+- New CLI to old node: a claim for another user and a cross-user reply are new request versions, and `whoami` is a new
+  request kind at version 4, so an old node answers "node too old". None is forwarded under an old version, where the
+  broker would read it differently. Amended 2026-11-10; see Decision Log
 - Old CLI to new node: the node keeps answering every request version it ever accepted. A claim from an old CLI carries
   an OS user name in `acting_for`, which the broker replaces with the label's bound user
 - Old CLI reading mail from a new node: cross-user mail carries no `sender_verified`, which an old reader shows as
@@ -477,7 +495,8 @@ at the detail discovery would show the asker. Amended 2026-11-10; see Decision L
   owner
 - A label holding U's delegation, and U asking against V's visible `shared` lease, get the full refusal NIT-004 gives
 - A refusal by a hidden lease is a message in the shape every CLI already prints, with only the leases the asker can
-  see. A CLI from before this proposal never prints an empty holder, so no new response version is needed. Amended 2026-11-10; see Decision Log
+  see. A CLI from before this proposal never prints an empty holder, so no new response version is needed. Amended
+  2026-11-10; see Decision Log
 
 This leaves one residual. V can probe `shared` claims across a repo to learn where coworkers hold hidden `user`
 leases, one yes or no per claim. V must already have the repo, and each probe that succeeds takes a real lease. A
@@ -501,7 +520,9 @@ Decision (autonomous): the code flow over the standard library, with claim check
 endpoint, TLS server validation may stand in for checking the token's signature. The settled flow is that case.
 
 - The broker fetches the discovery document over TLS from the configured issuer, and refuses it unless its `issuer`
-  equals the configured issuer exactly. It POSTs the code and PKCE verifier to the token endpoint the document names
+  equals the configured issuer exactly. It POSTs the code and PKCE verifier to the token endpoint the document names.
+  It fetches the document on the first sign-in, and again after a failed fetch, so a provider that is down when the
+  broker starts delays only sign-ins. Amended 2026-11-10; see Decision Log
 - It checks `iss`, `aud` as a string or an array, `azp` when there are several audiences, `exp` and `iat` with a small
   leeway, and `nonce` against the value stored for that page action
 - It asks only for `response_type=code`, and never reads an ID token from a redirect. The code exposes one exchange
@@ -548,9 +569,10 @@ Amended 2026-10-24; see Decision Log.
 - **A session reads the node key** — likelihood: medium, impact: high.
   The key lives in the 0700 state directory, which every agent sandbox can read under ADR-07. A prompt-injected
   session can copy it and act as its label from another host: in its user's scope, toward coworkers who granted that
-  user, and under any delegation the label holds. Every node credential option shares this. Mitigation: "forget
-  label" and "revoke user" close the label's stream at once, and "list bindings" shows each label's last-seen time.
-  nitipan never moves the key into the Secure Enclave or the Keychain. Amended 2026-11-09; see Decision Log.
+  user, and under any delegation the label holds. Every node credential option shares this. Mitigation: `nitipan
+  broker forget` and `nitipan broker revoke-user` close the label's stream at once, and `nitipan broker bindings` shows
+  each label's last-seen time. nitipan never moves the key into the Secure Enclave or the Keychain. Amended 2026-11-10;
+  see Decision Log.
 - **A user removed from the identity provider keeps the broker** — likelihood: medium, impact: medium.
   A binding never expires, so a departed coworker keeps their labels, delegations, and grants until the owner runs
   "revoke user". Mitigation: "revoke user" closes every stream, removes the admission, and drops every grant and
@@ -614,17 +636,22 @@ Amended 2026-10-24; see Decision Log.
   mail delivered. Cross-user features stay off until that step runs, and while no identity provider is configured
 - An unapproved label keeps NIT-004's lease behavior while cross-user features are off. Turning them on lists every
   such label first, and afterwards an unbound label is refused with an error that names the approve step
+- While cross-user features are off, a label bound to a user other than the owner is refused for claim, list,
+  who-holds, break, and mail send, naming `nitipan broker cross-user true`, and the owner's labels work. Turning them on
+  serves the coworker, and turning them off again refuses the coworker and keeps their leases and grants. Amended
+  2026-11-10; see Decision Log
 - The store change is a new major version. An older broker refuses the new file and starts from the kept previous one.
   A key forgotten or revoked after the upgrade is refused after a rollback too. The kept file survives until the
   owner's confirm, whose output says a rollback is then impossible
-- Binding a label rewrites each of its leases whose `acting_for` is not a user label to the bound user, the upgrade
-  included, and a new `user` claim from that user then conflicts with it. While cross-user features are off, an
-  unbound label's lease conflicts with the owner's
+- Binding a label rewrites every lease it holds to the bound user, except a lease held for a user who still delegates
+  to it, the upgrade included. A new `user` claim from that user then conflicts with it. While cross-user features are
+  off, an unbound label's lease conflicts with the owner's. Amended 2026-11-10; see Decision Log
 - A second user, admitted by the owner on the broker host, signs in through OIDC on the broker page and binds a label
   by its label and the pairing code its node printed. The binding pins the key and discards the label's other pending
   keys. A wrong or expired code binds nothing, five wrong codes lock that signer out of that label without touching
   its pending key, `nitipan node pair` gives a fresh code, and the page never lists pending labels. A user who signs
-  in without admission binds nothing, and appears as a pending admission
+  in without admission binds nothing, and appears as a pending admission. The binding pins the key that sent the
+  code, and a signer revoked after the sign-in binds nothing. Amended 2026-11-10; see Decision Log
 - Each page action needs its own OIDC round trip and a submit on the form rendered after the callback. The form starts
   empty of any parameter sent before the sign-in, and the page refuses to be framed. A cross-site request carrying an
   action's parameters, under a silent sign-in, changes nothing
@@ -634,7 +661,11 @@ Amended 2026-10-24; see Decision Log.
 - The owner links an OIDC identity to the owner ID, and a label the owner binds through the page joins the owner's
   scope. Approve on the broker host says it binds to the owner
 - "Revoke user" forgets every label bound to that user, removes the admission, and drops every grant and delegation
-  naming them. Signing in again restores nothing. "List bindings" shows each user's labels and last-seen times
+  naming them in either direction. It ends every lease held for the user and every lease their labels hold, and each
+  holder's node writes a notice. It is one store write, so a failed write leaves the user whole. Signing in again
+  restores nothing. "List bindings" shows each user's labels and last-seen times. Each of `nitipan broker admissions`,
+  `admit`, `link`, `bindings`, and `revoke-user` reaches the broker through its admin socket and prints what it did.
+  Amended 2026-11-10; see Decision Log
 - "Forget label" and "revoke user" close the label's live stream at once, and the key is refused on reconnect
 - A label forgotten, then bound to a different user, bounces its queued mail and loses every delegation to it
 - Once the broker reports cross-user features on, a node records it and refuses plain HTTP to the broker from then on,
@@ -647,29 +678,116 @@ Amended 2026-10-24; see Decision Log.
   broker serving TLS itself behind a re-encrypting ingress, they turn on
 - Token exchange refuses a wrong `iss`, `aud`, or `nonce`, an expired token, a discovery document whose `issuer`
   differs from the config, a redirecting token endpoint, and a plain-HTTP issuer or token endpoint off loopback, in
-  tests with a local test issuer
+  tests with a local test issuer. The broker refuses a config whose `redirect_url` is missing or plain HTTP off
+  loopback. Amended 2026-11-10; see Decision Log
 
 **As built:**
 
-Store 2.0 adds user identity collections: Users, IssuerSubs, PendingAdmissions, Bindings, Delegations, MailGrants, Conversations, PairingCodes, SchemeReports, CrossUserEnabled, and OwnerID. MigrateV1ToV2 in internal/broker/migrate.go binds every pinned label to the owner, copies all v1 fields, and rewrites acting_for to the owner's user label on every lease a pinned label holds. It finds those leases by the lease's `node` field, the holder's label, as the running broker's binding does. A lease with no acting_for moves too, and no other field of the lease changes. Tests: TestMigrateV1ToV2CreatesOwnerAndBindsPinnedLabels in internal/broker/migrate_test.go proves upgrade binds pinned labels with key and label unchanged. TestMigrateV1ToV2RewritesActingForOnPinnedLabelLeases in internal/broker/migrate_test.go proves the upgrade rewrites acting_for on leases stored in the 1.x grant shape, reads them back through the broker's lease decoder, and leaves an unpinned label's lease alone. TestMigrateV1ToV2PreservesAllFields in internal/broker/migrate_test.go proves migration preserves every v1 field including Sessions, Outcomes, and Counter. TestMajorMigrationKeepsThePreviousFileAndAnOlderBrokerStartsFromIt in internal/broker/store_test.go proves the major version change and rollback to the kept file. TestUpgradeWithQueuedMailPreservesLabelKeyAndMail in internal/broker/m1_test.go proves migration preserves label, key, and queued mail.
+Store 2.0 adds users, issuer plus `sub` mappings, pending admissions, bindings, delegations, mail grants, conversations,
+pairing codes, per-key scheme reports, the cross-user switch, and the owner's ID. The upgrade marks every key the 1.x
+store held as one that never reported its scheme. It binds every pinned label to the owner and copies every 1.x field,
+sessions, outcomes, and the counter included. It rewrites `acting_for` to the owner's user label on every lease a pinned
+label holds. It finds those leases by the lease's `node` field, which names the holder's label, as the running broker's
+binding does. A lease with no `acting_for` moves too, and no other field of the lease changes. The upgrade test stores
+its leases in the 1.x grant shape and reads them back through the broker's lease decoder. An unpinned label's lease is
+left alone. The upgrade keeps each label, its key, and its queued mail.
 
-User identity: CreateUser, AdmitUser, LinkIssuerSub, and RecordPendingAdmission in internal/broker/user.go manage user records. DeriveUserLabel produces four-word user labels from user IDs. Pairing codes are four words from the word list, SHA-256 hashed, expiring in 10 minutes with a 5-wrong-code lockout per signer per label. Tests: TestDeriveUserLabelProducesFourWords in internal/broker/user_test.go proves user label derivation. TestGeneratePairingCodeProducesFourWords, TestCheckPairingCodeAcceptsCorrectCode, TestCheckPairingCodeRejectsWrongCode, TestCheckPairingCodeRejectsExpiredCode, TestCheckPairingCodeLocksOutAfterMaxWrongAttempts in internal/broker/user_test.go prove pairing code behavior. TestAdmitUserMapsIssuerSubToUser and TestAdmitUserRefusesDuplicateIssuerSub in internal/broker/user_test.go prove admission.
+Admission is the only way a user record other than the owner's is made. Each user label is four words derived from the
+user ID. A pairing code is four words from the word list. The broker stores its SHA-256 hash with the hash of the
+pending key that sent it. A code expires in 10 minutes, and five wrong codes lock out one signer for one label.
 
-OIDC client: internal/oidc/oidc.go implements authorization code flow with PKCE over the standard library. Discovery requires exact issuer match. Token POST refuses redirects. Claim checks cover iss, aud, azp, exp/iat with 60s leeway, and nonce. HTTPS is required except on loopback. A CA file is supported. Tests: internal/oidc/oidc_test.go covers token exchange refusals for wrong iss, aud, nonce, expired tokens, discovery document issuer mismatch, redirecting token endpoint, and plain-HTTP endpoints off loopback.
+The OIDC client runs the authorization code flow with PKCE over the standard library. It fetches the discovery document
+on the first sign-in and keeps it once fetched, so a provider that is down when the broker starts delays only sign-ins.
+Discovery requires an exact issuer match, and the token request refuses redirects. The claim checks cover `iss`, `aud`,
+`azp`, `exp` and `iat` with 60 seconds of leeway, and `nonce`. HTTPS is required except on loopback, and a CA file is
+supported. The client refuses a missing redirect URL, or one in plain HTTP off loopback.
 
-Sign-in page: internal/broker/signin.go serves the page on the broker's main listener outside wire.Prefix. Each action runs its own OIDC round trip with fresh state, nonce, and PKCE verifier. No session cookie exists. After callback, an empty form carries a single-use token. Parameters sent before sign-in are never acted on. The bind action takes label plus pairing code. An OIDC binding pins the key and discards other pending keys. Unadmitted sign-ins record pending admissions. Frame-ancestors 'none' CSP header is sent. Tests: TestSignInPageSetsCSP and TestCallbackSetsCSPOnAllPages in internal/broker/signin_test.go prove CSP. TestFormTokenIsSingleUse in internal/broker/signin_test.go proves single-use tokens. TestParametersBeforeSignInIgnored and TestCrossSitePostWithoutTokenChangesNothing in internal/broker/signin_test.go prove cross-site protection. TestCorrectLabelAndCodePinKeyAndDiscardOtherPending, TestWrongCodeBindsNothing, TestExpiredCodeBindsNothing, TestFiveWrongCodesLockOut in internal/broker/signin_test.go prove binding and lockout. TestUnadmittedSignInRecordsPendingAdmission in internal/broker/signin_test.go proves pending admissions. TestPageNeverListsPendingLabels in internal/broker/signin_test.go proves the page never lists pending labels. TestSignInResolvesThroughIssuerPlusSub in internal/broker/signin_test.go proves sign-in resolution. TestOwnerBoundLabelJoinsOwnerScope in internal/broker/signin_test.go proves owner scope joining.
+The sign-in page is served on the broker's main listener, outside the node API's path prefix. Each action runs its own
+OIDC round trip with a fresh state, nonce, and PKCE verifier. No session cookie exists. After the callback, an empty
+form carries a single-use token, and parameters sent before the sign-in are never acted on. Every page response sends a
+`frame-ancestors 'none'` CSP header. The bind action takes a label and a pairing code. The signer's admission, the code,
+and the bind are judged under one lock, as the page's delegation and mail grant actions are. A revoke that lands inside
+the bind cannot be timed without a hook in the handler, so its test pins the rule and does not reproduce the race. The
+bind pins the key that sent the code and discards the label's other pending keys. A sign-in without admission records a
+pending admission. The broker run passes the config file's `oidc` block to the broker, client secret and CA file
+included, with its listen address and TLS setting. A provider that cannot be reached when the broker starts leaves the
+broker serving, and the page answers that the provider is unavailable. A broker built from a config file was driven
+through a sign-in at a local test issuer that requires the client secret, and turned cross-user features on against its
+listen address and TLS setting.
 
-Admin commands: internal/broker/pin.go AdminHandler serves admissions, admit, link, bindings, revoke-user, and cross-user on the admin socket. Approve binds the label to the broker owner's user ID through the same path the page's bind takes, so the label's leases move to the owner and a rebind from another user starts clean. An awaited fingerprint binds when its key arrives and pins, in the registration's own commit. Approving a pinned, unbound label again under its key binds it, and a label a coworker bound through the page is refused until it is forgotten. The store assigns the owner when it opens: a new store, and a 2.0 store with no owner, get one in the same load, under the store lock, persisted once. An upgraded store keeps the owner its migration assigned, and the open and the migration create the owner the same way. A store whose owner ID names no user record gets the owner's record back in the same load, under that same ID, since bindings point at it. So the broker has an owner whenever its store is open. Approve with no owner record would pin the key alone, and a running broker never reaches that state. The approve answer carries the owner's user label, and the approve output names the owner it binds to. Link refuses an issuer plus sub that already resolves. Revoke-user forgets all labels, removes admission, drops grants and delegations, and drops delegations to those labels. Bindings shows each user, their labels, and last-seen times. Cross-user command refuses when: no OIDC configured, listener neither loopback nor TLS, or any label reported plain HTTP or never reported scheme. Its refusal for an owner ID with no user record stays as a guard, names that state, and is never reached. Tests: the approval tests prove approve binds the label to the owner, moves its legacy lease to the owner, and leaves it accepted with cross-user features on. They prove an awaited approval binds when the key arrives, and a repeat approval binds an unbound label and refuses a coworker's. They prove approve on a fresh broker binds to the owner its store assigned, and approve on a store whose owner record went missing binds to the restored owner. The store's owner test proves a new store, a 2.0 store with no owner, an upgraded store, and a 2.0 store whose owner has no user record each have one owner after open. It also proves a store's existing owner ID is kept, and a restart neither replaces nor rewrites it. A CLI test proves the approve output names the owner the store assigned. The broker's admin socket tests prove admin socket security. TestLinkIssuerSubMapsToExistingUser in internal/broker/user_test.go proves link maps to existing user. TestLinkIssuerSubRefusesExistingMapping in internal/broker/user_test.go proves link refuses an issuer plus sub that already resolves. The same CLI test proves no admin command is reachable through any node route. TestSetCrossUserEnabledRefusals and TestSetCrossUserEnabledSuccess in internal/broker/crossuser_test.go prove cross-user enablement rules, and the success case runs on a fresh broker with the owner its store assigned. TestRevokeUserForgetsLabelsRemovesAdmissionAndDropsGrants in internal/broker/m1_test.go proves revoke-user drops delegations to forgotten labels.
+The admin socket serves admissions, admit, link, bindings, revoke-user, and cross-user. Approve binds the label to the
+owner's user ID through the same path the page's bind takes. The label's leases move to the owner, and a later rebind
+from another user starts clean. An awaited fingerprint binds when its key arrives and pins, in the registration's own
+commit. Approving a pinned, unbound label again under its key binds it. A label a coworker bound through the page is
+refused until it is forgotten. The approve answer carries the owner's user label, and the approve output names the owner
+it binds to. Link refuses an issuer plus `sub` that already resolves to a user. No admin command is reachable through
+any node route.
 
-Node commands: `nitipan node pair` in internal/cli/broker_admin.go prints fingerprint and pairing code, sends hash to broker via wire.PathPair. `nitipan node rekey` in internal/cli/broker_admin.go generates new key. LoadKey and Rekey exist in internal/node/files.go. Tests: TestCorrectLabelAndCodePinKeyAndDiscardOtherPending in internal/broker/signin_test.go proves node pair works end-to-end.
+The store assigns the owner when it opens. A new store, and a 2.0 store with no owner, get one in the same load, under
+the store lock, persisted once. An upgraded store keeps the owner its migration assigned, and the open and the migration
+create the owner the same way. A store whose owner ID names no user record gets the owner's record back in the same
+load, under that same ID, since bindings point at it. A restart neither replaces nor rewrites the owner. So the broker
+has an owner whenever its store is open. Approve with no owner record would pin the key alone, and a running broker
+never reaches that state. The store stamps the owner's record, and each binding a migration makes, with its own clock.
 
-Request path: wire.PathPair added. handlePair stores pairing code hash. BindLabelToUser in internal/broker/user.go pins pending key and creates binding. A binding to a different user than the label's last bounces every message the broker holds for the label, queued and sent but unacked alike, to its senders with its body, under "the recipient's machine was bound to a different user". It drops every bounce waiting for the label and every delegation to it. A binding to the same user bounces nothing. The bounce and the binding read the broker's injected clock, on the page as on the broker host. The page's pairing code expiry and sign-in action age read that clock too. A rebind needs an unpinned label, and only a forget unpins one. The forget marks each queued message unsent, and the broker sends nothing to an unpinned label, so a rebind never meets a message marked sent. A test proves mail sent and never acked before a forget, and mail queued after it, bounce to their senders on a rebind to another user, and the new user's node never receives either. Another proves a page rebind stamps its bounces and binding with the broker's clock. Another proves the page refuses to bind a pinned label straight to another user, and leaves its sent, unacked mail alone. Another proves a rebind to the same user bounces nothing. SchemeReports populated from Register.HTTPS field. Wire.Registered carries HTTPS bool. substituteActingFor in internal/broker/grants.go rewrites acting_for to the label's bound user unless it already names that user. Tests: TestAuthedRefusesUnboundLabelWhenCrossUserEnabled, TestAuthedAllowsBoundLabelWhenCrossUserEnabled, TestAuthedAllowsUnboundLabelWhenCrossUserDisabled in internal/broker/crossuser_test.go prove every call needs the node credential. TestSubstituteActingForPreventsCrossUserClaiming in internal/broker/grants_test.go proves a label bound to U1 cannot claim in U2's scope. TestForwardedSessionRequestAttributedToBoundUser in internal/broker/m1_test.go proves forwarded session requests act as the label's bound user. TestRegisteredCarriesCrossUserFlag in internal/broker/crossuser_test.go proves nodes record the cross-user flag and refuse plain HTTP afterward. TestNodeRefusesPlainHTTPWhenCrossUserEnabled, TestNodeAllowsHTTPSWhenCrossUserEnabled, TestNodeRefusesPlainHTTPEvenWhenLaterRegisteredOmitsFlag, TestIsCrossUserEnabledFailsClosedOnUnreadableFile, TestIsCrossUserEnabledFailsClosedOnUnsearchableDir in internal/node/crossuser_test.go prove nodes refuse plain HTTP once cross-user features are on and fail closed on permission errors.
+One rule decides whether a label is bound. Its binding names a user, and the label is pinned under its node's current
+key. Every scope, delegation, discovery, mail, whoami, approve, cross-user, and bindings decision reads that rule.
+Forget clears the label's user and keeps its last bound user. A forgotten key that registers again is refused while
+cross-user features are on. Delegations to the label then act on nothing until it is bound again. Bindings shows each
+user, their labels, and last-seen times, for labels bound now.
 
-Whoami: wire.PathWhoAmI added. handoff.KindWhoAmI added with version 4. handleWhoAmI resolves label to user label. `nitipan who am-i` CLI command prints caller's user label. Tests: TestHandleWhoAmIReturnsBoundUser and TestHandleWhoAmIReturnsEmptyWhenUnbound in internal/broker/whoami_test.go prove whoami returns the bound user. TestSubmitUsesKindSince in internal/handoff/request_version_test.go proves KindWhoAmI uses version 4.
+While cross-user features are off, the broker serves only the owner's labels and unbound labels. The one scope decision
+refuses a label bound to any other user. Every node-API call from it but register and pair answers with the step that
+turns the features on. The page still binds such a label, and turning the features off keeps the coworker's state. An
+unbound label is served while the features are off, and refused once they are on.
 
-Constant-time comparisons: fingerprintMatches and sameKey in internal/broker/pin.go use subtle.ConstantTimeCompare. Awaiting fingerprint match is constant-time. Per-request key compare in checkKey in internal/broker/broker.go is constant-time.
+Turning cross-user features on is refused when no OIDC provider is configured, when the listener is neither loopback nor
+TLS, or when any label's current key reported plain HTTP or never reported its scheme. A key's plain-HTTP mark is
+sticky. A later HTTPS report under the same key, or a forget and a fresh approval of that key, still blocks. A forgotten
+label has no current key and no longer blocks. Turning the features on answers with the labels that can still reach the
+broker and are bound to nobody, and `nitipan broker cross-user` prints them before its result. The success case runs on
+a fresh broker with the owner its store assigned. The refusal for an owner ID with no user record stays as a guard,
+names that state, and is never reached.
 
-Rollback safety: StripHashFromKeptFile in internal/broker/store.go deletes the node record and sets forgotten=true in the kept .v1 file when a label is forgotten or a user is revoked, matching what v1's Forget did. Tests: TestForgetStripsHashFromKeptV1File and TestRollbackAfterForgetRefusesKey in internal/broker/m1_test.go prove forgotten keys are refused after rollback by checking the node record is deleted and forgotten=true is set.
+Revoking a user is one store write. It forgets the user's labels, removes their admissions, and drops every delegation
+and mail grant naming them in either direction, delegations to their labels included. It ends every lease held for them
+or by their labels, and each holder's node writes a notice. Its answer lists what it removed. The broker-host commands
+admissions, admit, link, bindings, and revoke-user reach their admin-socket routes and print what they did.
+
+`nitipan node pair` prints the label the broker names, the key's fingerprint, and the pairing code. It sends the code's
+hash with the machine headers through the node's own client, with its address rules, its CA file, and its refusal of
+plain HTTP once cross-user features were on. The broker takes the code from a key waiting for approval under an unbound
+label, with cross-user features on or off, and answers with the label. `nitipan node rekey` generates a new key. Node
+pair was run against a TLS broker with cross-user features on and the label unbound, and the printed code then bound the
+label on the page.
+
+A binding to a different user than the label's last bounces every message the broker holds for the label to its senders
+with its body. That covers mail queued and mail sent but unacked, under "the recipient's machine was bound to a
+different user". The binding drops every bounce waiting for the label and every delegation to it. A binding to the same
+user bounces nothing. The bounce and the binding read the broker's injected clock, on the page as on the broker host.
+The page's pairing code expiry and sign-in action age read that clock too. A rebind needs an unpinned label, and only a
+forget unpins one. The forget marks each queued message unsent, and the broker sends nothing to an unpinned label, so a
+rebind never meets a message marked sent. The page refuses to bind a pinned label straight to another user, and leaves
+its sent, unacked mail alone.
+
+A node reports its scheme in each registration, and the broker records the report per key. The registration answer
+carries the cross-user flag. A node records the flag and refuses plain HTTP from then on, even when a later answer omits
+it. It fails closed when it cannot read the flag's file or directory. A claim's `acting_for` is rewritten to the label's
+bound user unless it already names that user, so a label bound to one user cannot claim in another's scope. A forwarded
+session request acts as the label's bound user.
+
+Whoami is a new request kind at request version 4. The broker resolves the label to the user it is bound to, and to
+nobody for an unbound label. `nitipan who am-i` prints the caller's user label.
+
+Fingerprint matches, the awaited fingerprint match, and the per-request key check all compare in constant time.
+
+Forgetting a label or revoking a user also deletes the label's node record from the kept 1.x file and marks it forgotten
+there, as 1.x's forget did. So a forgotten key is refused after a rollback.
+
+A sign-in against a real identity provider in a real browser was not run. It is optional and left to the user.
+
+The divergences are in the Decision Log entries of 2026-11-10: the correction of fact in M1's As built, M1's milestone
+review, and the row review.
 
 ### M2: Authorization and shared agents
 
@@ -682,7 +800,8 @@ Rollback safety: StripHashFromKeptFile in internal/broker/store.go deletes the n
   user label, and it never rings, through a wake path or a turn hook. A label holding U's delegation gets the full
   refusal. The refusal is a message every CLI already prints, so a CLI from before this proposal never prints an
   empty holder. Amended 2026-11-10; see Decision Log
-- An overlap report never shows another user's mirrored `machine` lease, at any reach. Amended 2026-11-10; see Decision Log
+- An overlap report never shows another user's mirrored `machine` lease, at any reach. Amended 2026-11-10; see
+  Decision Log
 - A user can break only their own leases, and the broker owner can break any from the broker host. A coworker's
   `break --force` of another user's live `shared` lease is refused
 - A shared agent's claim with `acting_for` U is refused without U's delegation, and granted with it. The lease counts
@@ -699,25 +818,24 @@ Rollback safety: StripHashFromKeptFile in internal/broker/store.go deletes the n
 **As built:**
 
 Scope follows the cross-user switch. Once it is on, a `user` claim conflicts only within the user its `acting_for`
-names. While it is off, the broker runs one scope. A label nobody approved counts in the broker owner's scope. M1's
-check for that unbound-label rule was not met until review found it here: such a label's `acting_for` had passed
-through unchanged. Binding the label later moves its leases to the bound user, except a lease held for a user who
-still delegates to it. The rewrite runs on the broker's in-memory leases and persists with them.
+names. While it is off, the broker runs one scope. A label nobody approved counts in the broker owner's scope, which
+meets M1's check for unbound labels. Binding the label later moves its leases to the bound user, except a lease held for
+a user who still delegates to it. The rewrite runs on the broker's in-memory leases and persists with them.
 
 A refusal across users is filtered before the broker stores the outcome, so a replay returns the same bytes. The
 redacted refusal is a plain message, which every CLI prints as it is. The holder's notice is recorded in the lease by
 the write that stores the outcome, and the event goes out only after that write, so a broker restart sends no second
-one. No test drives a Codex or opencode wake for the notice, since the node's wake path rings only stored mail.
-Overlap reports follow the discovery rule for the asker, so no reach shows another user's mirror.
+one. No test drives a Codex or opencode wake for the notice, since the node's wake path rings only stored mail. Overlap
+reports follow the discovery rule for the asker, so no reach shows another user's mirror.
 
-A break of a lease that already ended answers ended to any node, and carries the lease only to a node that can
-discover it. The owner's break on the broker host names the owner by user label, since the owner may have no email.
-`nitipan release <lease-id>` sends an ID with no record on the machine to the broker while a node runs, which is how
-a user releases a lease a shared agent holds for them.
+A break of a lease that already ended answers ended to any node, and carries the lease only to a node that can discover
+it. The owner's break on the broker host names the owner by user label, since the owner may have no email. `nitipan
+release <lease-id>` sends an ID with no record on the machine to the broker while a node runs, which is how a user
+releases a lease a shared agent holds for them.
 
 A claim for another user reaches the broker only when the broker said at registration that it reads explicit
-`acting_for`. Otherwise the node answers "broker too old". A claim without the mark acts as the label's bound user,
-even when it names a user who delegated to the label. Review found that it had honored the delegation.
+`acting_for`. Otherwise the node answers "broker too old". A claim without the mark acts as the label's bound user, even
+when it names a user who delegated to the label.
 
 The page's grant and revoke check the signer's admission under the same lock as the change, so a "revoke user" that
 lands after the sign-in refuses them. Revoking a delegation or a user ends only live and lapsed leases, and leaves an
@@ -790,7 +908,7 @@ A complete report vouches only for its own connection, which is one registration
 registration never re-checks, even after its successor's report. The report also says nothing of mail sent after it.
 So the re-check skips mail from another user sent since the node last registered, until the node acks it or reports
 again on its next connection. A stream whose connection dropped without the broker noticing then cannot bounce a
-message the node stored. A broker test proves both, with the node's first stream still open on the broker throughout.
+message the node stored. Both were proved with the node's first stream still open on the broker throughout.
 
 ## Decision Log
 
@@ -984,7 +1102,6 @@ message the node stored. A broker test proves both, with the node's first stream
   machine is bound through the page instead." Approving a pinned label again under its key had done nothing. Once
   approve binds, a repeat approval of a label a coworker bound through the page would take that label for the owner,
   and bounce the coworker's mail. The bullet now adds that approve refuses such a label until it is forgotten.
-
 - 2026-11-10 (autonomous, run best guess): M3's implementation narrowed four texts.
   1. "Cross-user mail authorization" said the reconnect report comes first, and nothing more. A failed report had only
      logged a warning, and a node holding nothing sent none. The node now marks the report complete and sends it on
@@ -1000,6 +1117,65 @@ message the node stored. A broker test proves both, with the node's first stream
      that a first message crosses users, and a broker from before this proposal binds no label to a second user. Only a
      reply gets "broker too old" now. The broker says it reads replies with a flag at registration, as it does for
      explicit `acting_for`.
+- 2026-11-10 (autonomous, run best guess): row review. The row review found that the milestones did not hold
+  together in the shipped binary. These fixes changed eleven texts.
+  1. "Node credential" said forget and revoke-user keep the label's last bound user. They kept its user as well, so a
+     forgotten key that registered again acted as that user once its node record was gone. Forget now clears the user
+     and keeps the last bound user, and a rebind compares against the last bound user. A label counts as bound only
+     while it is also pinned under its node's current key, and one rule answers that for every decision. The bullet
+     now says so. It also says delegations to a forgotten label stay and act on nothing until the label is bound
+     again. The bullet drops delegations only on a binding to a different user, so a reinstalled machine bound to the
+     same user keeps them, and forget alone does not drop them.
+  2. "Node credential" said the switch refuses while a label reported plain HTTP, until it is forgotten and approved
+     again under a new key. The broker kept one report per label and overwrote it on each registration, so a read key
+     passed by reporting HTTPS once. It never cleared the report, so a forgotten machine blocked the switch for good.
+     The mark now belongs to the key and is sticky, and the switch judges each label's current key. The bullet now says
+     so. Keys from a 1.x store are marked as never reported, so an upgraded node's old key keeps blocking until it is
+     rekeyed. The marks are never pruned, since a forgotten key's mark must outlive it. A host that registers fresh keys
+     grows them, as it already grows the label table.
+  3. The unbound-label bullet said the switch lists every unbound label first. It wrote them only to the broker's log,
+     and the command's answer carried nothing. The answer now lists them, and `nitipan broker cross-user` prints them
+     before its result. The bullet now says the list holds labels that can still reach the broker, so a forgotten label
+     with no node is left out. The command did not exist, though the README listed it, and it was added.
+  4. "Identity mechanism" said the node sends the code's hash with its pending key. The broker took it only from a
+     bound label, through a route that refused unbound labels once cross-user features were on, and bound any pending
+     key it found. `nitipan node pair` sent no machine headers, skipped the node's CA file, and printed no label. The
+     broker now ties the code to the pending key that sent it, takes it from an unbound label, and answers with the
+     label. A bind pins that key alone. The command goes through the node's own client. The bullet and M1's binding
+     check now say so.
+  5. M1's binding check did not say when the signer's admission is judged. The page checked it outside the lock that
+     made the binding. It is now judged under that lock, as delegations and mail grants are, and the check says a
+     signer revoked after the sign-in binds nothing. A test pins the rule. The race itself cannot be timed without a
+     hook in the handler.
+  6. "OIDC token verification" did not say when the discovery document is fetched. The broker run never passed its
+     config file's oidc block on, so no sign-in route was mounted and the switch always refused. Passing it on made the
+     broker fetch the document at start, and fail when the provider was down. That would take leases and mail down
+     with the provider, against the risk "An identity provider outage blocks new bindings and grants", which accepts
+     only that new proofs wait. The document is now fetched on the first sign-in and again after a failed fetch, and
+     the bullet says so.
+  7. "Node credential" did not say what the broker does with a coworker's label while cross-user features are off.
+     The broker served it in its own scope, so a broker meant to run one user ran two. The run's best guess is that
+     the broker then serves only the owner's labels and unbound labels. A label bound to any other user is refused for
+     every node-API call but register and pair, with an error that names `nitipan broker cross-user true`. Binding on
+     the page still works, so a coworker can set up before the switch. Turning it off again refuses the coworker and
+     keeps their state. A new bullet and a new M1 check say so. The rule sits in the one scope decision, so leases,
+     discovery, break, notices, and mail agree.
+  8. M1's revoke-user check did not say what happens to the leases a delegation authorized. Revoking a user dropped
+     the delegations to their labels, but the leases those labels held for other users stayed live. The revoke also
+     ran as several store writes, so a failed write could leave a user half revoked. Its loop meant to drop
+     delegations to the user's labels did nothing, since the inner maps are keyed by label. Revoke now ends every lease
+     held for the user or by their labels, drops delegations naming the user in both directions, and does it all in
+     one store write. The check now says so. A test pins the single write. It cannot reproduce a split write, since a
+     failed first write also changes nothing.
+  9. `nitipan broker admissions`, `admit`, `link`, `bindings`, and `revoke-user` had admin-socket routes, and the
+     README listed them, but no command reached them. They were added, and M1's revoke-user check names them.
+     `revoke-user` prints what it removed, so its admin answer now carries that list instead of no content.
+  10. M1's token check did not cover `redirect_url`, which the README says must be https. Nothing checked it. The
+      client now refuses one that is missing or plain HTTP off loopback, as it refuses such an issuer, and the check
+      says so.
+  11. "Version skew" called `whoami` a new request version. It is a new request kind at version 4. The bullet now
+      says so. The "A session reads the node key" mitigation named "list bindings", which had no command. It now
+      names the broker-host commands that exist.
 
 ## References
 

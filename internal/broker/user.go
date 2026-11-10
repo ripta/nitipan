@@ -3,11 +3,12 @@ package broker
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
-// Errors for user operations.
 var (
 	// ErrUnknownUserLabel means no user has the user label a page action named.
 	ErrUnknownUserLabel = errors.New("no user has that user label")
@@ -38,38 +38,6 @@ var (
 	// ErrNotAdmitted means no user is admitted under the issuer plus sub, or the admission was removed.
 	ErrNotAdmitted = errors.New("not admitted")
 )
-
-// CreateUser creates a new user with a broker-assigned ID and derived user label. It checks for
-// label collisions before committing.
-func (b *Broker) CreateUser(email string, now time.Time) (UserRecord, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	userID := ulid.MustNew(ulid.Timestamp(now), rand.Reader).String()
-	userLabel := DeriveUserLabel(userID)
-
-	for _, existing := range b.store.Data().Users {
-		if existing.UserLabel == userLabel {
-			return UserRecord{}, fmt.Errorf("user %q and %q: %w", userID, existing.ID, ErrUserLabelCollision)
-		}
-	}
-
-	user := UserRecord{
-		ID:              userID,
-		UserLabel:       userLabel,
-		LabelDerivation: UserLabelDerivation,
-		Email:           email,
-		CreatedAt:       now,
-	}
-
-	err := b.commit(func(d *Data) error {
-		d.Users[userID] = user
-
-		return nil
-	})
-
-	return user, err
-}
 
 // issuerSubKey returns the key for IssuerSubs map.
 func issuerSubKey(issuer, sub string) string {
@@ -195,110 +163,6 @@ func HashPairingCode(code string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// StorePairingCode stores a pairing code hash for a label with an expiry.
-func (b *Broker) StorePairingCode(label, hash string, expiresAt time.Time) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return b.commit(func(d *Data) error {
-		d.PairingCodes[label] = PairingCodeRecord{
-			Hash:      hash,
-			ExpiresAt: expiresAt,
-		}
-
-		return nil
-	})
-}
-
-// CheckPairingCode checks if a pairing code matches the stored hash for a label in constant time.
-// It returns true if the code is correct and not expired. Five wrong codes from one signer for
-// one label lock that signer out until the code expires. The lockout is per signer, so it does
-// not affect the legitimate user or other signers.
-func (b *Broker) CheckPairingCode(label, code, signerUser string, now time.Time) (bool, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	pc, ok := b.store.Data().PairingCodes[label]
-	if !ok {
-		return false, nil
-	}
-
-	if now.After(pc.ExpiresAt) {
-		return false, nil
-	}
-
-	if pc.WrongAttempts != nil && pc.WrongAttempts[signerUser] >= MaxWrongPairingAttempts {
-		return false, fmt.Errorf("too many wrong codes from this user for this label")
-	}
-
-	hash := HashPairingCode(code)
-
-	if subtle.ConstantTimeCompare([]byte(hash), []byte(pc.Hash)) != 1 {
-		err := b.commit(func(d *Data) error {
-			pc := d.PairingCodes[label]
-			if pc.WrongAttempts == nil {
-				pc.WrongAttempts = map[string]int{}
-			}
-
-			pc.WrongAttempts[signerUser]++
-			d.PairingCodes[label] = pc
-
-			return nil
-		})
-
-		return false, err
-	}
-
-	return true, nil
-}
-
-// ClearPairingCode removes a pairing code for a label.
-func (b *Broker) ClearPairingCode(label string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return b.commit(func(d *Data) error {
-		delete(d.PairingCodes, label)
-
-		return nil
-	})
-}
-
-// BindLabelToUser binds a label to a user by pinning its pending key and creating a binding record.
-// If the label is bound to a different user than before, it bounces the mail held for the label and
-// drops delegations.
-func (b *Broker) BindLabelToUser(label, userID string, now time.Time) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if _, labelExists := b.store.Data().Labels[label]; !labelExists {
-		return fmt.Errorf("label %q not found", label)
-	}
-
-	pin := b.store.Data().Pins[label]
-
-	if pin.PinnedHash != "" {
-		return fmt.Errorf("label %q is already pinned: run forget first if the machine was reinstalled", label)
-	}
-
-	if len(pin.Pending) == 0 {
-		return fmt.Errorf("label %q has no pending keys", label)
-	}
-
-	var hash string
-	for h := range pin.Pending {
-		hash = h
-		break
-	}
-
-	user, known := b.store.Data().Users[userID]
-	if !known {
-		return fmt.Errorf("user %q: %w", userID, ErrUnknownUser)
-	}
-
-	return b.bindLocked(label, user, hash, now)
-}
-
 // bindLocked pins a key to a label and binds the label to a user in one commit, as approval and the
 // page's bind both do. It makes the key the node's key, closes a stream opened under another, and wakes
 // the label and the senders of any mail the binding bounced.
@@ -337,24 +201,25 @@ func (b *Broker) bindLocked(label string, user UserRecord, hash string, now time
 
 // bindInto pins a key to a label and binds the label to a user. It runs inside a commit, and moves the
 // label's leases in s, which the caller encodes into d. It returns the labels whose senders the binding
-// bounced mail to.
+// bounced mail to. The binding consumes the label's pairing code.
 //
-// A label bound to a different user than before starts clean: every message held for it bounces, and
-// every delegation to it is dropped. Forget keeps the label's last binding, so a reissued machine whose
-// label repeats is caught here.
+// A label bound to a different user than it last was starts clean: every message held for it bounces,
+// and every delegation to it is dropped. Forget keeps the label's last bound user, so a reissued machine
+// whose label repeats is caught here.
 func (b *Broker) bindInto(d *Data, s *gstate, label string, user UserRecord, hash string, now time.Time) []string {
 	row := d.Labels[label]
 	nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
 
 	existing := d.Bindings[label]
-	lastBoundUser := user.ID
-	if existing.UserID != "" {
-		lastBoundUser = existing.LastBoundUser
+
+	previous := existing.UserID
+	if previous == "" {
+		previous = existing.LastBoundUser
 	}
 
 	var senders []string
 
-	if existing.UserID != "" && existing.UserID != user.ID {
+	if previous != "" && previous != user.ID {
 		senders = b.bounceHeldMailInto(d, label, now)
 
 		for _, delegations := range d.Delegations {
@@ -363,6 +228,7 @@ func (b *Broker) bindInto(d *Data, s *gstate, label string, user UserRecord, has
 	}
 
 	d.Pins[label] = PinRecord{PinnedHash: hash}
+	delete(d.PairingCodes, label)
 
 	if rec, ok := d.Nodes[nk.String()]; ok {
 		rec.KeyHash = hash
@@ -371,7 +237,7 @@ func (b *Broker) bindInto(d *Data, s *gstate, label string, user UserRecord, has
 
 	d.Bindings[label] = BindingRecord{
 		UserID:            user.ID,
-		LastBoundUser:     lastBoundUser,
+		LastBoundUser:     user.ID,
 		DerivationVersion: UserLabelDerivation,
 		BoundAt:           now,
 	}
@@ -449,165 +315,217 @@ func (b *Broker) bounceHeldMailInto(d *Data, label string, now time.Time) []stri
 	return senders
 }
 
-func (b *Broker) dropDelegationsToLabel(label string) {
-	for userID, delegs := range b.store.Data().Delegations {
-		if _, ok := delegs[label]; ok {
-			_ = b.commit(func(d *Data) error {
-				if d.Delegations[userID] != nil {
-					delete(d.Delegations[userID], label)
-				}
+// RevokedUser is what revoking a user removed.
+type RevokedUser struct {
+	// Labels are the labels bound to the user, which the revoke forgot. Sorted.
+	Labels []string `json:"labels"`
 
-				return nil
-			})
-		}
-	}
+	// Leases are the live or lapsed leases the revoke ended. Sorted.
+	Leases []string `json:"leases"`
+
+	// Admissions counts the issuer plus sub pairs that resolved to the user.
+	Admissions int `json:"admissions"`
+
+	// Delegations counts the user's delegations and the delegations to the user's labels.
+	Delegations int `json:"delegations"`
+
+	// MailGrants counts the user's mail grants and the grants to the user.
+	MailGrants int `json:"mail_grants"`
 }
 
-// RevokeUser forgets every label bound to a user, removes the admission, and drops grants and delegations.
-func (b *Broker) RevokeUser(userID string) error {
+// RevokeUser forgets every label bound to a user, removes the user's admissions, and drops every
+// delegation and mail grant naming the user in either direction. It ends every live or lapsed lease held
+// for the user, and every one the user's labels hold, the leases they hold for other users under their
+// delegations included. Each holder's node writes a notice.
+//
+// It is one commit, so a failed store write leaves the user whole.
+func (b *Broker) RevokeUser(userID string) (RevokedUser, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	user, ok := b.store.Data().Users[userID]
 	if !ok {
-		return fmt.Errorf("user %q: %w", userID, ErrUnknownUser)
+		return RevokedUser{}, fmt.Errorf("user %q: %w", userID, ErrUnknownUser)
 	}
 
-	var labelsToForget []string
+	out := RevokedUser{Labels: []string{}, Leases: []string{}}
+	bound := map[string]bool{}
+
 	for label, binding := range b.store.Data().Bindings {
 		if binding.UserID == userID {
-			labelsToForget = append(labelsToForget, label)
+			out.Labels = append(out.Labels, label)
+			bound[label] = true
 		}
 	}
 
-	var leasesToEnd []string
+	slices.Sort(out.Labels)
+
 	for id, g := range b.g.grants {
-		if g.ActingFor == user.UserLabel && endable(g) {
-			leasesToEnd = append(leasesToEnd, id)
+		if endable(g) && (g.ActingFor == user.UserLabel || bound[g.Node]) {
+			out.Leases = append(out.Leases, id)
 		}
 	}
 
-	for _, label := range labelsToForget {
-		if err := b.forgetLocked(label); err != nil {
-			return err
-		}
-	}
+	slices.Sort(out.Leases)
 
-	for _, label := range labelsToForget {
-		b.dropDelegationsToLabel(label)
-	}
+	now := b.cfg.Now()
+	next := b.g.clone()
 
-	if len(leasesToEnd) > 0 {
-		err := b.mutate(func(s *gstate) error {
-			for _, id := range leasesToEnd {
-				g := s.grants[id]
-				g.State = wire.StateEnded
-				g.Revision++
-				g.EndedBy = "user revoked"
-			}
-
-			return nil
-		})
-		if err != nil {
-			return err
+	err := b.commit(func(d *Data) error {
+		for _, label := range out.Labels {
+			b.forgetInto(d, label, now)
 		}
 
-		for _, id := range leasesToEnd {
-			delete(b.dl, id)
-			b.announceLocked(b.g.grants[id])
-		}
-	}
-
-	return b.commit(func(d *Data) error {
 		for issuerSub, uid := range d.IssuerSubs {
 			if uid == userID {
 				delete(d.IssuerSubs, issuerSub)
+				out.Admissions++
 			}
 		}
 
+		out.Delegations = len(d.Delegations[userID])
 		delete(d.Delegations, userID)
+
+		for delegator, delegations := range d.Delegations {
+			for label := range delegations {
+				if bound[label] {
+					delete(delegations, label)
+					out.Delegations++
+				}
+			}
+
+			if len(delegations) == 0 {
+				delete(d.Delegations, delegator)
+			}
+		}
+
+		out.MailGrants = len(d.MailGrants[userID])
 		delete(d.MailGrants, userID)
 
-		for _, delegs := range d.Delegations {
-			delete(delegs, userID)
+		for granter, grants := range d.MailGrants {
+			if _, ok := grants[userID]; ok {
+				delete(grants, userID)
+				out.MailGrants++
+			}
+
+			if len(grants) == 0 {
+				delete(d.MailGrants, granter)
+			}
 		}
 
-		for _, grants := range d.MailGrants {
-			delete(grants, userID)
+		for _, id := range out.Leases {
+			g := next.grants[id]
+			g.State = wire.StateEnded
+			g.Revision++
+			g.EndedBy = "user revoked"
 		}
 
-		return nil
+		return next.encode(d)
 	})
+	if err != nil {
+		return RevokedUser{}, err
+	}
+
+	b.g = next
+
+	for _, label := range out.Labels {
+		b.forgottenLocked(label)
+	}
+
+	for _, id := range out.Leases {
+		delete(b.dl, id)
+		b.announceLocked(b.g.grants[id])
+	}
+
+	return out, nil
 }
 
-// SetCrossUserEnabled turns cross-user features on or off. It refuses when: no OIDC provider is
-// configured, the owner ID names no user record, the broker's own listen address is neither loopback nor
-// served with TLS, any bound label reported plain HTTP, or any bound label never reported its scheme. It
-// lists unbound labels before acting.
-func (b *Broker) SetCrossUserEnabled(enable bool) error {
+// SetCrossUserEnabled turns cross-user features on or off. It refuses to turn them on when no OIDC
+// provider is configured, the owner ID names no user record, the broker's own listen address is neither
+// loopback nor served with TLS, or any label's current key reported plain HTTP or never reported its
+// scheme. A forgotten label has no current key, so a retired machine never blocks it.
+//
+// Turning them on answers with every label that can reach the broker and is bound to nobody, sorted. Each
+// is refused from then on, so the owner sees the list before it takes effect.
+//
+// Turning them off makes the broker serve only the owner's labels and unbound labels again. Every other
+// user's binding, leases, delegations, and grants stay, so turning them on again serves those users as before.
+func (b *Broker) SetCrossUserEnabled(enable bool) ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	d := b.store.Data()
 
-	if enable {
-		if b.cfg.OIDCConfig == nil {
-			return fmt.Errorf("cannot enable cross-user features: no identity provider configured. " +
-				"Configure an OIDC issuer in the broker config, then retry. " +
-				"See the broker configuration section in README.md")
+	if !enable {
+		return nil, b.commit(func(d *Data) error {
+			d.CrossUserEnabled = false
+
+			return nil
+		})
+	}
+
+	if b.cfg.OIDCConfig == nil {
+		return nil, fmt.Errorf("cannot enable cross-user features: no identity provider configured. " +
+			"Configure an OIDC issuer in the broker config, then retry. " +
+			"See the broker configuration section in README.md")
+	}
+
+	// Opening the store assigns the owner or restores its record, so a running broker never lands here.
+	if _, ok := b.ownerLocked(); !ok {
+		return nil, fmt.Errorf("cannot enable cross-user features: the store's owner ID %q names no user record. "+
+			"The broker restores the owner's record when it opens its store, so restart the broker, then retry", d.OwnerID)
+	}
+
+	if b.cfg.Listen != "" {
+		host, _, err := net.SplitHostPort(b.cfg.Listen)
+		if err != nil {
+			return nil, fmt.Errorf("cannot enable cross-user features: listen address %q: %w", b.cfg.Listen, err)
 		}
 
-		// Opening the store assigns the owner or restores its record, so a running broker never lands here.
-		if _, ok := b.ownerLocked(); !ok {
-			return fmt.Errorf("cannot enable cross-user features: the store's owner ID %q names no user record. "+
-				"The broker restores the owner's record when it opens its store, so restart the broker, then retry", d.OwnerID)
+		if !b.cfg.TLS && wire.ClassifyHost(host) != wire.HostLoopback {
+			return nil, fmt.Errorf("cannot enable cross-user features: listen address %q requires TLS or a loopback address. "+
+				"Cross-user features need the broker's own listener on loopback, or serving TLS itself. "+
+				"Set cert_file and key_file, or listen on 127.0.0.1 or ::1", b.cfg.Listen)
+		}
+	}
+
+	labels := slices.Sorted(maps.Keys(d.Labels))
+
+	var unbound []string
+
+	for _, label := range labels {
+		row := d.Labels[label]
+		rec, reachable := d.Nodes[NodeKey{MachineID: row.MachineID, UID: row.UID}.String()]
+
+		if reachable {
+			if _, bound := b.labelBoundUserLocked(label); !bound {
+				unbound = append(unbound, label)
+			}
 		}
 
-		if b.cfg.Listen != "" {
-			host, _, err := net.SplitHostPort(b.cfg.Listen)
-			if err != nil {
-				return fmt.Errorf("cannot enable cross-user features: listen address %q: %w", b.cfg.Listen, err)
+		for _, hash := range []string{rec.KeyHash, d.Pins[label].PinnedHash} {
+			if hash == "" {
+				continue
 			}
 
-			if !b.cfg.TLS && wire.ClassifyHost(host) != wire.HostLoopback {
-				return fmt.Errorf("cannot enable cross-user features: listen address %q requires TLS or a loopback address. "+
-					"Cross-user features need the broker's own listener on loopback, or serving TLS itself. "+
-					"Set cert_file and key_file, or listen on 127.0.0.1 or ::1", b.cfg.Listen)
-			}
-		}
-
-		var unboundLabels []string
-		for label := range d.Labels {
-			if _, bound := d.Bindings[label]; !bound {
-				unboundLabels = append(unboundLabels, label)
-			}
-		}
-
-		if len(unboundLabels) > 0 {
-			b.cfg.Logger.Info("unbound labels found", "count", len(unboundLabels), "labels", unboundLabels)
-		}
-
-		for label, scheme := range d.SchemeReports {
-			if scheme == "http" {
-				return fmt.Errorf("cannot enable cross-user features: label %q reported plain HTTP. "+
+			switch d.KeySchemes[hash] {
+			case schemeHTTPS:
+			case schemeHTTP:
+				return nil, fmt.Errorf("cannot enable cross-user features: label %q reported plain HTTP under its current key. "+
 					"Forget the label with 'nitipan broker forget %s' on the broker host, then "+
 					"have the node run 'nitipan node rekey' and approve the new key. "+
-					"Once all plain-HTTP labels are forgotten and re-approved over HTTPS, retry", label, label)
-			}
-		}
-
-		for label := range d.Bindings {
-			if _, reported := d.SchemeReports[label]; !reported {
-				return fmt.Errorf("cannot enable cross-user features: label %q never reported scheme. "+
+					"Once every such label is forgotten, or approved again under a new key, retry", label, label)
+			default:
+				return nil, fmt.Errorf("cannot enable cross-user features: label %q never reported scheme. "+
 					"This label is from an older node. Forget it with 'nitipan broker forget %s' on the broker host, "+
-					"upgrade the node's nitipan binary, then approve the label again. "+
-					"Once all labels have reported their scheme, retry", label, label)
+					"upgrade the node's nitipan binary, run 'nitipan node rekey', then approve the new key. "+
+					"Once every label has reported its scheme, retry", label, label)
 			}
 		}
 	}
 
-	return b.commit(func(d *Data) error {
-		d.CrossUserEnabled = enable
+	return unbound, b.commit(func(d *Data) error {
+		d.CrossUserEnabled = true
 
 		return nil
 	})

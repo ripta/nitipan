@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -186,18 +188,17 @@ func (b *Broker) Approve(label, fingerprint string) (AdminApproved, error) {
 		return AdminApproved{Owner: owner.UserLabel}, err
 	}
 
-	bound := b.store.Data().Bindings[label].UserID
+	bound, isBound := b.labelBoundUserLocked(label)
 
 	switch {
 	case !hasOwner && pin.PinnedHash != "":
 		return AdminApproved{Pinned: true}, nil
 	case !hasOwner:
 		return AdminApproved{Pinned: true}, b.pinLocked(label, NodeKey{MachineID: row.MachineID, UID: row.UID}, hash)
-	case pin.PinnedHash != "" && bound == owner.ID:
+	case pin.PinnedHash != "" && isBound && bound.ID == owner.ID:
 		return AdminApproved{Pinned: true, Owner: owner.UserLabel}, nil
-	case pin.PinnedHash != "" && bound != "":
-		return AdminApproved{}, fmt.Errorf("label %q is bound to the user %s: %w",
-			label, b.store.Data().Users[bound].UserLabel, ErrAlreadyPinned)
+	case pin.PinnedHash != "" && isBound:
+		return AdminApproved{}, fmt.Errorf("label %q is bound to the user %s: %w", label, bound.UserLabel, ErrAlreadyPinned)
 	}
 
 	return AdminApproved{Pinned: true, Owner: owner.UserLabel}, b.bindLocked(label, owner, hash, b.cfg.Now())
@@ -244,10 +245,15 @@ func (b *Broker) pinLocked(label string, nk NodeKey, hash string) error {
 	return nil
 }
 
-// Forget unpins a label, drops its node's key, and settles its mail. Mail still queued waits for the
-// label's next approved key and is never handed to an unapproved one. Mail already stored on the
-// forgotten machine and never read bounces to its sender without its body, since the broker no longer
-// holds it.
+// Forget unpins a label, drops its node's key and its pairing code, and settles its mail. Mail still
+// queued waits for the label's next approved key and is never handed to an unapproved one. Mail already
+// stored on the forgotten machine and never read bounces to its sender without its body, since the broker
+// no longer holds it.
+//
+// The label's binding loses its user and keeps its last bound user, so the next binding can tell a new
+// user from the same one. Delegations to the label stay, and act on nothing while the label is unbound. A
+// binding to the same user, such as a reinstalled machine, keeps them. A binding to another user drops
+// them.
 func (b *Broker) Forget(label string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -255,43 +261,16 @@ func (b *Broker) Forget(label string) error {
 	return b.forgetLocked(label)
 }
 
+// forgetLocked forgets one label in its own commit, as Forget describes.
 func (b *Broker) forgetLocked(label string) error {
-
-	row, ok := b.store.Data().Labels[label]
-	if !ok {
+	if _, ok := b.store.Data().Labels[label]; !ok {
 		return fmt.Errorf("label %q: %w", label, ErrUnknownLabel)
 	}
 
-	nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
 	now := b.cfg.Now()
 
 	err := b.commit(func(d *Data) error {
-		d.Pins[label] = PinRecord{Forgotten: true, ForgottenAt: now}
-		delete(d.Nodes, nk.String())
-
-		binding, bound := d.Bindings[label]
-		if bound {
-			binding.LastBoundUser = binding.UserID
-			d.Bindings[label] = binding
-		}
-
-		for id, m := range d.Mail {
-			if m.ToLabel != label || m.Bounced {
-				continue
-			}
-
-			switch m.Stage {
-			case wire.StageStored:
-				if m.Kind == wire.EventMail {
-					b.bounceInto(d, m, wire.ReasonForgotten, false, now)
-				}
-			case wire.StageQueued:
-				// An ack lost before the wipe can no longer be told apart from a message that never
-				// arrived. The next approved key receives it again.
-				m.Sent = false
-				d.Mail[id] = m
-			}
-		}
+		b.forgetInto(d, label, now)
 
 		return nil
 	})
@@ -299,7 +278,53 @@ func (b *Broker) forgetLocked(label string) error {
 		return err
 	}
 
-	if ns, ok := b.nodes[nk]; ok {
+	b.forgottenLocked(label)
+
+	return nil
+}
+
+// forgetInto makes a forget's changes to the store inside a commit, so a caller can forget several labels
+// in one write. Its caller runs forgottenLocked for each label once the commit lands.
+func (b *Broker) forgetInto(d *Data, label string, now time.Time) {
+	row := d.Labels[label]
+	nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
+
+	d.Pins[label] = PinRecord{Forgotten: true, ForgottenAt: now}
+	delete(d.Nodes, nk.String())
+
+	if binding, ok := d.Bindings[label]; ok && binding.UserID != "" {
+		binding.LastBoundUser = binding.UserID
+		binding.UserID = ""
+		d.Bindings[label] = binding
+	}
+
+	delete(d.PairingCodes, label)
+
+	for id, m := range d.Mail {
+		if m.ToLabel != label || m.Bounced {
+			continue
+		}
+
+		switch m.Stage {
+		case wire.StageStored:
+			if m.Kind == wire.EventMail {
+				b.bounceInto(d, m, wire.ReasonForgotten, false, now)
+			}
+		case wire.StageQueued:
+			// An ack lost before the wipe can no longer be told apart from a message that never
+			// arrived. The next approved key receives it again.
+			m.Sent = false
+			d.Mail[id] = m
+		}
+	}
+}
+
+// forgottenLocked does what a forget does outside the store, once its commit landed. It closes the
+// label's stream, drops its live sessions, and strips its hash from the kept file.
+func (b *Broker) forgottenLocked(label string) {
+	row := b.store.Data().Labels[label]
+
+	if ns, ok := b.nodes[NodeKey{MachineID: row.MachineID, UID: row.UID}]; ok {
 		if ns.stream != nil {
 			ns.stream.cancel()
 		}
@@ -310,8 +335,6 @@ func (b *Broker) forgetLocked(label string) error {
 	if err := b.store.StripHashFromKeptFile(label); err != nil {
 		b.cfg.Logger.Error("stripping hash from kept file", "label", label, "error", err)
 	}
-
-	return nil
 }
 
 // wakeLabelLocked wakes the stream of the node that owns a label, so queued mail goes out.
@@ -451,17 +474,25 @@ func (b *Broker) handleAdminConfirmUpgrade(w http.ResponseWriter, _ *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// AdminAdmissions answers the admissions command, sorted by when each issuer plus sub first signed in.
+type AdminAdmissions struct {
+	Admissions []AdmissionRecord `json:"admissions"`
+}
+
 func (b *Broker) handleAdminAdmissions(w http.ResponseWriter, _ *http.Request) {
 	b.mu.Lock()
-	admissions := b.store.Data().PendingAdmissions
+	ans := AdminAdmissions{Admissions: slices.Collect(maps.Values(b.store.Data().PendingAdmissions))}
 	b.mu.Unlock()
 
-	var list []AdmissionRecord
-	for _, a := range admissions {
-		list = append(list, a)
-	}
+	slices.SortFunc(ans.Admissions, func(x, y AdmissionRecord) int {
+		if c := x.FirstSeen.Compare(y.FirstSeen); c != 0 {
+			return c
+		}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"admissions": list})
+		return strings.Compare(x.Issuer+"\x00"+x.Sub, y.Issuer+"\x00"+y.Sub)
+	})
+
+	writeJSON(w, http.StatusOK, ans)
 }
 
 func (b *Broker) handleAdminAdmit(w http.ResponseWriter, r *http.Request) {
@@ -509,42 +540,53 @@ func (b *Broker) handleAdminLink(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// AdminBinding is one bound label in the bindings list.
+type AdminBinding struct {
+	Label     string    `json:"label"`
+	UserID    string    `json:"user_id"`
+	UserLabel string    `json:"user_label"`
+	Email     string    `json:"email"`
+	Host      string    `json:"host"`
+	User      string    `json:"user"`
+	LastSeen  time.Time `json:"last_seen"`
+	BoundAt   time.Time `json:"bound_at"`
+}
+
+// AdminBindings answers the bindings command. It lists only labels that are bound now, sorted by label.
+type AdminBindings struct {
+	Bindings []AdminBinding `json:"bindings"`
+}
+
 func (b *Broker) handleAdminBindings(w http.ResponseWriter, _ *http.Request) {
 	b.mu.Lock()
-	bindings := b.store.Data().Bindings
-	users := b.store.Data().Users
-	labels := b.store.Data().Labels
-	b.mu.Unlock()
 
-	type binding struct {
-		Label     string    `json:"label"`
-		UserID    string    `json:"user_id"`
-		UserLabel string    `json:"user_label"`
-		Email     string    `json:"email"`
-		Host      string    `json:"host"`
-		User      string    `json:"user"`
-		LastSeen  time.Time `json:"last_seen"`
-		BoundAt   time.Time `json:"bound_at"`
-	}
+	d := b.store.Data()
 
-	var list []binding
-	for label, bind := range bindings {
-		user := users[bind.UserID]
-		labelRec := labels[label]
+	var ans AdminBindings
 
-		list = append(list, binding{
+	for _, label := range slices.Sorted(maps.Keys(d.Bindings)) {
+		user, bound := b.labelBoundUserLocked(label)
+		if !bound {
+			continue
+		}
+
+		row := d.Labels[label]
+
+		ans.Bindings = append(ans.Bindings, AdminBinding{
 			Label:     label,
-			UserID:    bind.UserID,
+			UserID:    user.ID,
 			UserLabel: user.UserLabel,
 			Email:     user.Email,
-			Host:      labelRec.Host,
-			User:      labelRec.User,
-			LastSeen:  labelRec.LastSeen,
-			BoundAt:   bind.BoundAt,
+			Host:      row.Host,
+			User:      row.User,
+			LastSeen:  row.LastSeen,
+			BoundAt:   d.Bindings[label].BoundAt,
 		})
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"bindings": list})
+	b.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, ans)
 }
 
 func (b *Broker) handleAdminRevokeUser(w http.ResponseWriter, r *http.Request) {
@@ -558,13 +600,14 @@ func (b *Broker) handleAdminRevokeUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := b.RevokeUser(req.UserID); err != nil {
+	revoked, err := b.RevokeUser(req.UserID)
+	if err != nil {
 		b.adminResult(w, err)
 
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, revoked)
 }
 
 func (b *Broker) handleAdminCrossUser(w http.ResponseWriter, r *http.Request) {
@@ -578,13 +621,21 @@ func (b *Broker) handleAdminCrossUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := b.SetCrossUserEnabled(req.Enable); err != nil {
+	unbound, err := b.SetCrossUserEnabled(req.Enable)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
 
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, AdminCrossUser{Enabled: req.Enable, Unbound: unbound})
+}
+
+// AdminCrossUser answers the cross-user command. Unbound lists, when the command turned cross-user
+// features on, every label that can reach the broker and is bound to nobody. Each is refused from then on.
+type AdminCrossUser struct {
+	Enabled bool     `json:"enabled"`
+	Unbound []string `json:"unbound_labels,omitempty"`
 }
 
 func (b *Broker) handleAdminBreak(w http.ResponseWriter, r *http.Request) {

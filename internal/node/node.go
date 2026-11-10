@@ -181,12 +181,7 @@ func New(opts Options) (*Node, error) {
 		return nil, ErrNoMachineID
 	}
 
-	base, https, err := brokerURL(opts.Config)
-	if err != nil {
-		return nil, err
-	}
-
-	tr, err := newTransport(opts.Config, !https)
+	base, https, httpClient, err := brokerHTTP(opts.Config)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +224,7 @@ func New(opts Options) (*Node, error) {
 		ringAfter: map[string]time.Time{},
 		cl: &client{
 			base:      base,
-			http:      newHTTPClient(tr),
+			http:      httpClient,
 			machineID: opts.Machine.ID,
 			uid:       opts.UID,
 		},
@@ -244,10 +239,8 @@ func New(opts Options) (*Node, error) {
 	}
 
 	if !https {
-		if IsCrossUserEnabled(opts.StateDir) {
-			return nil, fmt.Errorf("refusing plain HTTP to the broker: cross-user features were enabled on the broker, and this node " +
-				"recorded that. The node will not send its key over plain HTTP. Use https, or forget this label on the broker host " +
-				"with 'nitipan broker forget', then run 'nitipan node rekey' and approve the new key")
+		if err := refusePlain(opts.StateDir); err != nil {
+			return nil, err
 		}
 
 		n.warn("the broker at " + opts.Config.Broker + " is reached over plain HTTP. Anyone on the path can read and change leases. " +

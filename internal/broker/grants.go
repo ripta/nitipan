@@ -400,29 +400,23 @@ func validRequestID(id string) bool {
 }
 
 // resolveActingFor names the scope a claim counts in. A claim from before explicit acting_for carries an
-// unauthenticated value, so the label's own bound user replaces it, delegations included. An explicit
-// value stands only when it is the label's bound user, or a user who delegated to the label.
+// unauthenticated value, so the label's own scope replaces it, delegations included. An explicit value
+// stands only when it is that scope's user, or a user who delegated to the label.
 //
-// An unbound label counts in the broker owner's scope while cross-user features are off. Once they are
-// on, the broker refuses an unbound label before any claim reaches here. An unbound label has no binding
-// to check a delegation against, so its explicit claim for anyone is refused.
+// A label nobody bound acts in the broker owner's scope while cross-user features are off, and the broker
+// refuses it before any claim reaches here once they are on. It has no binding to check a delegation
+// against, so its explicit claim for anyone else is refused.
 func (b *Broker) resolveActingFor(label, actingFor string, explicit bool) (string, error) {
-	d := b.store.Data()
-
-	if _, bound := d.Bindings[label]; !bound {
-		if explicit {
-			return "", fmt.Errorf("label %s is not bound to a user, so it cannot claim for %s. Bind it on the broker "+
-				"host with 'nitipan broker approve', or on the broker's sign-in page with 'nitipan node pair' and the "+
-				"pairing code", label, actingFor)
-		}
-
-		return d.Users[d.OwnerID].UserLabel, nil
-	}
-
-	user := b.boundUserLabel(label)
+	user := b.scopeUserLabel(label)
 
 	if !explicit || actingFor == "" || actingFor == user {
 		return user, nil
+	}
+
+	if _, bound := b.labelBoundUserLocked(label); !bound {
+		return "", fmt.Errorf("label %s is not bound to a user, so it cannot claim for %s. Bind it on the broker "+
+			"host with 'nitipan broker approve', or on the broker's sign-in page with 'nitipan node pair' and the "+
+			"pairing code", label, actingFor)
 	}
 
 	if b.labelHoldsDelegation(label, actingFor) {
@@ -433,21 +427,21 @@ func (b *Broker) resolveActingFor(label, actingFor string, explicit bool) (strin
 }
 
 // labelHoldsDelegation reports whether label holds a delegation from the user whose user label is
-// userLabel.
+// userLabel. A delegation to a label nobody is bound to acts on nothing, so a forgotten label's key that
+// registers again gets none of the scope its delegations once gave it.
 func (b *Broker) labelHoldsDelegation(label, userLabel string) bool {
-	for userID, user := range b.store.Data().Users {
-		if user.UserLabel == userLabel {
-			if delegations, ok := b.store.Data().Delegations[userID]; ok {
-				if _, hasDelegation := delegations[label]; hasDelegation {
-					return true
-				}
-			}
-
-			return false
-		}
+	if _, bound := b.labelBoundUserLocked(label); !bound {
+		return false
 	}
 
-	return false
+	delegator, err := b.userByLabelLocked(userLabel)
+	if err != nil {
+		return false
+	}
+
+	_, ok := b.store.Data().Delegations[delegator.ID][label]
+
+	return ok
 }
 
 // inConflictingScope reports whether an existing grant g conflicts with a new claim at reach newReach
@@ -628,7 +622,7 @@ func (b *Broker) refuseClaimLocked(w http.ResponseWriter, node NodeKey, id, labe
 		res.Message = "the claim overlaps " + b.holders(shown) + ". Also, " + hiddenRefusal
 	}
 
-	coworker := b.boundUserLabel(label)
+	coworker := b.scopeUserLabel(label)
 
 	var tell []string
 
@@ -813,17 +807,6 @@ func (ns *nodeState) hasAnchor(id string) bool {
 	return slices.ContainsFunc(ns.snapshot, func(m wire.MirroredLease) bool { return m.ID == id })
 }
 
-// boundUserLabel returns the user label of the user a node label is bound to. It returns the empty
-// string when the label is unbound or its user is gone.
-func (b *Broker) boundUserLabel(label string) string {
-	binding, bound := b.store.Data().Bindings[label]
-	if !bound {
-		return ""
-	}
-
-	return b.store.Data().Users[binding.UserID].UserLabel
-}
-
 // isOwnLease reports whether the lease belongs to the asking node or to the user it is bound to. A
 // lease is a user's own when its holder's bound user is that user, or when its acting_for is that user.
 // So a user can release or break a lease a shared agent holds for them.
@@ -832,12 +815,12 @@ func (b *Broker) isOwnLease(g *grant, node NodeKey) bool {
 		return true
 	}
 
-	user := b.boundUserLabel(b.store.Data().Nodes[node.String()].Label)
+	user := b.scopeUserLabel(b.store.Data().Nodes[node.String()].Label)
 	if user == "" {
 		return false
 	}
 
-	return g.ActingFor == user || b.boundUserLabel(g.Node) == user
+	return g.ActingFor == user || b.scopeUserLabel(g.Node) == user
 }
 
 func (b *Broker) handleRelease(w http.ResponseWriter, r *http.Request, node NodeKey) {

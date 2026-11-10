@@ -1,162 +1,76 @@
 package broker
 
 import (
-	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
-	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/space-armada/nitipan/internal/oidc"
+	"github.com/space-armada/nitipan/internal/oidc/oidctest"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
-// TestAuthedRefusesUnboundLabelWhenCrossUserEnabled tests that authed refuses unbound labels
-// when CrossUserEnabled is true (Item 5).
-func TestAuthedRefusesUnboundLabelWhenCrossUserEnabled(t *testing.T) {
-	h := newHarness(t, nil)
+type authedTest struct {
+	Name      string
+	Bound     bool
+	CrossUser bool
+	Status    int
+}
 
-	h.store.Data().Users["owner-id"] = UserRecord{ID: "owner-id", UserLabel: "owner-user"}
-	h.store.Data().OwnerID = "owner-id"
-	h.store.Data().CrossUserEnabled = true
+var authedTests = []authedTest{
+	{Name: "unbound with cross-user on", CrossUser: true, Status: http.StatusForbidden},
+	{Name: "bound with cross-user on", Bound: true, CrossUser: true, Status: http.StatusOK},
+	{Name: "unbound with cross-user off", Status: http.StatusOK},
+}
 
-	label := "test-label"
-	nk := NodeKey{MachineID: "machine1", UID: 1000}
-	key := "test-key-12345"
-	hash := keyHash(key)
+// TestAuthedRefusesAnUnboundLabelOnlyOnceCrossUserIsOn proves a node call from a label nobody bound is
+// refused, naming the approve step, once cross-user features are on, and served while they are off. A bound
+// label is served either way. It catches an unbound-label check that runs before the switch, or never.
+func TestAuthedRefusesAnUnboundLabelOnlyOnceCrossUserIsOn(t *testing.T) {
+	for _, test := range authedTests {
+		t.Run(test.Name, func(t *testing.T) {
+			h := newHarness(t, func(c *Config) {
+				c.OIDCConfig = &oidc.Config{Issuer: "https://test.example", ClientID: "test", RedirectURL: "https://broker.example/callback"}
+			})
 
-	h.store.Data().Nodes[nk.String()] = NodeRecord{
-		KeyHash: hash,
-		Label:   label,
-	}
+			label := h.registerOver(alice, true).Label
 
-	h.store.Data().Labels[label] = LabelRecord{
-		MachineID:  "machine1",
-		UID:        1000,
-		Derivation: 1,
-	}
+			if test.Bound {
+				approveKey(h, label, alice.Key)
+			}
 
-	handler := h.b.authed(func(w http.ResponseWriter, r *http.Request, key NodeKey) {
-		w.WriteHeader(http.StatusOK)
-	})
+			if test.CrossUser {
+				if rec := h.enableCrossUser(); rec.Code != http.StatusOK {
+					t.Fatalf("turning cross-user features on: %d %s", rec.Code, rec.Body)
+				}
+			}
 
-	req := httptest.NewRequest("POST", "/test", nil)
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set(wire.HeaderMachine, "machine1")
-	req.Header.Set(wire.HeaderUID, "1000")
+			resp := h.do(http.MethodPost, wire.PathPing, alice, wire.Ping{Version: wire.Current})
+			if resp.StatusCode != test.Status {
+				t.Fatalf("ping: status %d, want %d", resp.StatusCode, test.Status)
+			}
 
-	rec := httptest.NewRecorder()
-	handler(rec, req)
+			if test.Status == http.StatusForbidden {
+				var e wire.Error
+				if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
+					t.Fatal(err)
+				}
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected status 403, got %d", rec.Code)
-	}
-
-	var e wire.Error
-	if err := json.NewDecoder(rec.Body).Decode(&e); err != nil {
-		t.Fatalf("decoding error: %v", err)
-	}
-
-	if e.Code != wire.CodeForbidden {
-		t.Errorf("expected code %q, got %q", wire.CodeForbidden, e.Code)
-	}
-
-	if e.Message == "" {
-		t.Error("expected error message about approval step")
+				if e.Code != wire.CodeForbidden || !strings.Contains(e.Message, "nitipan broker approve") {
+					t.Errorf("refusal %+v does not name the approve step", e)
+				}
+			}
+		})
 	}
 }
 
-// TestAuthedAllowsBoundLabelWhenCrossUserEnabled tests that authed allows bound labels when
-// CrossUserEnabled is true (Item 5).
-func TestAuthedAllowsBoundLabelWhenCrossUserEnabled(t *testing.T) {
-	h := newHarness(t, nil)
-
-	h.store.Data().Users["owner-id"] = UserRecord{ID: "owner-id", UserLabel: "owner-user"}
-	h.store.Data().OwnerID = "owner-id"
-	h.store.Data().CrossUserEnabled = true
-
-	label := "test-label"
-	nk := NodeKey{MachineID: "machine1", UID: 1000}
-	key := "test-key-12345"
-	hash := keyHash(key)
-
-	h.store.Data().Nodes[nk.String()] = NodeRecord{
-		KeyHash: hash,
-		Label:   label,
-	}
-
-	h.store.Data().Labels[label] = LabelRecord{
-		MachineID:  "machine1",
-		UID:        1000,
-		Derivation: 1,
-	}
-
-	h.store.Data().Bindings[label] = BindingRecord{
-		UserID:            "owner-id",
-		DerivationVersion: 1,
-	}
-
-	handler := h.b.authed(func(w http.ResponseWriter, r *http.Request, key NodeKey) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	req := httptest.NewRequest("POST", "/test", nil)
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set(wire.HeaderMachine, "machine1")
-	req.Header.Set(wire.HeaderUID, "1000")
-
-	rec := httptest.NewRecorder()
-	handler(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rec.Code)
-	}
-}
-
-// TestAuthedAllowsUnboundLabelWhenCrossUserDisabled tests that authed allows unbound labels
-// when CrossUserEnabled is false (Item 5).
-func TestAuthedAllowsUnboundLabelWhenCrossUserDisabled(t *testing.T) {
-	h := newHarness(t, nil)
-
-	h.store.Data().Users["owner-id"] = UserRecord{ID: "owner-id", UserLabel: "owner-user"}
-	h.store.Data().OwnerID = "owner-id"
-	h.store.Data().CrossUserEnabled = false
-
-	label := "test-label"
-	nk := NodeKey{MachineID: "machine1", UID: 1000}
-	key := "test-key-12345"
-	hash := keyHash(key)
-
-	h.store.Data().Nodes[nk.String()] = NodeRecord{
-		KeyHash: hash,
-		Label:   label,
-	}
-
-	h.store.Data().Labels[label] = LabelRecord{
-		MachineID:  "machine1",
-		UID:        1000,
-		Derivation: 1,
-	}
-
-	handler := h.b.authed(func(w http.ResponseWriter, r *http.Request, key NodeKey) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	req := httptest.NewRequest("POST", "/test", nil)
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set(wire.HeaderMachine, "machine1")
-	req.Header.Set(wire.HeaderUID, "1000")
-
-	rec := httptest.NewRecorder()
-	handler(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rec.Code)
-	}
-}
-
-// TestSetCrossUserEnabledRefusals tests SetCrossUserEnabled refusal conditions (Item 10).
+// TestSetCrossUserEnabledRefusals proves turning cross-user features on is refused, naming the reason, with
+// no identity provider, with a key that reported plain HTTP or never reported its scheme, and on a listen
+// address that is neither TLS nor loopback. It catches a switch that skips any one precondition, which
+// would expose node keys or the sign-in page to a network the owner does not trust.
 func TestSetCrossUserEnabledRefusals(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -173,15 +87,19 @@ func TestSetCrossUserEnabledRefusals(t *testing.T) {
 		{
 			name: "label reported plain HTTP",
 			setup: func(h *harness) {
-				h.store.Data().Bindings["label1"] = BindingRecord{UserID: h.store.Data().OwnerID}
-				h.store.Data().SchemeReports["label1"] = "http"
+				h.registerOver(alice, false)
 			},
 			wantErr: "reported plain HTTP",
 		},
 		{
 			name: "label never reported scheme",
 			setup: func(h *harness) {
-				h.store.Data().Bindings["label1"] = BindingRecord{UserID: h.store.Data().OwnerID}
+				approveKey(h, h.registerOver(alice, true).Label, alice.Key)
+
+				// A key a 1.x store held keeps this mark through the upgrade, whatever it reports later. The
+				// mark is the precondition under test, and only a store from before scheme reports holds it, so
+				// the test writes it into the store directly.
+				h.store.Data().KeySchemes[keyHash(alice.Key)] = schemeUnreported
 			},
 			wantErr: "never reported scheme",
 		},
@@ -221,7 +139,7 @@ func TestSetCrossUserEnabledRefusals(t *testing.T) {
 			h := newHarness(t, mutate)
 			tt.setup(h)
 
-			err := h.b.SetCrossUserEnabled(true)
+			_, err := h.b.SetCrossUserEnabled(true)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -233,9 +151,10 @@ func TestSetCrossUserEnabledRefusals(t *testing.T) {
 	}
 }
 
-// TestSetCrossUserEnabledSuccess tests successful enable with all conditions met (Item 10). The broker
-// is fresh, and its owner is the one its store assigned at open. It catches a fresh broker that can never
-// turn cross-user features on because only an upgrade created an owner.
+// TestSetCrossUserEnabledSuccess proves a fresh broker turns cross-user features on once every precondition
+// holds, on loopback without TLS and on a public address with it. Its owner is the one its store assigned
+// at open. It catches a fresh broker that can never turn cross-user features on because only an upgrade
+// created an owner.
 func TestSetCrossUserEnabledSuccess(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -260,66 +179,144 @@ func TestSetCrossUserEnabledSuccess(t *testing.T) {
 			}
 
 			h := newHarness(t, mutate)
-			h.store.Data().Bindings["label1"] = BindingRecord{UserID: h.store.Data().OwnerID}
-			h.store.Data().SchemeReports["label1"] = "https"
+			approveKey(h, h.registerOver(alice, true).Label, alice.Key)
 
-			if err := h.b.SetCrossUserEnabled(true); err != nil {
+			if _, err := h.b.SetCrossUserEnabled(true); err != nil {
 				t.Fatalf("SetCrossUserEnabled failed: %v", err)
 			}
 
-			if !h.store.Data().CrossUserEnabled {
+			if !h.data().CrossUserEnabled {
 				t.Error("CrossUserEnabled not set")
 			}
 		})
 	}
 }
 
-// TestRegisteredCarriesCrossUserFlag tests that Registered carries the CrossUser flag (Item 8).
+// TestRegisteredCarriesCrossUserFlag proves the registration answer says whether cross-user features are
+// on. It catches an answer that omits the flag, which leaves a node that would refuse to talk to a broker
+// serving several users unaware that it does.
 func TestRegisteredCarriesCrossUserFlag(t *testing.T) {
-	tests := []struct {
-		name             string
-		crossUserEnabled bool
-		wantCrossUser    bool
-	}{
-		{"cross-user enabled", true, true},
-		{"cross-user disabled", false, false},
-	}
+	for _, enable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cross-user %t", enable), func(t *testing.T) {
+			h := newCrossUserHarness(t)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h := newHarness(t, nil)
-			h.store.Data().CrossUserEnabled = tt.crossUserEnabled
+			approveKey(h, h.register(alice).Label, alice.Key)
 
-			req := wire.Register{
-				Version:   wire.Current,
-				MachineID: "machine1",
-				UID:       1000,
-				User:      "testuser",
-				Host:      "testhost",
-				HTTPS:     true,
+			if enable {
+				h.crossUserOn(t)
 			}
 
-			data, _ := json.Marshal(req)
-			httpReq := httptest.NewRequest("POST", wire.PathRegister, bytes.NewReader(data))
-			httpReq.Header.Set("Authorization", "Bearer test-key")
-			httpReq.Header.Set(wire.HeaderMachine, "machine1")
-			httpReq.Header.Set(wire.HeaderUID, "1000")
-
-			rec := httptest.NewRecorder()
-			h.b.handleRegister(rec, httpReq)
-
-			if rec.Code != http.StatusOK {
-				t.Fatalf("registration failed: %d", rec.Code)
-			}
-
-			var resp wire.Registered
-			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-				t.Fatalf("decoding response: %v", err)
-			}
-
-			if resp.CrossUser != tt.wantCrossUser {
-				t.Errorf("CrossUser = %v, want %v", resp.CrossUser, tt.wantCrossUser)
+			if got := h.register(bob).CrossUser; got != enable {
+				t.Errorf("CrossUser = %v, want %v", got, enable)
 			}
 		})
+	}
+}
+
+// TestTurningCrossUserOffRefusesEveryCoworkerLabelAndKeepsTheirState proves the broker serves only its
+// owner's labels and unbound labels while cross-user features are off. A coworker can still bind on the
+// page then, so setup happens before the switch, but every node-API call from the coworker's label is
+// refused with the step that turns the features on. Turning them off again refuses the coworker once more
+// and keeps the coworker's lease and delegation. It catches a switch that only gates the unbound-label
+// check, so a coworker's label acts in its own scope, or in the owner's, on a broker meant to run one user.
+func TestTurningCrossUserOffRefusesEveryCoworkerLabelAndKeepsTheirState(t *testing.T) {
+	iss := oidctest.New(t, "v-sub", "v@example.com")
+	h, page := pageHarness(t, iss)
+
+	v, err := h.b.AdmitUser(iss.URL, "v-sub", "v@example.com", h.wall.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerLabel := h.registerOver(alice, true).Label
+	approveKey(h, ownerLabel, alice.Key)
+
+	coworker := nodeID{Machine: "machine-v", UID: 501, Key: "key-v"}
+	coworkerLabel := h.registerOver(coworker, true).Label
+
+	if status, _ := h.pair(coworker, "alpha-bravo-charlie-delta"); status/100 != 2 {
+		t.Fatalf("pairing the coworker's key: status %d", status)
+	}
+
+	if status, body := page.Submit("bind", url.Values{"label": {coworkerLabel}, "code": {"alpha-bravo-charlie-delta"}}); status != http.StatusOK {
+		t.Fatalf("the coworker's bind while the features are off: %d %s", status, body)
+	}
+
+	if got := h.claim(alice, "L-owner", wire.ReachUser, name("owner"), "a"); got.Code != wire.CodeGranted {
+		t.Fatalf("the owner's claim while the features are off: %+v", got)
+	}
+
+	refusedEverywhere := func(when string) {
+		t.Helper()
+
+		calls := []struct {
+			path string
+			body any
+		}{
+			{wire.PathClaim, wire.Claim{Version: wire.Current, ID: "L-v2", Reach: wire.ReachUser, Entries: name("v2"),
+				Derivation: 1, Anchor: "anchor", Holder: holder("v")}},
+			{wire.PathList, wire.ListRequest{Version: wire.Current}},
+			{wire.PathWhoHolds, wire.WhoHolds{Version: wire.Current}},
+			{wire.PathBreak, wire.Break{Version: wire.Current, RequestID: "b1", ID: "L-owner", Force: true, By: holder("v")}},
+			{wire.PathMailSend, wire.MailSend{Version: wire.Current}},
+		}
+
+		for _, c := range calls {
+			resp := h.do(http.MethodPost, c.path, coworker, c.body)
+
+			var e wire.Error
+			if resp.StatusCode == http.StatusForbidden {
+				if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if resp.StatusCode != http.StatusForbidden || !strings.Contains(e.Message, "nitipan broker cross-user true") {
+				t.Errorf("%s from the coworker %s: status %d, %+v, want a refusal naming the switch", c.path, when, resp.StatusCode, e)
+			}
+		}
+	}
+
+	refusedEverywhere("before the features are on")
+
+	if rec := h.enableCrossUser(); rec.Code != http.StatusOK {
+		t.Fatalf("turning cross-user features on: %d %s", rec.Code, rec.Body)
+	}
+
+	if got := h.claim(coworker, "L-v", wire.ReachUser, name("v"), "v"); got.Code != wire.CodeGranted {
+		t.Fatalf("the coworker's claim once the features are on: %+v", got)
+	}
+
+	if _, err := h.b.GrantDelegation(iss.URL, "v-sub", ownerLabel, h.wall.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := h.admin(http.MethodPost, AdminPathCrossUser, map[string]bool{"enable": false}); rec.Code/100 != 2 {
+		t.Fatalf("turning cross-user features off: %d %s", rec.Code, rec.Body)
+	}
+
+	refusedEverywhere("after the features are off again")
+
+	if got := h.claim(alice, "L-owner2", wire.ReachUser, name("owner2"), "a"); got.Code != wire.CodeGranted {
+		t.Errorf("the owner's claim after the features are off again: %+v", got)
+	}
+
+	h.b.mu.Lock()
+	lease := h.b.g.grants["L-v"]
+	live := lease != nil && lease.State == wire.StateLive
+	h.b.mu.Unlock()
+
+	if !live {
+		t.Error("turning the features off ended the coworker's lease")
+	}
+
+	d := h.data()
+
+	if _, ok := d.Delegations[v.ID][ownerLabel]; !ok {
+		t.Error("turning the features off dropped the coworker's delegation")
+	}
+
+	if d.Bindings[coworkerLabel].UserID != v.ID {
+		t.Errorf("turning the features off changed the coworker's binding to %+v", d.Bindings[coworkerLabel])
 	}
 }

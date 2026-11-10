@@ -2,9 +2,11 @@ package broker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -528,5 +530,72 @@ func TestBeatsWithoutAStreamDoNotKeepMirrorsFresh(t *testing.T) {
 
 	if !h.view(alice.key()).Stale {
 		t.Error("a node that keeps posting with no stream attached never reads stale")
+	}
+}
+
+// TestEveryNodeAPIRouteNeedsNodeCredential tests that every route on the node API refuses
+// a request without the node credential.
+func TestEveryNodeAPIRouteNeedsNodeCredential(t *testing.T) {
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{"GET", wire.PathStream},
+		{"POST", wire.PathAck},
+		{"POST", wire.PathSnapshot},
+		{"POST", wire.PathHeartbeat},
+		{"POST", wire.PathPing},
+		{"POST", wire.PathPair},
+		{"POST", wire.PathClaim},
+		{"POST", wire.PathRenew},
+		{"POST", wire.PathRelease},
+		{"POST", wire.PathBreak},
+		{"POST", wire.PathList},
+		{"POST", wire.PathFence},
+		{"POST", wire.PathWhoHolds},
+		{"POST", wire.PathWhoIs},
+		{"POST", wire.PathWhoAmI},
+		{"POST", wire.PathMailSend},
+		{"POST", wire.PathMailAck},
+		{"POST", wire.PathMailReport},
+		{"POST", wire.PathMailStatus},
+	}
+
+	for _, tt := range routes {
+		t.Run(tt.path, func(t *testing.T) {
+			h := newCrossUserHarness(t)
+
+			body := []byte(`{"version":1}`)
+			if tt.path == wire.PathStream {
+				body = nil
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewReader(body))
+			req.Header.Set(wire.HeaderMachine, "machine1")
+			req.Header.Set(wire.HeaderUID, "1000")
+
+			w := httptest.NewRecorder()
+			h.b.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("route %s %s without credential: status = %d, want %d", tt.method, tt.path, w.Code, http.StatusUnauthorized)
+			}
+		})
+	}
+}
+
+// TestRegisterNeedsNodeCredential tests that register also needs the node credential.
+func TestRegisterNeedsNodeCredential(t *testing.T) {
+	h := newCrossUserHarness(t)
+
+	req := httptest.NewRequest("POST", wire.PathRegister, bytes.NewReader([]byte(`{"version":1,"machine_id":"m1","uid":1000}`)))
+	req.Header.Set(wire.HeaderMachine, "m1")
+	req.Header.Set(wire.HeaderUID, "1000")
+
+	w := httptest.NewRecorder()
+	h.b.Handler().ServeHTTP(w, req)
+
+	if w.Code == http.StatusOK {
+		t.Error("register succeeded without bearer token")
 	}
 }

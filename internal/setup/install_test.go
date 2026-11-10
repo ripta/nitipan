@@ -250,3 +250,17 @@ func TestTextNamesAbsolutePathsAndQuotesTheExecutable(t *testing.T) {
 		t.Error("the text names the state directory with ~")
 	}
 }
+
+// TestSetupTextTellsUserToRunBrokerAsNonAgentOSUser tests that the broker setup text tells
+// the user to run the broker as an OS user where no agent session runs.
+func TestSetupTextTellsUserToRunBrokerAsNonAgentOSUser(t *testing.T) {
+	text := BrokerText(DaemonInput{
+		Executable: "/usr/local/bin/nitipan",
+		Home:       "/Users/test",
+		UID:        501,
+	})
+
+	if !strings.Contains(text, "No agent session may run as that OS user") {
+		t.Error("broker setup text does not mention that no agent session may run as that OS user")
+	}
+}

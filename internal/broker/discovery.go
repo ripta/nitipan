@@ -467,17 +467,10 @@ func (b *Broker) handleWhoAmI(w http.ResponseWriter, r *http.Request, key NodeKe
 	}
 
 	b.mu.Lock()
-	label := b.store.Data().Nodes[key.String()].Label
-	binding, hasBind := b.store.Data().Bindings[label]
-	var userLabel string
-	if hasBind {
-		if user, ok := b.store.Data().Users[binding.UserID]; ok {
-			userLabel = user.UserLabel
-		}
-	}
+	user, _ := b.labelBoundUserLocked(b.store.Data().Nodes[key.String()].Label)
 	b.mu.Unlock()
 
-	writeJSON(w, http.StatusOK, wire.WhoAmIAnswer{Version: wire.Current, UserLabel: userLabel})
+	writeJSON(w, http.StatusOK, wire.WhoAmIAnswer{Version: wire.Current, UserLabel: user.UserLabel})
 }
 
 // visibleTo reports whether discovery shows the asking node a lease of the given reach whose owners
@@ -492,7 +485,7 @@ func (b *Broker) visibleTo(asker NodeKey, reach string, owners ...string) bool {
 	}
 
 	label := d.Nodes[asker.String()].Label
-	me := b.boundUserLabel(label)
+	me := b.scopeUserLabel(label)
 
 	for _, owner := range owners {
 		if owner == "" {
@@ -508,9 +501,9 @@ func (b *Broker) visibleTo(asker NodeKey, reach string, owners ...string) bool {
 }
 
 func (b *Broker) grantVisibleTo(asker NodeKey, g *grant) bool {
-	return g.nodeKey() == asker || b.visibleTo(asker, g.Reach, g.ActingFor, b.boundUserLabel(g.Node))
+	return g.nodeKey() == asker || b.visibleTo(asker, g.Reach, g.ActingFor, b.scopeUserLabel(g.Node))
 }
 
 func (b *Broker) mirrorVisibleTo(asker NodeKey, m mirror) bool {
-	return m.node == asker || b.visibleTo(asker, record.ReachMachine, b.boundUserLabel(m.label))
+	return m.node == asker || b.visibleTo(asker, record.ReachMachine, b.scopeUserLabel(m.label))
 }

@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/broker"
 	"github.com/space-armada/nitipan/internal/exitcode"
 	"github.com/space-armada/nitipan/internal/handoff"
+	"github.com/space-armada/nitipan/internal/oidc"
 	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/wire"
 )
@@ -163,12 +165,34 @@ func (m *wideMachine) labelOf(t *testing.T) string {
 	return label
 }
 
+// bindByPairing binds the machine's label to the user admitted under issuer plus sub. It runs nitipan node
+// pair, then submits the printed label and code as the page's bind does after that user signs in.
+func (m *wideMachine) bindByPairing(t *testing.T, issuer, sub string) {
+	t.Helper()
+
+	res := m.w.run(m.w.terminal(71), "node", "pair")
+	wantStatus(t, res, exitcode.OK)
+
+	code := pairingCodePattern.FindStringSubmatch(res.Stdout)
+	label := pairedLabelPattern.FindStringSubmatch(res.Stdout)
+
+	if code == nil || label == nil {
+		t.Fatalf("node pair printed no label or code:\n%s", res.Stdout)
+	}
+
+	if _, err := m.f.b.BindPaired(issuer, sub, label[1], code[1], time.Now()); err != nil {
+		t.Fatalf("binding %s: %v", label[1], err)
+	}
+}
+
 // TestAUserReleasesTheAgentsLeaseForThemByID proves `nitipan release <lease-id>` on U's own machine
 // reaches the broker for a lease a shared agent holds for U on another machine, and ends it there. It
 // catches a CLI that treats an ID with no local record as a local lease, so the release never leaves
 // U's machine and U cannot release the agent's lease for them.
 func TestAUserReleasesTheAgentsLeaseForThemByID(t *testing.T) {
-	f := newWideFixture(t)
+	f := newWideFixtureConfig(t, true, nil, func(c *broker.Config) {
+		c.OIDCConfig = &oidc.Config{Issuer: "https://issuer.test", ClientID: "nitipan", RedirectURL: "https://broker.test/callback"}
+	})
 
 	mu := f.machine("mu")
 	mu.start()
@@ -178,29 +202,25 @@ func TestAUserReleasesTheAgentsLeaseForThemByID(t *testing.T) {
 
 	now := time.Now()
 
-	u, err := f.b.CreateUser("u@example.com", now)
+	u, err := f.b.AdmitUser("https://issuer.test", "u-sub", "u@example.com", now)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	v, err := f.b.CreateUser("v@example.com", now)
-	if err != nil {
+	if _, err := f.b.AdmitUser("https://issuer.test", "v-sub", "v@example.com", now); err != nil {
 		t.Fatal(err)
 	}
 
 	agentLabel := ma.labelOf(t)
+	mu.labelOf(t)
 
-	if err := f.b.BindLabelToUser(mu.labelOf(t), u.ID, now); err != nil {
-		t.Fatal(err)
+	// The broker serves U's and V's machines only once cross-user features are on.
+	if _, err := f.b.SetCrossUserEnabled(true); err != nil {
+		t.Fatalf("turning cross-user features on: %v", err)
 	}
 
-	if err := f.b.BindLabelToUser(agentLabel, v.ID, now); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := f.b.LinkIssuerSub("https://issuer.test", "u-sub", u.ID); err != nil {
-		t.Fatal(err)
-	}
+	mu.bindByPairing(t, "https://issuer.test", "u-sub")
+	ma.bindByPairing(t, "https://issuer.test", "v-sub")
 
 	if _, err := f.b.GrantDelegation("https://issuer.test", "u-sub", agentLabel, now); err != nil {
 		t.Fatal(err)

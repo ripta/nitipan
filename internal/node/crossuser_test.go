@@ -8,8 +8,9 @@ import (
 	"github.com/space-armada/nitipan/internal/record"
 )
 
-// TestNodeRefusesPlainHTTPWhenCrossUserEnabled tests that a node refuses plain HTTP once
-// cross-user features are enabled (Item 8).
+// TestNodeRefusesPlainHTTPWhenCrossUserEnabled proves a node refuses plain HTTP once it has recorded that
+// cross-user features are on. It catches a node that sends its key in the clear to a broker serving
+// several users.
 func TestNodeRefusesPlainHTTPWhenCrossUserEnabled(t *testing.T) {
 	dir := t.TempDir()
 
@@ -45,8 +46,8 @@ func TestNodeRefusesPlainHTTPWhenCrossUserEnabled(t *testing.T) {
 	}
 }
 
-// TestNodeAllowsPlainHTTPWhenCrossUserNotEnabled tests that a node allows plain HTTP when
-// cross-user features are not enabled (Item 8).
+// TestNodeAllowsPlainHTTPWhenCrossUserNotEnabled proves a node still talks plain HTTP to a broker that
+// never turned cross-user features on. It catches a refusal that breaks single-user brokers on loopback.
 func TestNodeAllowsPlainHTTPWhenCrossUserNotEnabled(t *testing.T) {
 	dir := t.TempDir()
 
@@ -70,8 +71,8 @@ func TestNodeAllowsPlainHTTPWhenCrossUserNotEnabled(t *testing.T) {
 	}
 }
 
-// TestNodeAllowsHTTPSWhenCrossUserEnabled tests that a node allows HTTPS even when cross-user
-// features are enabled (Item 8).
+// TestNodeAllowsHTTPSWhenCrossUserEnabled proves a node keeps talking HTTPS once cross-user features are
+// on. It catches a refusal that matches the flag alone rather than the scheme.
 func TestNodeAllowsHTTPSWhenCrossUserEnabled(t *testing.T) {
 	dir := t.TempDir()
 
@@ -99,8 +100,9 @@ func TestNodeAllowsHTTPSWhenCrossUserEnabled(t *testing.T) {
 	}
 }
 
-// TestNodeRefusesPlainHTTPEvenWhenLaterRegisteredOmitsFlag tests that once a node records
-// cross-user enabled, it stays refused even if a later registration omits the flag (Item 8).
+// TestNodeRefusesPlainHTTPEvenWhenLaterRegisteredOmitsFlag proves a node that once recorded cross-user
+// features on keeps refusing plain HTTP when a later registration answer omits the flag. It catches a
+// record that a downgraded or spoofed answer clears.
 func TestNodeRefusesPlainHTTPEvenWhenLaterRegisteredOmitsFlag(t *testing.T) {
 	dir := t.TempDir()
 

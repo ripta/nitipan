@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/space-armada/nitipan/internal/record"
 )
@@ -220,7 +221,7 @@ func TestMajorMigrationKeepsThePreviousFileAndAnOlderBrokerStartsFromIt(t *testi
 	path := filepath.Join(t.TempDir(), "broker.json")
 	before := seedMajorOne(t, path)
 
-	migrate := map[int]Migration{1: func(old []byte) ([]byte, error) {
+	migrate := map[int]Migration{1: func(old []byte, _ time.Time) ([]byte, error) {
 		return []byte(strings.Replace(string(old), `"version":"1.0"`, `"version":"2.0"`, 1)), nil
 	}}
 
@@ -267,7 +268,7 @@ func TestMigrationFailureLeavesTheStoreUntouchedAndKeepsThePreviousFile(t *testi
 	path := filepath.Join(t.TempDir(), "broker.json")
 	before := seedMajorOne(t, path)
 
-	migrate := map[int]Migration{1: func([]byte) ([]byte, error) { return nil, errors.New("boom") }}
+	migrate := map[int]Migration{1: func([]byte, time.Time) ([]byte, error) { return nil, errors.New("boom") }}
 
 	if _, err := openTest(t, path, StoreOptions{Current: v(2, 0), Migrations: migrate}); err == nil {
 		t.Fatal("open succeeded with a failing migration")
@@ -376,6 +377,13 @@ type ownerStoreTest struct {
 
 	// KeepOwner is the owner ID the seeded store already holds, or empty when the open assigns one.
 	KeepOwner string
+
+	// KeepsRecord is true when the seeded store already holds the owner's user record, so the open writes
+	// no CreatedAt.
+	KeepsRecord bool
+
+	// Bindings is how many bindings the open makes.
+	Bindings int
 }
 
 const keptOwnerID = "01JM00000000000000000OWNER"
@@ -392,7 +400,23 @@ var ownerStoreTests = []ownerStoreTest{
 	},
 	{
 		Name: "a 1.x store the migration upgrades",
-		Seed: func(t *testing.T, path string) { seedMajorOne(t, path) },
+		Seed: func(t *testing.T, path string) {
+			s, err := openTest(t, path, StoreOptions{Current: v(1, 0)})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			next := s.Data().clone()
+			next.Nodes["m/1"] = NodeRecord{KeyHash: "h", Label: "w-x-y-z"}
+			next.Pins["w-x-y-z"] = PinRecord{PinnedHash: "h"}
+
+			if err := s.Persist(next); err != nil {
+				t.Fatal(err)
+			}
+
+			_ = s.Close()
+		},
+		Bindings: 1,
 	},
 	{
 		Name: "a 2.0 store that has an owner",
@@ -404,7 +428,8 @@ var ownerStoreTests = []ownerStoreTest{
 				t.Fatal(err)
 			}
 		},
-		KeepOwner: keptOwnerID,
+		KeepOwner:   keptOwnerID,
+		KeepsRecord: true,
 	},
 	{
 		Name: "a 2.0 store whose owner has no user record",
@@ -423,6 +448,9 @@ var ownerStoreTests = []ownerStoreTest{
 // the owner's record back under that same ID. It catches a fresh broker that never gets an owner, so
 // approval binds nothing and cross-user features can never turn on, and an open that assigns a second
 // owner, which would orphan every binding to the first.
+//
+// The owner's record and every binding the migration makes carry the store's clock. That catches an open
+// or a migration that reads the process clock, which a broker under test cannot control.
 func TestEveryStoreHasAnOwnerAfterOpenAndKeepsItAcrossARestart(t *testing.T) {
 	for _, test := range ownerStoreTests {
 		t.Run(test.Name, func(t *testing.T) {
@@ -432,7 +460,8 @@ func TestEveryStoreHasAnOwnerAfterOpenAndKeepsItAcrossARestart(t *testing.T) {
 				test.Seed(t, path)
 			}
 
-			opts := StoreOptions{Migrations: map[int]Migration{1: MigrateV1ToV2}}
+			storeNow := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+			opts := StoreOptions{Migrations: map[int]Migration{1: MigrateV1ToV2}, Now: func() time.Time { return storeNow }}
 
 			s, err := openTest(t, path, opts)
 			if err != nil {
@@ -449,6 +478,18 @@ func TestEveryStoreHasAnOwnerAfterOpenAndKeepsItAcrossARestart(t *testing.T) {
 				t.Fatalf("after open: owner %q, want the store's owner %q kept", d.OwnerID, test.KeepOwner)
 			case owner.UserLabel != DeriveUserLabel(owner.ID) || len(d.Users) != 1:
 				t.Fatalf("after open: owner %+v among %d users, want one user with the derived label", owner, len(d.Users))
+			case !test.KeepsRecord && !owner.CreatedAt.Equal(storeNow):
+				t.Errorf("after open: the owner was created at %v, want the store's clock %v", owner.CreatedAt, storeNow)
+			}
+
+			if len(d.Bindings) != test.Bindings {
+				t.Errorf("after open: %d bindings, want %d", len(d.Bindings), test.Bindings)
+			}
+
+			for label, binding := range d.Bindings {
+				if !binding.BoundAt.Equal(storeNow) {
+					t.Errorf("after open: %s was bound at %v, want the store's clock %v", label, binding.BoundAt, storeNow)
+				}
 			}
 
 			_ = s.Close()

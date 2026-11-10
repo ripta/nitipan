@@ -689,6 +689,42 @@ func TestTheApprovalCommandsReachTheBrokerOnlyThroughItsAdminSocket(t *testing.T
 	wantStatus(t, again, exitcode.Error)
 	wantContains(t, "stderr", again.Stderr, "already approved", "forget")
 
+	bindings := run("broker", "bindings")
+	wantStatus(t, bindings, exitcode.OK)
+	wantContains(t, "stdout", bindings.Stdout, owner.UserLabel, "user "+owner.ID, label, "last seen ")
+
+	wantContains(t, "stdout", run("broker", "admissions").Stdout, "no one is waiting for admission")
+
+	if err := mw.f.b.RecordPendingAdmission("https://issuer.test", "coworker-sub", "coworker@example.com", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	admissions := run("broker", "admissions")
+	wantStatus(t, admissions, exitcode.OK)
+	wantContains(t, "stdout", admissions.Stdout, "coworker@example.com", "issuer https://issuer.test", "sub coworker-sub",
+		"nitipan broker admit")
+
+	admit := run("broker", "admit", "https://issuer.test", "coworker-sub", "coworker@example.com")
+	wantStatus(t, admit, exitcode.OK)
+	wantContains(t, "stdout", admit.Stdout, "admitted coworker@example.com as user ", "with user label ")
+
+	coworkerID := strings.TrimSuffix(strings.Fields(admit.Stdout)[4], ",")
+
+	wantContains(t, "stdout", run("broker", "admissions").Stdout, "no one is waiting for admission")
+
+	link := run("broker", "link", "https://other.test", "coworker-other", coworkerID)
+	wantStatus(t, link, exitcode.OK)
+	wantContains(t, "stdout", link.Stdout, "linked issuer https://other.test sub coworker-other to user "+coworkerID)
+
+	revoke := run("broker", "revoke-user", coworkerID)
+	wantStatus(t, revoke, exitcode.OK)
+	wantContains(t, "stdout", revoke.Stdout, "revoked user "+coworkerID, "forgot labels: none", "ended leases: none",
+		"removed 2 admissions, 0 delegations, and 0 mail grants")
+
+	unknown := run("broker", "revoke-user", "01JM0000000000000000NOUSER")
+	wantStatus(t, unknown, exitcode.Error)
+	wantContains(t, "stderr", unknown.Stderr, "no such user")
+
 	printed := mw.m2.w.run(mw.c2, "node", "fingerprint")
 	wantStatus(t, printed, exitcode.OK)
 	wantContains(t, "stdout", printed.Stdout, fp)

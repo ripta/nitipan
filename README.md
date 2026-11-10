@@ -397,9 +397,14 @@ The broker config names an OIDC identity provider in its `oidc` block:
 }
 ```
 
-The `issuer` and `redirect_url` must be `https`. Loopback addresses are exempt for tests. The `client_secret` lives
+The `issuer` and `redirect_url` must be `https`. Loopback addresses are exempt for tests. The broker refuses to start
+with a `redirect_url` that is missing or plain HTTP off loopback. The `client_secret` lives
 only in the broker config on the broker host. No node or agent sandbox reaches it. The `ca_file` is optional. Use it
 for a self-hosted issuer with a private CA.
+
+The broker fetches the provider's discovery document on the first sign-in, not at start. A provider that is down when
+the broker starts leaves leases and mail working, and every existing binding keeps working. The sign-in page answers
+503 until the provider can be reached, so only new bindings, delegations, and grants wait.
 
 ### Upgrading to store 2.0
 
@@ -416,15 +421,16 @@ On the broker host, list pending admissions with `nitipan broker admissions`, th
 `nitipan broker admit <issuer> <sub> <email>`. The issuer and `sub` come from the identity provider. The broker maps
 them to a broker-assigned user ID.
 
-On the coworker's machine, run `nitipan node pair`. It prints the label's fingerprint and a four-word pairing code.
-The code expires in 10 minutes. The coworker opens the broker's sign-in page, signs in with their identity provider,
-and enters the label and the pairing code on the form. The binding pins the label's key and discards other pending keys
-for that label. Five wrong codes from one signed-in user for one label lock that user out of that label until the code
+On the coworker's machine, run `nitipan node pair`. It prints the machine's label, its key's fingerprint, and a
+four-word pairing code. The code expires in 10 minutes. The coworker opens the broker's sign-in page, signs in with their identity provider,
+and enters the label and the pairing code on the form. The binding pins the key that sent the code and discards the
+label's other pending keys. Five wrong codes from one signed-in user for one label lock that user out of that label until the code
 expires.
 
 After a machine is forgotten with `nitipan broker forget <label>`, run `nitipan node rekey` on that machine to
-generate a new key. Then approve the new key on the broker host or bind it through the sign-in page with a fresh
-pairing code from `nitipan node pair`.
+generate a new key. The label stays the same. Then approve the new key on the broker host with `nitipan broker approve
+<label> <fingerprint>`, or run `nitipan node pair` and bind the label it prints through the sign-in page with the
+fresh code. The old key stays refused, even when it registers again.
 
 ### Broker-host commands
 
@@ -435,12 +441,12 @@ nitipan broker pending                         # list unapproved labels with fin
 nitipan broker approve <label> <fingerprint>   # pin the key, bind the label to the broker owner
 nitipan broker forget <label>                  # unpin a label whose machine was reinstalled
 nitipan broker confirm-upgrade                 # delete the kept v1 file, making rollback impossible
-nitipan broker admissions                      # list users who signed in but are not admitted
-nitipan broker admit <issuer> <sub> <email>    # admit a user by their issuer plus sub
+nitipan broker admissions                      # list people who signed in but are not admitted
+nitipan broker admit <issuer> <sub> <email>    # admit a user by their issuer plus sub, and print their user ID
 nitipan broker link <issuer> <sub> <user-id>   # map a new issuer plus sub to an existing user
-nitipan broker bindings                        # list all label bindings with last-seen times
-nitipan broker revoke-user <user-id>           # forget all of a user's labels and remove their admission
-nitipan broker cross-user <enable>             # turn cross-user features on or off
+nitipan broker bindings                        # list each user's bound labels with last-seen times
+nitipan broker revoke-user <user-id>           # forget a user's labels, end their leases, and print what it removed
+nitipan broker cross-user <true|false>         # turn cross-user features on or off
 nitipan broker break <lease-id>                # end any broker lease as the broker owner
 ```
 
@@ -456,11 +462,14 @@ host. The command refuses when:
 - The broker's listener is neither on a loopback address nor serving TLS itself. Set `cert_file` and `key_file` in the
   broker config to serve TLS, or listen on `127.0.0.1` or `::1`. An ingress on another host may terminate TLS and
   re-encrypt to the broker. An ingress that speaks plain HTTP to the broker over a private hop is not enough.
-- Any bound label reported plain HTTP to the broker. Once a node sends its key over plain HTTP, that key may have been
-  read on the LAN. Forget each such label with `nitipan broker forget <label>` on the broker host, then have the node
-  run `nitipan node rekey` and approve its new key.
-- Any bound label never reported its scheme. This label is from an older node. Forget it, upgrade the node's nitipan
-  binary, and approve the label again.
+- Any label's current key, or its pinned key, reported plain HTTP to the broker. Once a node sends its key over plain
+  HTTP, that key may have been read on the LAN. The mark stays with the key, so a later HTTPS report does not clear it.
+  Forget each such label with `nitipan broker forget <label>` on the broker host, then have the node run `nitipan
+  node rekey` and approve its new key.
+- Any label's current key, or its pinned key, never reported its scheme. Every key from store 1.x is one. Forget the
+  label, upgrade the node's nitipan binary, run `nitipan node rekey`, and approve the new key.
+
+A forgotten label has no current key, so it never blocks the command.
 
 The broker always has an owner, so the owner never blocks the command. The broker assigns its owner when it first
 opens its store, and an upgrade from store 1.x keeps the owner its migration assigned. A store whose owner record went
@@ -468,6 +477,12 @@ missing gets it back under the same user ID when the broker opens it, so every l
 
 Once cross-user features are on, an unbound label is refused for leases and mail. A node records the flag and never
 sends its key over plain HTTP again, even when a later response omits the flag.
+
+While cross-user features are off, the broker serves only the owner's labels and unbound labels. A label bound to any
+other user is refused for leases, discovery, break, and mail, with an error that names `nitipan broker cross-user
+true`. A coworker can still bind their machine on the sign-in page while the features are off, so setup can happen
+first. `nitipan broker cross-user false` turns them off again. The coworker's machines are then refused, and their
+bindings, leases, delegations, and grants stay as they are for when the features come back on.
 
 ### Checking your user label
 
@@ -501,8 +516,8 @@ A claim without `--acting-for`, or from an older nitipan, acts as the label's ow
 other value it carries.
 
 Revoking a delegation ends every lease the agent's label holds for that user. The agent's node writes the holder a
-notice. An ended lease is never revived. `nitipan broker revoke-user` ends every lease held for that user the same
-way.
+notice. An ended lease is never revived. `nitipan broker revoke-user` ends every lease held for that user, and every
+lease the user's labels hold for others, the same way.
 
 ### Releasing and breaking across users
 

@@ -255,16 +255,12 @@ func (b *Broker) checkRecipientLocked(req wire.MailSend) (status int, code, msg 
 	return 0, "", ""
 }
 
-// mailUserLocked names the user a label's mail belongs to: the label's bound user, or the broker owner
-// for a label nobody bound, which the unbound-label rule counts in the owner's scope.
+// mailUserLocked names the user ID a label's mail belongs to: the user whose scope the label acts in. It
+// is empty for a label nobody bound once cross-user features are on, and no mail crosses to such a label.
 func (b *Broker) mailUserLocked(label string) string {
-	d := b.store.Data()
+	user, _ := b.scopeUserLocked(label)
 
-	if binding, ok := d.Bindings[label]; ok {
-		return binding.UserID
-	}
-
-	return d.OwnerID
+	return user.ID
 }
 
 // crossMail is what admits one message across users. Its zero value is mail between one user's own

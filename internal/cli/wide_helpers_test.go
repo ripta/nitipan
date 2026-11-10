@@ -73,6 +73,14 @@ func newWideFixture(t *testing.T) *wideFixture {
 func newWideFixtureWith(t *testing.T, useTLS bool, prep func(*broker.Data)) *wideFixture {
 	t.Helper()
 
+	return newWideFixtureConfig(t, useTLS, prep, nil)
+}
+
+// newWideFixtureConfig is newWideFixtureWith with configure, when set, editing the broker config before the
+// broker starts.
+func newWideFixtureConfig(t *testing.T, useTLS bool, prep func(*broker.Data), configure func(*broker.Config)) *wideFixture {
+	t.Helper()
+
 	store, err := broker.OpenStore(filepath.Join(t.TempDir(), "broker.json"), broker.StoreOptions{Volume: okVolume{}})
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +97,12 @@ func newWideFixtureWith(t *testing.T, useTLS bool, prep func(*broker.Data)) *wid
 	}
 
 	f := &wideFixture{t: t, store: store, clock: monoclock.NewFake(time.Hour)}
-	f.b = broker.New(broker.Config{Store: store, Term: 5 * time.Minute, Keepalive: 30 * time.Millisecond, Clock: f.clock, Version: "test"})
+	cfg := broker.Config{Store: store, Term: 5 * time.Minute, Keepalive: 30 * time.Millisecond, Clock: f.clock, Version: "test"}
+	if configure != nil {
+		configure(&cfg)
+	}
+
+	f.b = broker.New(cfg)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p := f.missing.Load(); p != nil && *p == r.URL.Path {

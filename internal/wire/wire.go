@@ -256,3 +256,16 @@ func ClassifyIP(ip net.IP) string {
 		return HostPublic
 	}
 }
+
+// Pair sends the hash of a pairing code the node printed. The broker ties the code to the key that sent
+// it, so a bind by the code pins that key.
+type Pair struct {
+	Version     Version `json:"version"`
+	PairingHash string  `json:"pairing_hash"`
+}
+
+// Paired answers a Pair with the label the code binds.
+type Paired struct {
+	Version Version `json:"version"`
+	Label   string  `json:"label"`
+}

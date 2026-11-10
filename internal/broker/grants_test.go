@@ -572,48 +572,26 @@ func TestOldNodeSnapshotWithNoAckedFieldStillWorks(t *testing.T) {
 	}
 }
 
-// TestSubstituteActingForPreventsCrossUserClaiming tests that a label bound to U1 cannot claim
-// in U2's scope by naming U2's label in acting_for. No user delegated to the label, so substitute
-// everything except the label's own bound user's label.
+// TestSubstituteActingForPreventsCrossUserClaiming proves that with cross-user features off, an old-version
+// claim from a bound label that names another user's label in acting_for acts as the label's own user. It
+// catches a broker that skips the substitution until the switch is on, which would let a label claim in a
+// scope the owner never gave it the moment the owner turns the features on.
 func TestSubstituteActingForPreventsCrossUserClaiming(t *testing.T) {
 	h := newHarness(t, nil)
 	h.twoNodes()
 
-	u1ID := "user1"
-	u1Label := DeriveUserLabel(u1ID)
-	u2ID := "user2"
-	u2Label := DeriveUserLabel(u2ID)
+	owner := h.data().Users[h.data().OwnerID]
+	approveKey(h, h.data().Nodes[laptop.key().String()].Label, laptop.Key)
 
-	d := h.store.Data()
-	next := d.clone()
-	next.OwnerID = u1ID
-	next.Users[u1ID] = UserRecord{
-		ID:              u1ID,
-		UserLabel:       u1Label,
-		LabelDerivation: UserLabelDerivation,
-	}
-	next.Users[u2ID] = UserRecord{
-		ID:              u2ID,
-		UserLabel:       u2Label,
-		LabelDerivation: UserLabelDerivation,
-	}
-
-	laptopLabel := next.Nodes[laptop.key().String()].Label
-	next.Bindings[laptopLabel] = BindingRecord{
-		UserID:            u1ID,
-		LastBoundUser:     u1ID,
-		DerivationVersion: UserLabelDerivation,
-	}
-
-	if err := h.store.Persist(next); err != nil {
+	other, err := h.b.AdmitUser(createIssuer, "other@example.com", "other@example.com", wallStart)
+	if err != nil {
 		t.Fatal(err)
 	}
-	h.store.Swap(next)
 
 	var res wire.Result
 	req := wire.Claim{
 		Version: wire.Current, ID: "L1", Reach: wire.ReachUser, Derivation: 1, Anchor: "anchor-L1",
-		Entries: name("svc"), Holder: holder("a"), ActingFor: u2Label,
+		Entries: name("svc"), Holder: holder("a"), ActingFor: other.UserLabel,
 	}
 
 	if h.call(laptop, wire.PathClaim, req, &res) != http.StatusOK || res.Code != wire.CodeGranted {
@@ -625,7 +603,7 @@ func TestSubstituteActingForPreventsCrossUserClaiming(t *testing.T) {
 		t.Fatalf("lease count = %d, want 1", len(leases))
 	}
 
-	if leases[0].ActingFor != u1Label {
-		t.Errorf("stored lease ActingFor = %q, want %q (the label's bound user, not the claimed user)", leases[0].ActingFor, u1Label)
+	if leases[0].ActingFor != owner.UserLabel {
+		t.Errorf("stored lease ActingFor = %q, want the label's bound user %q", leases[0].ActingFor, owner.UserLabel)
 	}
 }

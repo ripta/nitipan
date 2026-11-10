@@ -109,11 +109,15 @@ type Data struct {
 	// identity provider is configured or while any label reported plain HTTP.
 	CrossUserEnabled bool `json:"cross_user_enabled,omitempty"`
 
-	// SchemeReports maps each label to the scheme it last reported at registration: "http" or "https".
-	SchemeReports map[string]string `json:"scheme_reports,omitempty"`
+	// KeySchemes maps the hash of each key a node registered with to the scheme it reported: "http" or
+	// "https". A key that once reported "http" keeps it, whatever it reports later, since it may have been
+	// read on the plain hop. A key with no entry never reported, as a key from before scheme reports did not.
+	// The map keeps the mark after a forget, so a key that crossed plain HTTP and is approved again still
+	// blocks cross-user features.
+	KeySchemes map[string]string `json:"key_schemes,omitempty"`
 
-	// PairingCodes maps each label to its active pairing code hash and expiry. The node sends the hash
-	// with its pending key.
+	// PairingCodes maps each label to its active pairing code: the code's hash, the hash of the pending key
+	// that sent it, and its expiry.
 	PairingCodes map[string]PairingCodeRecord `json:"pairing_codes,omitempty"`
 }
 
@@ -240,11 +244,12 @@ type AdmissionRecord struct {
 
 // BindingRecord is one label's binding to a user.
 type BindingRecord struct {
-	// UserID is the user the label is bound to.
+	// UserID is the user the label is bound to, and empty once the label is forgotten. A label counts as
+	// bound only while it is also pinned under its node's current key.
 	UserID string `json:"user_id"`
 
-	// LastBoundUser is the user the label was bound to before this, or the current one if never rebound.
-	// Forget and revoke-user keep it, so a rebind can detect a user change.
+	// LastBoundUser is the last user the label was bound to. Forget and revoke-user clear UserID and keep
+	// it, so the next binding can tell a different user from the same one.
 	LastBoundUser string `json:"last_bound_user"`
 
 	// DerivationVersion is the user label derivation version that applied when this binding was made.
@@ -271,6 +276,10 @@ type PairingCodeRecord struct {
 	// Hash is the SHA-256 of the pairing code the node printed.
 	Hash string `json:"hash"`
 
+	// KeyHash is the hash of the pending key that sent the code. A bind by the code pins that key and no
+	// other, so a code never pins a key some other host registered under the label.
+	KeyHash string `json:"key_hash"`
+
 	ExpiresAt time.Time `json:"expires_at"`
 
 	// WrongAttempts counts the wrong codes one signer submitted for this label. Five locks the signer
@@ -295,7 +304,7 @@ func newData() *Data {
 		Delegations:       map[string]map[string]time.Time{},
 		MailGrants:        map[string]map[string]time.Time{},
 		Conversations:     map[string]ConversationRecord{},
-		SchemeReports:     map[string]string{},
+		KeySchemes:        map[string]string{},
 		PairingCodes:      map[string]PairingCodeRecord{},
 	}
 }
@@ -358,7 +367,7 @@ func (d *Data) clone() *Data {
 	}
 
 	out.Conversations = maps.Clone(d.Conversations)
-	out.SchemeReports = maps.Clone(d.SchemeReports)
+	out.KeySchemes = maps.Clone(d.KeySchemes)
 
 	out.PairingCodes = make(map[string]PairingCodeRecord, len(d.PairingCodes))
 	for k, v := range d.PairingCodes {
@@ -369,8 +378,9 @@ func (d *Data) clone() *Data {
 	return &out
 }
 
-// Migration turns the bytes of a store at one major into the bytes of the next major.
-type Migration func(old []byte) ([]byte, error)
+// Migration turns the bytes of a store at one major into the bytes of the next major. now is the store's
+// clock, for any record the migration creates.
+type Migration func(old []byte, now time.Time) ([]byte, error)
 
 // StoreOptions tune a store. The zero value is the production setup.
 type StoreOptions struct {
@@ -388,6 +398,10 @@ type StoreOptions struct {
 	// Home is the home directory whose legacy sync folders are refused. Default: the user database
 	// entry.
 	Home string
+
+	// Now is the wall clock the store stamps the records it creates on open with, such as the owner's
+	// user record and each binding a migration makes. Default: time.Now.
+	Now func() time.Time
 }
 
 // Store is the broker's one file, held under a flock.
@@ -411,6 +425,10 @@ func OpenStore(path string, opts StoreOptions) (*Store, error) {
 
 	if opts.Volume == nil {
 		opts.Volume = SystemVolume{}
+	}
+
+	if opts.Now == nil {
+		opts.Now = time.Now
 	}
 
 	if !filepath.IsAbs(path) {
@@ -493,7 +511,7 @@ func (s *Store) load() error {
 		d.Version = s.opts.Current
 
 		if s.ownsUsers() {
-			assignOwner(d, time.Now())
+			assignOwner(d, s.opts.Now())
 		}
 
 		if err := s.Persist(d); err != nil {
@@ -560,10 +578,10 @@ func (s *Store) load() error {
 
 		switch {
 		case d.OwnerID == "":
-			assignOwner(&d, time.Now())
+			assignOwner(&d, s.opts.Now())
 			dirty = true
 		case !hasRecord:
-			restoreOwner(&d, time.Now())
+			restoreOwner(&d, s.opts.Now())
 			dirty = true
 		}
 	}
@@ -625,8 +643,8 @@ func (d *Data) fillMaps() {
 		d.Conversations = map[string]ConversationRecord{}
 	}
 
-	if d.SchemeReports == nil {
-		d.SchemeReports = map[string]string{}
+	if d.KeySchemes == nil {
+		d.KeySchemes = map[string]string{}
 	}
 
 	if d.PairingCodes == nil {
@@ -658,7 +676,7 @@ func (s *Store) migrate(raw []byte, from record.Version) ([]byte, error) {
 
 		var err error
 
-		raw, err = step(raw)
+		raw, err = step(raw, s.opts.Now())
 		if err != nil {
 			return nil, fmt.Errorf("migrating the store from major %d: %w", major, err)
 		}

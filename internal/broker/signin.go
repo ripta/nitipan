@@ -84,7 +84,16 @@ func (sm *SignInManager) StartAction(action string) (authURL string, err error) 
 	}
 	sm.mu.Unlock()
 
-	return sm.oidcClient.AuthorizationURL(state, nonce, verifier), nil
+	authURL, err = sm.oidcClient.AuthorizationURL(state, nonce, verifier)
+	if err != nil {
+		sm.mu.Lock()
+		delete(sm.pending, state)
+		sm.mu.Unlock()
+
+		return "", err
+	}
+
+	return authURL, nil
 }
 
 // HandleCallback processes the OIDC callback and returns a single-use token.
@@ -195,14 +204,7 @@ func (b *Broker) handleBindLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authURL, err := b.signInMgr.StartAction("bind")
-	if err != nil {
-		http.Error(w, "Failed to start sign-in", http.StatusInternalServerError)
-
-		return
-	}
-
-	http.Redirect(w, r, authURL, http.StatusFound)
+	b.startAction(w, r, "bind")
 }
 
 // handleCallback processes the OIDC callback and either presents a bind form
@@ -317,46 +319,26 @@ func (b *Broker) handleBindSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	issuerSub := claims.Issuer + "\x00" + claims.Subject
+	user, err := b.BindPaired(claims.Issuer, claims.Subject, label, code, b.cfg.Now())
 
-	b.mu.Lock()
-	userID, admitted := b.store.Data().IssuerSubs[issuerSub]
-	b.mu.Unlock()
-
-	if !admitted {
+	switch {
+	case errors.Is(err, ErrNotAdmitted):
 		http.Error(w, "User not admitted", http.StatusForbidden)
 
 		return
-	}
-
-	ok, err := b.CheckPairingCode(label, code, userID, b.cfg.Now())
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Pairing code check failed: %v", err), http.StatusInternalServerError)
+	case errors.Is(err, ErrWrongPairingCode), errors.Is(err, ErrPairingLocked), errors.Is(err, ErrPairedKeyGone):
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 
 		return
-	}
-
-	if !ok {
-		http.Error(w, "Wrong or expired pairing code", http.StatusUnauthorized)
+	case errors.Is(err, ErrAlreadyPinned):
+		http.Error(w, err.Error(), http.StatusBadRequest)
 
 		return
-	}
-
-	if err := b.BindLabelToUser(label, userID, b.cfg.Now()); err != nil {
+	case err != nil:
 		http.Error(w, fmt.Sprintf("Failed to bind label: %v", err), http.StatusInternalServerError)
 
 		return
 	}
-
-	if err := b.ClearPairingCode(label); err != nil {
-		http.Error(w, "Failed to clear pairing code", http.StatusInternalServerError)
-
-		return
-	}
-
-	b.mu.Lock()
-	user := b.store.Data().Users[userID]
-	b.mu.Unlock()
 
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -388,14 +370,7 @@ func (b *Broker) handleGrantDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authURL, err := b.signInMgr.StartAction("grant")
-	if err != nil {
-		http.Error(w, "Failed to start sign-in", http.StatusInternalServerError)
-
-		return
-	}
-
-	http.Redirect(w, r, authURL, http.StatusFound)
+	b.startAction(w, r, "grant")
 }
 
 func (b *Broker) handleRevokeDelegation(w http.ResponseWriter, r *http.Request) {
@@ -411,14 +386,7 @@ func (b *Broker) handleRevokeDelegation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	authURL, err := b.signInMgr.StartAction("revoke")
-	if err != nil {
-		http.Error(w, "Failed to start sign-in", http.StatusInternalServerError)
-
-		return
-	}
-
-	http.Redirect(w, r, authURL, http.StatusFound)
+	b.startAction(w, r, "revoke")
 }
 
 func (b *Broker) handleGrantSubmit(w http.ResponseWriter, r *http.Request) {
@@ -584,7 +552,8 @@ func (b *Broker) startAction(w http.ResponseWriter, r *http.Request, action stri
 
 	authURL, err := b.signInMgr.StartAction(action)
 	if err != nil {
-		http.Error(w, "Failed to start sign-in", http.StatusInternalServerError)
+		b.cfg.Logger.Warn("starting a sign-in", "action", action, "error", err)
+		http.Error(w, "The identity provider cannot be reached. Try again later", http.StatusServiceUnavailable)
 
 		return
 	}

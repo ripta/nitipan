@@ -1,1219 +1,534 @@
 package broker
 
 import (
-	"context"
-	"encoding/base64"
-	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/space-armada/nitipan/internal/oidc"
+	"github.com/space-armada/nitipan/internal/oidc/oidctest"
 	"github.com/space-armada/nitipan/internal/repoid"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
-type signInIssuer struct {
-	server   *httptest.Server
-	issuer   string
-	clientID string
+const (
+	pageSub   = "page-sub"
+	pageEmail = "page@example.com"
+	pageCode  = "alpha-bravo-charlie-delta"
+)
 
-	wrongIssuer  bool
-	expiredToken bool
-	wrongNonce   bool
-
-	expectedNonce string
-	subject       string
-	email         string
-}
-
-func newSignInIssuer(t *testing.T) *signInIssuer {
+// newPageWorld is a broker with the sign-in page whose issuer signs in pageSub. admit says whether that
+// user is admitted first.
+func newPageWorld(t *testing.T, admit bool) (*harness, *oidctest.Issuer, *oidctest.Browser, UserRecord) {
 	t.Helper()
 
-	si := &signInIssuer{
-		clientID: "test-client",
-		subject:  "test-subject",
-		email:    "test@example.com",
-	}
+	iss := oidctest.New(t, pageSub, pageEmail)
+	h, page := pageHarness(t, iss)
 
-	mux := http.NewServeMux()
+	var user UserRecord
 
-	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		issuer := si.issuer
-		if si.wrongIssuer {
-			issuer = "https://wrong-issuer.example"
+	if admit {
+		var err error
+
+		if user, err = h.b.AdmitUser(iss.URL, pageSub, pageEmail, h.wall.Now()); err != nil {
+			t.Fatal(err)
 		}
+	}
 
-		doc := map[string]string{
-			"issuer":                 issuer,
-			"authorization_endpoint": si.issuer + "/authorize",
-			"token_endpoint":         si.issuer + "/token",
-		}
-
-		_ = json.NewEncoder(w).Encode(doc)
-	})
-
-	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
-		idToken := si.makeIDToken()
-		resp := map[string]string{
-			"id_token": idToken,
-		}
-
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-
-	si.server = httptest.NewUnstartedServer(mux)
-	si.server.StartTLS()
-	si.issuer = si.server.URL
-
-	t.Cleanup(si.server.Close)
-
-	return si
+	return h, iss, page, user
 }
 
-func (si *signInIssuer) makeIDToken() string {
-	now := time.Now().Unix()
-	exp := now + 3600
-
-	if si.expiredToken {
-		exp = now - 3600
-	}
-
-	nonce := si.expectedNonce
-	if si.wrongNonce {
-		nonce = "wrong-nonce"
-	}
-
-	claims := map[string]interface{}{
-		"iss":   si.issuer,
-		"sub":   si.subject,
-		"aud":   si.clientID,
-		"exp":   exp,
-		"iat":   now,
-		"nonce": nonce,
-		"email": si.email,
-	}
-
-	claimsJSON, _ := json.Marshal(claims)
-	claimsB64 := base64.RawURLEncoding.EncodeToString(claimsJSON)
-
-	header := `{"alg":"RS256","typ":"JWT"}`
-	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(header))
-
-	signature := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
-
-	return headerB64 + "." + claimsB64 + "." + signature
-}
-
-func (si *signInIssuer) writeCACert(t *testing.T) string {
+// pairedLabel registers n and sends code through the pair route, as nitipan node pair does. It returns
+// the label the code binds.
+func pairedLabel(t *testing.T, h *harness, n nodeID, code string) string {
 	t.Helper()
 
-	certPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: si.server.Certificate().Raw,
-	})
+	h.register(n)
 
-	path := filepath.Join(t.TempDir(), "ca.pem")
-	if err := os.WriteFile(path, certPEM, 0o600); err != nil {
-		t.Fatal(err)
+	status, label := h.pair(n, code)
+	if status != http.StatusOK {
+		t.Fatalf("pairing %s: status %d", n.Machine, status)
 	}
 
-	return path
+	return label
 }
 
-func (si *signInIssuer) config(t *testing.T, redirectURL string) oidc.Config {
+// callbackQuery starts a sign-in at startPath and follows the issuer's redirect, and returns the query
+// the issuer sends back to the broker's callback. A test then adds to it what a cross-site request would.
+func callbackQuery(t *testing.T, h *harness, iss *oidctest.Issuer, startPath string) string {
 	t.Helper()
 
-	caPath := si.writeCACert(t)
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
-	return oidc.Config{
-		Issuer:       si.issuer,
-		ClientID:     si.clientID,
-		ClientSecret: "",
-		RedirectURL:  redirectURL,
-		CAFile:       caPath,
-	}
-}
-
-func newSignInHarness(t *testing.T) (*harness, *signInIssuer) {
-	t.Helper()
-
-	si := newSignInIssuer(t)
-
-	oidcCfg := si.config(t, "http://localhost/callback")
-
-	h := newHarness(t, func(cfg *Config) {
-		cfg.OIDCConfig = &oidcCfg
-	})
-
-	return h, si
-}
-
-func storePairingCode(t *testing.T, b *Broker, label, code string, expiresAt time.Time) {
-	t.Helper()
-
-	hash := HashPairingCode(code)
-	if err := b.StorePairingCode(label, hash, expiresAt); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestSignInPageSetsCSP(t *testing.T) {
-	h, _ := newSignInHarness(t)
-
-	req := httptest.NewRequest("GET", "/signin", nil)
-	w := httptest.NewRecorder()
-
-	h.b.handleSignInPage(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-
-	csp := w.Header().Get("Content-Security-Policy")
-	if csp != "frame-ancestors 'none'" {
-		t.Errorf("CSP = %q, want %q", csp, "frame-ancestors 'none'")
-	}
-}
-
-func TestCallbackSetsCSPOnAllPages(t *testing.T) {
-	h, si := newSignInHarness(t)
-
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-
-	authURL, err := h.b.signInMgr.StartAction("bind")
+	resp, err := noRedirect.PostForm(h.srv.URL+startPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
+	resp.Body.Close()
 
-	si.expectedNonce = nonce
-
-	req := httptest.NewRequest("GET", "/callback?code=test-code&state="+state, nil)
-	w := httptest.NewRecorder()
-
-	h.b.handleCallback(w, req)
-
-	csp := w.Header().Get("Content-Security-Policy")
-	if csp != "frame-ancestors 'none'" {
-		t.Errorf("callback CSP = %q, want %q", csp, "frame-ancestors 'none'")
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("starting %s: status %d", startPath, resp.StatusCode)
 	}
 
-	authURL2, err := h.b.signInMgr.StartAction("bind")
+	resp, err = iss.Client(t).Get(resp.Header.Get("Location"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	u2, _ := url.Parse(authURL2)
-	state2 := u2.Query().Get("state")
-	nonce2 := u2.Query().Get("nonce")
+	resp.Body.Close()
 
-	si.expectedNonce = nonce2
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state2, "test-code")
+	back, err := url.Parse(resp.Header.Get("Location"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
+	return back.RawQuery
+}
 
-	req2 := httptest.NewRequest("POST", "/bind-submit", nil)
-	req2.PostForm = url.Values{
-		"token": {token},
-		"label": {reg.Label},
-		"code":  {"wrong-code"},
+const wantCSP = "frame-ancestors 'none'"
+
+// TestEveryPageAnswerForbidsFraming proves the sign-in page, the callback's form, and a bind submit each
+// carry a CSP that forbids framing. It catches a page answer that leaves the CSP off, so another site can
+// frame the form and trick a signed-in user into submitting it.
+func TestEveryPageAnswerForbidsFraming(t *testing.T) {
+	h, _, page, _ := newPageWorld(t, true)
+
+	label := pairedLabel(t, h, nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}, pageCode)
+
+	if status, body := page.Get("/signin"); status != http.StatusOK || page.Header.Get("Content-Security-Policy") != wantCSP {
+		t.Errorf("sign-in page: status %d, CSP %q: %s", status, page.Header.Get("Content-Security-Policy"), body)
 	}
-	w2 := httptest.NewRecorder()
 
-	h.b.handleBindSubmit(w2, req2)
+	status, form := page.SignIn("bind")
+	if status != http.StatusOK || page.Header.Get("Content-Security-Policy") != wantCSP {
+		t.Errorf("callback: status %d, CSP %q", status, page.Header.Get("Content-Security-Policy"))
+	}
 
-	csp2 := w2.Header().Get("Content-Security-Policy")
-	if csp2 != "frame-ancestors 'none'" {
-		t.Errorf("bind-submit CSP = %q, want %q", csp2, "frame-ancestors 'none'")
+	page.Post("/bind-submit", url.Values{"token": {oidctest.FormToken(t, form)}, "label": {label}, "code": {"wrong-code"}})
+
+	if got := page.Header.Get("Content-Security-Policy"); got != wantCSP {
+		t.Errorf("bind submit CSP = %q, want %q", got, wantCSP)
 	}
 }
 
-func TestUnadmittedSignInRecordsPendingAdmission(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestAnUnadmittedSignInRecordsAPendingAdmission proves a sign-in by a user nobody admitted shows the
+// pending-admission page, admits nobody, and records the issuer, sub, and email for the owner to admit.
+// It catches a callback that admits anyone the identity provider signs in, and one that drops the request
+// so the owner never sees it.
+func TestAnUnadmittedSignInRecordsAPendingAdmission(t *testing.T) {
+	h, iss, page, _ := newPageWorld(t, false)
 
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	req := httptest.NewRequest("GET", "/callback?code=test-code&state="+state, nil)
-	w := httptest.NewRecorder()
-
-	h.b.handleCallback(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-
-	body := w.Body.String()
-	if !strings.Contains(body, "Pending Admission") {
-		t.Error("unadmitted user did not see pending admission page")
+	status, body := page.SignIn("bind")
+	if status != http.StatusOK || !strings.Contains(body, "Pending Admission") {
+		t.Fatalf("an unadmitted sign-in: status %d: %s", status, body)
 	}
 
 	d := h.data()
-	issuerSub := si.issuer + "\x00" + si.subject
 
-	if _, ok := d.IssuerSubs[issuerSub]; ok {
-		t.Error("unadmitted user was admitted")
+	if _, ok := d.IssuerSubs[issuerSubKey(iss.URL, pageSub)]; ok {
+		t.Error("the unadmitted user was admitted")
 	}
 
 	found := false
-	for _, pa := range d.PendingAdmissions {
-		if pa.Issuer == si.issuer && pa.Sub == si.subject && pa.Email == si.email {
-			found = true
 
-			break
+	for _, pa := range d.PendingAdmissions {
+		if pa.Issuer == iss.URL && pa.Sub == pageSub && pa.Email == pageEmail {
+			found = true
 		}
 	}
 
 	if !found {
-		t.Error("pending admission not recorded")
+		t.Errorf("pending admissions = %+v, want one for %s", d.PendingAdmissions, pageSub)
 	}
 }
 
-func TestFormTokenIsSingleUse(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestAFormTokenIsSingleUse proves a form token binds once and is refused when submitted again, even for
+// another paired label. It catches a token kept after its first use, which lets a replayed form act a
+// second time.
+func TestAFormTokenIsSingleUse(t *testing.T) {
+	h, _, page, _ := newPageWorld(t, true)
 
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
+	first := pairedLabel(t, h, nodeID{Machine: "machine-1", UID: 501, Key: "key-1"}, pageCode)
+	second := pairedLabel(t, h, nodeID{Machine: "machine-2", UID: 501, Key: "key-2"}, "echo-foxtrot-golf-hotel")
+
+	_, form := page.SignIn("bind")
+	token := oidctest.FormToken(t, form)
+
+	if status, body := page.Post("/bind-submit", url.Values{"token": {token}, "label": {first}, "code": {pageCode}}); status != http.StatusOK {
+		t.Fatalf("the first submit: %d %s", status, body)
 	}
 
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
+	status, _ := page.Post("/bind-submit", url.Values{"token": {token}, "label": {second}, "code": {"echo-foxtrot-golf-hotel"}})
+	if status == http.StatusOK {
+		t.Error("the token was accepted a second time")
 	}
 
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	action1, claims1, err1 := h.b.signInMgr.ConsumeToken(token)
-	if err1 != nil {
-		t.Fatalf("first consume failed: %v", err1)
-	}
-
-	if action1 != "bind" || claims1 == nil {
-		t.Error("first consume returned wrong data")
-	}
-
-	_, _, err2 := h.b.signInMgr.ConsumeToken(token)
-	if err2 == nil {
-		t.Error("token was reused")
+	if got := h.data().Bindings[second].UserID; got != "" {
+		t.Errorf("the reused token bound %s to %q", second, got)
 	}
 }
 
-func TestWrongStateRefused(t *testing.T) {
-	h, _ := newSignInHarness(t)
+// TestACallbackWithAnUnknownStateIsRefused proves the callback refuses a state the broker never issued.
+// It catches a callback that skips the state check, so a cross-site request can finish a sign-in it
+// never started.
+func TestACallbackWithAnUnknownStateIsRefused(t *testing.T) {
+	_, _, page, _ := newPageWorld(t, true)
 
-	req := httptest.NewRequest("GET", "/callback?code=test-code&state=wrong-state", nil)
-	w := httptest.NewRecorder()
-
-	h.b.handleCallback(w, req)
-
-	if w.Code == http.StatusOK {
-		t.Error("wrong state was accepted")
+	if status, _ := page.Get("/callback?code=test-code&state=wrong-state"); status == http.StatusOK {
+		t.Error("a callback with an unknown state was accepted")
 	}
 }
 
-func TestWrongNonceRefused(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestAnIDTokenWithTheWrongNonceIsRefused proves the callback refuses an ID token whose nonce is not the
+// one its sign-in sent. It catches a callback that skips the nonce check, so a token replayed from another
+// sign-in signs the user in.
+func TestAnIDTokenWithTheWrongNonceIsRefused(t *testing.T) {
+	_, iss, page, _ := newPageWorld(t, true)
 
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
-	}
+	iss.ForgeNonce("a-nonce-from-another-sign-in")
 
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-
-	si.expectedNonce = "correct-nonce"
-	si.wrongNonce = true
-
-	req := httptest.NewRequest("GET", "/callback?code=test-code&state="+state, nil)
-	w := httptest.NewRecorder()
-
-	h.b.handleCallback(w, req)
-
-	if w.Code == http.StatusOK {
-		t.Error("wrong nonce was accepted")
+	if status, _ := page.SignIn("bind"); status == http.StatusOK {
+		t.Error("an ID token with the wrong nonce was accepted")
 	}
 }
 
-func TestCrossSitePostWithoutTokenChangesNothing(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestACrossSiteBindWithoutATokenChangesNothing proves a bind submit with a token the page never issued
+// binds nothing, even with the right label and code. It catches a submit that trusts its form fields
+// without the token that proves a sign-in.
+func TestACrossSiteBindWithoutATokenChangesNothing(t *testing.T) {
+	h, _, page, _ := newPageWorld(t, true)
 
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
+	label := pairedLabel(t, h, nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}, pageCode)
+
+	if status, _ := page.Post("/bind-submit", url.Values{"token": {"fake-token"}, "label": {label}, "code": {pageCode}}); status == http.StatusOK {
+		t.Error("a bind with a fake token was accepted")
 	}
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
-
-	storePairingCode(t, h.b, label, "word-word-word-word", time.Now().Add(PairingCodeExpiry))
-
-	req := httptest.NewRequest("POST", "/bind-submit", nil)
-	req.PostForm = url.Values{
-		"token": {"fake-token"},
-		"label": {label},
-		"code":  {"word-word-word-word"},
+	if got := h.data().Bindings[label].UserID; got != "" {
+		t.Errorf("a cross-site bind bound %s to %q", label, got)
 	}
-	w := httptest.NewRecorder()
+}
 
-	h.b.handleBindSubmit(w, req)
+// TestTheRightLabelAndCodeBindAndPinTheKey proves the right label and code bind the label to the
+// signed-in user, pin the key that sent the code, and clear only that label's code. It catches a bind that
+// leaves the key pending, keeps a spent code that a second signer could use, or clears another label's
+// code.
+func TestTheRightLabelAndCodeBindAndPinTheKey(t *testing.T) {
+	h, _, page, user := newPageWorld(t, true)
 
-	if w.Code == http.StatusOK {
-		t.Error("cross-site post with fake token was accepted")
+	n := nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}
+	label := pairedLabel(t, h, n, pageCode)
+	otherLabel := pairedLabel(t, h, nodeID{Machine: "machine-o", UID: 502, Key: "key-o"}, "echo-foxtrot-golf-hotel")
+
+	if status, body := page.Submit("bind", url.Values{"label": {label}, "code": {pageCode}}); status != http.StatusOK {
+		t.Fatalf("bind: %d %s", status, body)
 	}
 
 	d := h.data()
-	if d.Bindings[label].UserID != "" {
-		t.Error("cross-site post changed the label binding")
-	}
-}
 
-func TestCorrectLabelAndCodePinKeyAndDiscardOtherPending(t *testing.T) {
-	h, si := newSignInHarness(t)
-
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
+	if got := d.Bindings[label].UserID; got != user.ID {
+		t.Errorf("%s is bound to %q, want %s", label, got, user.ID)
 	}
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
-
-	n2 := nodeID{Machine: "other-machine", UID: 1001, Key: "other-key"}
-	reg2 := h.register(n2)
-	otherLabel := reg2.Label
-
-	storePairingCode(t, h.b, label, "word-word-word-word", time.Now().Add(PairingCodeExpiry))
-	storePairingCode(t, h.b, otherLabel, "other-code-here-now", time.Now().Add(PairingCodeExpiry))
-
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest("POST", "/bind-submit", nil)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.PostForm = url.Values{
-		"token": {token},
-		"label": {label},
-		"code":  {"word-word-word-word"},
-	}
-
-	if err := req.ParseForm(); err != nil {
-		t.Fatal(err)
-	}
-
-	w := httptest.NewRecorder()
-
-	h.b.handleBindSubmit(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("bind failed: status = %d, body = %s", w.Code, w.Body.String())
-	}
-
-	d := h.data()
-	issuerSub := si.issuer + "\x00" + si.subject
-	userID := d.IssuerSubs[issuerSub]
-
-	if d.Bindings[label].UserID != userID {
-		t.Errorf("label not bound to user: got %q, want %q", d.Bindings[label].UserID, userID)
+	if got := d.Pins[label].PinnedHash; got != keyHash(n.Key) {
+		t.Errorf("pin = %q, want the key that sent the code", got)
 	}
 
 	if d.PairingCodes[label].Hash != "" {
-		t.Error("pairing code not cleared after binding")
+		t.Error("the spent pairing code was kept")
 	}
 
 	if d.PairingCodes[otherLabel].Hash == "" {
-		t.Error("other label's pairing code was cleared")
+		t.Error("the other label's pairing code was cleared")
 	}
 }
 
-func TestWrongCodeBindsNothing(t *testing.T) {
-	h, si := newSignInHarness(t)
+type refusedCodeTest struct {
+	Name string
 
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	// Code is what the signer types. Wait is how far the broker's clock moves after the pairing.
+	Code string
+	Wait time.Duration
+}
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
+var refusedCodeTests = []refusedCodeTest{
+	{Name: "wrong code", Code: "wrong-code-here-now"},
+	{Name: "expired code", Code: pageCode, Wait: PairingCodeExpiry + time.Second},
+}
 
-	storePairingCode(t, h.b, label, "word-word-word-word", time.Now().Add(PairingCodeExpiry))
+// TestAWrongOrExpiredCodeBindsNothing proves a wrong code, and the right code past its expiry by the
+// broker's clock, bind nothing. It catches a code check that compares the wrong field, or that ignores the
+// expiry or reads it from the process clock.
+func TestAWrongOrExpiredCodeBindsNothing(t *testing.T) {
+	for _, test := range refusedCodeTests {
+		t.Run(test.Name, func(t *testing.T) {
+			h, _, page, _ := newPageWorld(t, true)
 
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
-	}
+			label := pairedLabel(t, h, nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}, pageCode)
+			h.wall.Set(h.wall.Now().Add(test.Wait))
 
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
+			if status, _ := page.Submit("bind", url.Values{"label": {label}, "code": {test.Code}}); status == http.StatusOK {
+				t.Error("the bind was accepted")
+			}
 
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest("POST", "/bind-submit", nil)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.PostForm = url.Values{
-		"token": {token},
-		"label": {label},
-		"code":  {"wrong-code-here-now"},
-	}
-
-	if err := req.ParseForm(); err != nil {
-		t.Fatal(err)
-	}
-
-	w := httptest.NewRecorder()
-
-	h.b.handleBindSubmit(w, req)
-
-	if w.Code == http.StatusOK {
-		t.Error("wrong code was accepted")
-	}
-
-	d := h.data()
-	if d.Bindings[label].UserID != "" {
-		t.Error("label was bound with wrong code")
+			if got := h.data().Bindings[label].UserID; got != "" {
+				t.Errorf("%s is bound to %q", label, got)
+			}
+		})
 	}
 }
 
-func TestExpiredCodeBindsNothing(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestWrongCodesLockOutOnlyTheSignerWhoTypedThem proves MaxWrongPairingAttempts wrong codes lock that
+// signer out of the label, so even the right code is then refused, while the code itself stays for
+// another signer, who binds with it. It catches a check with no lockout, which lets a signer guess codes,
+// and one that counts every signer's attempts together, so one user's guesses lock out the machine's real
+// owner.
+func TestWrongCodesLockOutOnlyTheSignerWhoTypedThem(t *testing.T) {
+	h, iss, page, guesser := newPageWorld(t, true)
 
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	label := pairedLabel(t, h, nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}, pageCode)
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	h.register(n)
-
-	storePairingCode(t, h.b, "test-label", "word-word-word-word", h.wall.Now().Add(-2*time.Hour))
-
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest("POST", "/bind-submit", nil)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.PostForm = url.Values{
-		"token": {token},
-		"label": {"test-label"},
-		"code":  {"word-word-word-word"},
-	}
-
-	if err := req.ParseForm(); err != nil {
-		t.Fatal(err)
-	}
-
-	w := httptest.NewRecorder()
-
-	h.b.handleBindSubmit(w, req)
-
-	if w.Code == http.StatusOK {
-		t.Error("expired code was accepted")
-	}
-
-	d := h.data()
-	if d.Bindings["test-label"].UserID != "" {
-		t.Error("label was bound with expired code")
-	}
-}
-
-func TestFiveWrongCodesLockOut(t *testing.T) {
-	h, si := newSignInHarness(t)
-
-	issuerSub := si.issuer + "\x00" + si.subject
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	h.register(n)
-
-	storePairingCode(t, h.b, "test-label", "word-word-word-word", time.Now().Add(PairingCodeExpiry))
-
-	for i := 0; i < 5; i++ {
-		authURL, err := h.b.signInMgr.StartAction("bind")
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		u, _ := url.Parse(authURL)
-		state := u.Query().Get("state")
-		nonce := u.Query().Get("nonce")
-
-		si.expectedNonce = nonce
-
-		token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		req := httptest.NewRequest("POST", "/bind-submit", nil)
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.PostForm = url.Values{
-			"token": {token},
-			"label": {"test-label"},
-			"code":  {fmt.Sprintf("wrong-code-%d", i)},
-		}
-
-		if err := req.ParseForm(); err != nil {
-			t.Fatal(err)
-		}
-
-		w := httptest.NewRecorder()
-
-		h.b.handleBindSubmit(w, req)
-
-		if w.Code == http.StatusOK {
-			t.Errorf("wrong code %d was accepted", i)
+	for i := range MaxWrongPairingAttempts {
+		if status, _ := page.Submit("bind", url.Values{"label": {label}, "code": {fmt.Sprintf("wrong-code-%d", i)}}); status == http.StatusOK {
+			t.Fatalf("wrong code %d was accepted", i)
 		}
 	}
 
 	d := h.data()
-	if d.Bindings["test-label"].UserID != "" {
-		t.Error("label was bound after 5 wrong codes")
+
+	if got := d.PairingCodes[label].WrongAttempts[guesser.ID]; got < MaxWrongPairingAttempts {
+		t.Errorf("wrong attempts recorded = %d, want %d", got, MaxWrongPairingAttempts)
 	}
 
-	if d.PairingCodes["test-label"].Hash == "" {
-		t.Error("pending key was discarded after lockout")
+	if status, _ := page.Submit("bind", url.Values{"label": {label}, "code": {pageCode}}); status == http.StatusOK {
+		t.Fatal("the right code was accepted after the lockout")
 	}
 
-	userID := d.IssuerSubs[issuerSub]
-
-	if d.PairingCodes["test-label"].WrongAttempts == nil || d.PairingCodes["test-label"].WrongAttempts[userID] < 5 {
-		t.Error("lockout not recorded")
+	if after := h.data(); after.Bindings[label].UserID != "" || after.PairingCodes[label].Hash == "" {
+		t.Fatalf("after the lockout: binding %+v, code %+v, want no binding and the code kept", after.Bindings[label],
+			after.PairingCodes[label])
 	}
 
-	authURL, err := h.b.signInMgr.StartAction("bind")
+	owner, err := h.b.AdmitUser(iss.URL, "owner-sub", "owner@example.com", h.wall.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
+	iss.SetUser("owner-sub", "owner@example.com")
 
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
+	if status, body := page.Submit("bind", url.Values{"label": {label}, "code": {pageCode}}); status != http.StatusOK {
+		t.Fatalf("another signer's bind with the right code: %d %s", status, body)
 	}
 
-	req := httptest.NewRequest("POST", "/bind-submit", nil)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.PostForm = url.Values{
-		"token": {token},
-		"label": {"test-label"},
-		"code":  {"word-word-word-word"},
-	}
-
-	if err := req.ParseForm(); err != nil {
-		t.Fatal(err)
-	}
-
-	w := httptest.NewRecorder()
-
-	h.b.handleBindSubmit(w, req)
-
-	if w.Code == http.StatusOK {
-		t.Error("correct code was accepted after lockout")
+	if got := h.data().Bindings[label].UserID; got != owner.ID {
+		t.Errorf("%s is bound to %q, want the second signer %s", label, got, owner.ID)
 	}
 }
 
-func TestOwnerBoundLabelJoinsOwnerScope(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestThePageNeverListsPendingLabels proves the form after a sign-in names no label waiting for a code.
+// It catches a form that lists pending labels, which tells any admitted user which machines are waiting
+// and lets them pick one to guess codes for.
+func TestThePageNeverListsPendingLabels(t *testing.T) {
+	h, _, page, _ := newPageWorld(t, true)
 
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
+	label := pairedLabel(t, h, nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}, pageCode)
+
+	if _, body := page.SignIn("bind"); strings.Contains(body, label) {
+		t.Errorf("the form names the pending label %s", label)
+	}
+}
+
+// TestAnEmailWithAScriptTagIsEscaped proves the form escapes the email the identity provider sends. It
+// catches a page that renders the claim as raw HTML, which runs a script in the broker's origin.
+func TestAnEmailWithAScriptTagIsEscaped(t *testing.T) {
+	email := "<script>alert('xss')</script>@example.com"
+
+	iss := oidctest.New(t, pageSub, email)
+	h, page := pageHarness(t, iss)
+
+	if _, err := h.b.AdmitUser(iss.URL, pageSub, email, h.wall.Now()); err != nil {
 		t.Fatal(err)
 	}
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
+	_, body := page.SignIn("bind")
 
-	storePairingCode(t, h.b, label, "word-word-word-word", time.Now().Add(PairingCodeExpiry))
+	if strings.Contains(body, "<script>") || !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("the form does not escape the email:\n%s", body)
+	}
+}
 
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
+// TestASignInResolvesTheUserByIssuerAndSubNotEmail proves a user whose email changed at the provider is
+// still the same user, and keeps their binding. It catches a sign-in resolved by email, which loses the
+// user on an email change and lets a recycled address take over another user's machines.
+func TestASignInResolvesTheUserByIssuerAndSubNotEmail(t *testing.T) {
+	h, iss, page, user := newPageWorld(t, true)
+
+	label := pairedLabel(t, h, nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}, pageCode)
+
+	if status, body := page.Submit("bind", url.Values{"label": {label}, "code": {pageCode}}); status != http.StatusOK {
+		t.Fatalf("bind: %d %s", status, body)
 	}
 
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
+	iss.SetUser(pageSub, "changed@example.com")
 
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest("POST", "/bind-submit", nil)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.PostForm = url.Values{
-		"token": {token},
-		"label": {label},
-		"code":  {"word-word-word-word"},
-	}
-
-	if err := req.ParseForm(); err != nil {
-		t.Fatal(err)
-	}
-
-	w := httptest.NewRecorder()
-
-	h.b.handleBindSubmit(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("bind failed: %s", w.Body.String())
+	status, body := page.SignIn("bind")
+	if status != http.StatusOK || !strings.Contains(body, "changed@example.com") || strings.Contains(body, "Pending Admission") {
+		t.Fatalf("sign-in after the email change: status %d: %s", status, body)
 	}
 
 	d := h.data()
-	issuerSub := si.issuer + "\x00" + si.subject
-	userID := d.IssuerSubs[issuerSub]
 
-	if userID == "" {
-		t.Error("user ID not found for issuer+sub")
+	if got := d.IssuerSubs[issuerSubKey(iss.URL, pageSub)]; got != user.ID {
+		t.Errorf("the issuer and sub resolve to %q, want %s", got, user.ID)
 	}
 
-	if d.Bindings[label].UserID != userID {
-		t.Errorf("label bound to %q, want %q", d.Bindings[label].UserID, userID)
+	if got := d.Bindings[label].UserID; got != user.ID {
+		t.Errorf("%s is bound to %q after the email change, want %s", label, got, user.ID)
 	}
 }
 
-func TestPageNeverListsPendingLabels(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestParametersSentBeforeTheSignInAreIgnored proves the bind form after a sign-in echoes no parameter
+// sent with the start of the sign-in or added to the callback. It catches a page that carries a cross-site
+// request's parameters into the form, where a user might submit them unread.
+func TestParametersSentBeforeTheSignInAreIgnored(t *testing.T) {
+	h, iss, page, _ := newPageWorld(t, true)
 
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	q := callbackQuery(t, h, iss, "/bind?evil=parameter&another=bad")
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	h.register(n)
-
-	storePairingCode(t, h.b, "pending-label", "word-word-word-word", time.Now().Add(PairingCodeExpiry))
-
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	req := httptest.NewRequest("GET", "/callback?code=test-code&state="+state, nil)
-	w := httptest.NewRecorder()
-
-	h.b.handleCallback(w, req)
-
-	body := w.Body.String()
-
-	if strings.Contains(body, "pending-label") {
-		t.Error("callback page listed pending label")
-	}
-}
-
-func TestLabelAndEmailWithScriptTagsAreEscaped(t *testing.T) {
-	h, si := newSignInHarness(t)
-
-	si.email = "<script>alert('xss')</script>@example.com"
-
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	h.register(n)
-
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	req := httptest.NewRequest("GET", "/callback?code=test-code&state="+state, nil)
-	w := httptest.NewRecorder()
-
-	h.b.handleCallback(w, req)
-
-	body := w.Body.String()
-
-	if strings.Contains(body, "<script>") {
-		t.Error("script tag not escaped in email")
-	}
-
-	if !strings.Contains(body, "&lt;script&gt;") {
-		t.Error("email not properly escaped")
-	}
-}
-
-func TestSignInResolvesThroughIssuerPlusSub(t *testing.T) {
-	h, si := newSignInHarness(t)
-
-	originalEmail := "original@example.com"
-	si.email = originalEmail
-
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
-
-	storePairingCode(t, h.b, label, "word-word-word-word", time.Now().Add(PairingCodeExpiry))
-
-	authURL, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest("POST", "/bind-submit", nil)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.PostForm = url.Values{
-		"token": {token},
-		"label": {label},
-		"code":  {"word-word-word-word"},
-	}
-
-	if err := req.ParseForm(); err != nil {
-		t.Fatal(err)
-	}
-
-	w := httptest.NewRecorder()
-
-	h.b.handleBindSubmit(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("first bind failed: %s", w.Body.String())
-	}
-
-	si.email = "changed@example.com"
-
-	authURL2, err := h.b.signInMgr.StartAction("bind")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u2, _ := url.Parse(authURL2)
-	state2 := u2.Query().Get("state")
-	nonce2 := u2.Query().Get("nonce")
-
-	si.expectedNonce = nonce2
-
-	req2 := httptest.NewRequest("GET", "/callback?code=test-code&state="+state2, nil)
-	w2 := httptest.NewRecorder()
-
-	h.b.handleCallback(w2, req2)
-
-	if w2.Code != http.StatusOK {
-		t.Fatalf("second callback failed: %s", w2.Body.String())
-	}
-
-	body := w2.Body.String()
-	if !strings.Contains(body, "changed@example.com") {
-		t.Error("callback did not show changed email")
-	}
-
-	d := h.data()
-	issuerSub := si.issuer + "\x00" + si.subject
-	userID := d.IssuerSubs[issuerSub]
-
-	if userID == "" {
-		t.Error("user ID not found for issuer+sub after email change")
-	}
-
-	if d.Bindings[label].UserID != userID {
-		t.Error("label binding changed after email change")
-	}
-}
-
-func TestParametersBeforeSignInIgnored(t *testing.T) {
-	h, si := newSignInHarness(t)
-
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest("POST", "/bind?evil=parameter&another=bad", nil)
-	w := httptest.NewRecorder()
-
-	h.b.handleBindLabel(w, req)
-
-	if w.Code != http.StatusFound {
-		t.Fatalf("bind label failed: %d", w.Code)
-	}
-
-	location := w.Header().Get("Location")
-	u, err := url.Parse(location)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	state := u.Query().Get("state")
-
-	si.expectedNonce = u.Query().Get("nonce")
-
-	req2 := httptest.NewRequest("GET", "/callback?code=test-code&state="+state+"&evil=injected", nil)
-	w2 := httptest.NewRecorder()
-
-	h.b.handleCallback(w2, req2)
-
-	body := w2.Body.String()
+	_, body := page.Get("/callback?" + q + "&evil=injected")
 
 	if strings.Contains(body, "evil") || strings.Contains(body, "parameter") || strings.Contains(body, "injected") {
-		t.Error("callback page echoed query parameters")
+		t.Errorf("the form echoes a parameter sent before the sign-in:\n%s", body)
 	}
 }
 
-// TestGrantDelegationParametersBeforeSignInIgnored tests that parameters sent before sign-in are
-// ignored for grant delegation.
-func TestGrantDelegationParametersBeforeSignInIgnored(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestADelegationFormStartsEmpty proves the grant form after a sign-in carries no label sent with the
+// callback. It catches a form prefilled from a cross-site request, which turns one click into a
+// delegation the user never chose.
+func TestADelegationFormStartsEmpty(t *testing.T) {
+	h, iss, page, _ := newPageWorld(t, true)
 
-	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	label := h.register(nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}).Label
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
+	_, body := page.Get("/callback?" + callbackQuery(t, h, iss, "/grant") + "&label=" + label)
 
-	authURL, err := h.b.signInMgr.StartAction("grant")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	req := httptest.NewRequest("GET", "/callback?code=test-code&state="+state+"&label="+label, nil)
-	w := httptest.NewRecorder()
-
-	h.b.handleCallback(w, req)
-
-	body := w.Body.String()
-	if !strings.Contains(body, `<input type="text" name="label"`) {
-		t.Error("form should have empty label input")
-	}
-
-	if strings.Contains(body, label) && !strings.Contains(body, "User ID:") {
-		t.Error("label from URL query should not appear in form")
+	if !strings.Contains(body, `<input type="text" name="label"`) || strings.Contains(body, label) {
+		t.Errorf("the grant form is not empty:\n%s", body)
 	}
 }
 
-// TestCrossSitePostGrantDelegationChangesNothing tests that a cross-site POST without a valid
-// token changes nothing for grant delegation.
-func TestCrossSitePostGrantDelegationChangesNothing(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestACrossSiteGrantWithoutATokenChangesNothing proves a grant submit with a token the page never issued
+// makes no delegation. It catches a submit that trusts its form fields without the token that proves a
+// sign-in.
+func TestACrossSiteGrantWithoutATokenChangesNothing(t *testing.T) {
+	h, _, page, user := newPageWorld(t, true)
 
-	user, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	label := h.register(nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}).Label
+
+	if status, _ := page.Post("/grant-submit", url.Values{"token": {"fake-token"}, "label": {label}}); status == http.StatusOK {
+		t.Error("a grant with a fake token was accepted")
 	}
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
-
-	req := httptest.NewRequest("POST", "/grant-submit", nil)
-	req.PostForm = url.Values{
-		"token": {"fake-token"},
-		"label": {label},
-	}
-	w := httptest.NewRecorder()
-
-	h.b.handleGrantSubmit(w, req)
-
-	if w.Code == http.StatusOK {
-		t.Error("cross-site post with fake token was accepted")
-	}
-
-	d := h.data()
-	if delegations, ok := d.Delegations[user.ID]; ok {
-		if _, hasDelegation := delegations[label]; hasDelegation {
-			t.Error("cross-site post created a delegation")
-		}
+	if _, ok := h.data().Delegations[user.ID][label]; ok {
+		t.Error("a cross-site grant made a delegation")
 	}
 }
 
-// TestUnadmittedUserCannotGrant tests that an unadmitted user cannot grant a delegation.
-func TestUnadmittedUserCannotGrant(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestAGrantFromASignerRevokedAfterSignInIsRefused proves a grant form submitted after the owner revoked
+// its signer is refused as not admitted, and makes no delegation. An unadmitted signer never gets a form,
+// so a revoke between the sign-in and the submit is the only way to reach the submit's admission check. It
+// catches a submit that trusts the sign-in alone.
+func TestAGrantFromASignerRevokedAfterSignInIsRefused(t *testing.T) {
+	h, _, page, user := newPageWorld(t, true)
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
+	label := h.register(nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}).Label
 
-	authURL, err := h.b.signInMgr.StartAction("grant")
-	if err != nil {
-		t.Fatal(err)
+	_, form := page.SignIn("grant")
+
+	if rec := h.admin(http.MethodPost, AdminPathRevokeUser, map[string]string{"user_id": user.ID}); rec.Code != http.StatusOK {
+		t.Fatalf("revoke-user: %d %s", rec.Code, rec.Body)
 	}
 
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
+	status, body := page.Post("/grant-submit", url.Values{"token": {oidctest.FormToken(t, form)}, "label": {label}})
+	if status != http.StatusForbidden || !strings.Contains(body, "not admitted") {
+		t.Errorf("the revoked signer's grant: %d %s, want %d naming admission", status, body, http.StatusForbidden)
 	}
 
-	req := httptest.NewRequest("POST", "/grant-submit", nil)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.PostForm = url.Values{
-		"token": {token},
-		"label": {label},
-	}
-	w := httptest.NewRecorder()
-
-	h.b.handleGrantSubmit(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", w.Code)
-	}
-
-	if !strings.Contains(w.Body.String(), "not admitted") {
-		t.Error("error should mention not admitted")
+	if len(h.data().Delegations[user.ID]) != 0 {
+		t.Errorf("delegations = %+v, want none", h.data().Delegations)
 	}
 }
 
-// TestGrantDelegationTakesEffect tests that granting a delegation takes effect.
-func TestGrantDelegationTakesEffect(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestAGrantOnThePageMakesTheDelegation proves the grant form, submitted after a sign-in, delegates the
+// signer to the label typed. It catches a grant action that answers success and writes nothing, or writes
+// the delegation under another user.
+func TestAGrantOnThePageMakesTheDelegation(t *testing.T) {
+	h, _, page, user := newPageWorld(t, true)
 
-	user, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	label := h.register(nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}).Label
+
+	if status, body := page.Submit("grant", url.Values{"label": {label}}); status != http.StatusOK {
+		t.Fatalf("grant: %d %s", status, body)
 	}
 
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
-
-	authURL, err := h.b.signInMgr.StartAction("grant")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest("POST", "/grant-submit", nil)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.PostForm = url.Values{
-		"token": {token},
-		"label": {label},
-	}
-	w := httptest.NewRecorder()
-
-	h.b.handleGrantSubmit(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	d := h.data()
-	delegations, ok := d.Delegations[user.ID]
-	if !ok {
-		t.Fatal("no delegations found for user")
-	}
-
-	if _, hasDelegation := delegations[label]; !hasDelegation {
-		t.Error("delegation was not created")
+	if _, ok := h.data().Delegations[user.ID][label]; !ok {
+		t.Errorf("delegations = %+v, want %s's to %s", h.data().Delegations, user.ID, label)
 	}
 }
 
-// TestRevokeDelegationTakesEffectAndEndsLeases tests that revoking a delegation takes effect and
-// ends the label's leases for U.
-func TestRevokeDelegationTakesEffectAndEndsLeases(t *testing.T) {
-	h, si := newSignInHarness(t)
+// TestARevokeOnThePageEndsTheDelegationsLeases proves the revoke form, submitted after a sign-in, removes
+// the signer's delegation and ends the lease the label held for the signer. It is the page's own proof of
+// the revoke. The broker-side effects of a revoke are proven by TestRevokingADelegationTellsTheAgentsNode.
+// It catches a page revoke that removes the delegation and leaves its lease live.
+func TestARevokeOnThePageEndsTheDelegationsLeases(t *testing.T) {
+	h, _, page, user := newPageWorld(t, true)
 
-	user1, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now())
+	other, err := h.b.AdmitUser(createIssuer, "other@example.com", "other@example.com", h.wall.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	user2, err := h.b.CreateUser("other@example.com", time.Now())
-	if err != nil {
-		t.Fatal(err)
+	n := nodeID{Machine: "machine-p", UID: 501, Key: "key-p"}
+	h.register(n)
+	label := h.bindNode(t, n, other.ID)
+
+	h.crossUserOn(t)
+
+	if status, body := page.Submit("grant", url.Values{"label": {label}}); status != http.StatusOK {
+		t.Fatalf("grant: %d %s", status, body)
 	}
-
-	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
-	reg := h.register(n)
-	label := reg.Label
-
-	if err := h.b.BindLabelToUser(label, user2.ID, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-
-	h.delegate(t, user1, label)
 
 	var res wire.Result
+
 	status := h.call(n, wire.PathClaim, wire.Claim{
 		Version: wire.Current, ID: "L1", Reach: wire.ReachUser,
 		Entries:    []repoid.Name{repoid.New([]string{rootA}, "svc", false, false)},
-		Derivation: 1, Anchor: "anchor-L1", Holder: holder("a"), ActingFor: user1.UserLabel, ActingForExplicit: true,
+		Derivation: 1, Anchor: "anchor-L1", Holder: holder("a"), ActingFor: user.UserLabel, ActingForExplicit: true,
 	}, &res)
 	if status != http.StatusOK || res.Code != wire.CodeGranted {
-		t.Fatalf("claim failed: status %d, code %s", status, res.Code)
+		t.Fatalf("claim for the signer: status %d, %+v", status, res)
 	}
 
-	authURL, err := h.b.signInMgr.StartAction("revoke")
-	if err != nil {
-		t.Fatal(err)
+	if status, body := page.Submit("revoke", url.Values{"label": {label}}); status != http.StatusOK {
+		t.Fatalf("revoke: %d %s", status, body)
 	}
 
-	u, _ := url.Parse(authURL)
-	state := u.Query().Get("state")
-	nonce := u.Query().Get("nonce")
-
-	si.expectedNonce = nonce
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
-	if err != nil {
-		t.Fatal(err)
+	if _, ok := h.data().Delegations[user.ID][label]; ok {
+		t.Error("the delegation outlived the revoke")
 	}
 
-	req := httptest.NewRequest("POST", "/revoke-submit", nil)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.PostForm = url.Values{
-		"token": {token},
-		"label": {label},
-	}
-	w := httptest.NewRecorder()
+	ended := false
 
-	h.b.handleRevokeSubmit(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	d := h.data()
-	if delegations, ok := d.Delegations[user1.ID]; ok {
-		if _, hasDelegation := delegations[label]; hasDelegation {
-			t.Error("delegation was not removed")
+	for _, l := range h.b.Facts() {
+		if l.ID == "L1" && l.State == wire.StateEnded && l.EndedBy == "delegation revoked" {
+			ended = true
 		}
 	}
 
-	facts := h.b.Facts()
-	foundEnded := false
-	for _, l := range facts {
-		if l.ID == "L1" && l.State == wire.StateEnded {
-			foundEnded = true
-
-			if l.EndedBy != "delegation revoked" {
-				t.Errorf("lease should have EndedBy='delegation revoked', got %q", l.EndedBy)
-			}
-
-			break
-		}
-	}
-
-	if !foundEnded {
-		t.Fatalf("lease L1 should be ended after delegation revoked")
+	if !ended {
+		t.Errorf("facts = %+v, want L1 ended by the revoke", h.b.Facts())
 	}
 }

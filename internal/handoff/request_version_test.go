@@ -13,7 +13,7 @@ import (
 )
 
 // TestSubmitUsesKindSince tests that Submit writes the lowest request version that carries each
-// request, using KindSince for the kind (Item 7).
+// request, using KindSince for the kind.
 func TestSubmitUsesKindSince(t *testing.T) {
 	tests := []struct {
 		kind string
@@ -72,7 +72,7 @@ func TestSubmitUsesKindSince(t *testing.T) {
 }
 
 // TestSubmitUsesRequestVersionForUnknownKind tests that Submit uses RequestVersion for kinds
-// not in KindSince (Item 7).
+// not in KindSince.
 func TestSubmitUsesRequestVersionForUnknownKind(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, PendingDir), 0o700); err != nil {
@@ -110,7 +110,7 @@ func TestSubmitUsesRequestVersionForUnknownKind(t *testing.T) {
 }
 
 // TestPresenceSupportsWithOldRequestVersion tests that a kind older than RequestVersion can still
-// go to a node whose presence reports an older RequestVersion (Item 7).
+// go to a node whose presence reports an older RequestVersion.
 func TestPresenceSupportsWithOldRequestVersion(t *testing.T) {
 	p := Presence{
 		RequestVersion: 3,

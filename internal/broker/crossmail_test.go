@@ -2,15 +2,14 @@ package broker
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/oidc/oidctest"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
@@ -34,41 +33,43 @@ var (
 func newCrossWorld(t *testing.T) *crossWorld {
 	t.Helper()
 
-	h := newHarness(t, nil)
+	h := newCrossUserHarness(t)
 
-	u, err := h.b.CreateUser("u@example.com", wallStart)
+	u, err := h.b.AdmitUser(createIssuer, "u@example.com", "u@example.com", wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	v, err := h.b.CreateUser("v@example.com", wallStart)
+	v, err := h.b.AdmitUser(createIssuer, "v@example.com", "v@example.com", wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	w := &crossWorld{h: h, u: u, v: v, uNode: crossU, vNode: crossV}
 
-	w.uLabel = w.bindMail(t, crossU, u.ID, recipientSession)
-	w.vLabel = w.bindMail(t, crossV, v.ID, senderSession)
-	w.uAddr, w.vAddr = h.mailName(w.uLabel, recipientSession), h.mailName(w.vLabel, senderSession)
+	w.uLabel = w.bindMail(t, crossU, u.ID)
+	w.vLabel = w.bindMail(t, crossV, v.ID)
 
 	h.crossUserOn(t)
+
+	h.reportSessions(crossU, recipientSession)
+	h.reportSessions(crossV, senderSession)
+	w.uAddr, w.vAddr = h.mailName(w.uLabel, recipientSession), h.mailName(w.vLabel, senderSession)
 
 	return w
 }
 
 // bindMail registers a node that speaks mail across users, binds its label to a user as the page does,
-// and reports its live sessions.
+// and reports its live sessions, if it names any.
 func (w *crossWorld) bindMail(t *testing.T, n nodeID, userID string, sessions ...string) string {
 	t.Helper()
 
 	label := w.h.registerMail(n)
+	w.h.bindNode(t, n, userID)
 
-	if err := w.h.b.BindLabelToUser(label, userID, wallStart); err != nil {
-		t.Fatal(err)
+	if len(sessions) > 0 {
+		w.h.reportSessions(n, sessions...)
 	}
-
-	w.h.reportSessions(n, sessions...)
 
 	return label
 }
@@ -91,11 +92,7 @@ func (h *harness) registerTooOld(n nodeID) {
 func (w *crossWorld) grantMail(t *testing.T) {
 	t.Helper()
 
-	w.h.signIn(t, w.u)
-
-	if _, _, err := w.h.b.GrantMail(testDelegationIssuer, w.u.ID, w.v.UserLabel, wallStart); err != nil {
-		t.Fatal(err)
-	}
+	w.h.grantMail(t, w.u, w.v)
 }
 
 // revokeMail withdraws U's grant to V, as U's page action does.
@@ -392,7 +389,7 @@ func TestMailToASharedAgentFollowsTheAgentsOwnUsersGrants(t *testing.T) {
 	w := newCrossWorld(t)
 	w.grantMail(t)
 
-	owner, err := w.h.b.CreateUser("agent-owner@example.com", wallStart)
+	owner, err := w.h.b.AdmitUser(createIssuer, "agent-owner@example.com", "agent-owner@example.com", wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,20 +432,12 @@ func TestCrossUserMailIsRefusedWhileCrossUserFeaturesAreOff(t *testing.T) {
 	w.grantMail(t)
 	w.sharedLease(t, w.uNode, "L-u", wire.ReachShared, recipientSession)
 
-	w.h.b.mu.Lock()
-	err := w.h.b.commit(func(d *Data) error {
-		d.CrossUserEnabled = false
-
-		return nil
-	})
-	w.h.b.mu.Unlock()
-
-	if err != nil {
-		t.Fatal(err)
+	if rec := w.h.admin(http.MethodPost, AdminPathCrossUser, map[string]bool{"enable": false}); rec.Code/100 != 2 {
+		t.Fatalf("turning cross-user features off: %d %s", rec.Code, rec.Body)
 	}
 
 	resp := w.h.send(w.vNode, mailIDs[0], w.uAddr, "x", senderSession)
-	if resp.StatusCode != http.StatusForbidden || !strings.Contains(errMessage(t, resp), "cross-user features on") {
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(errMessage(t, resp), "nitipan broker cross-user true") {
 		t.Errorf("status = %d, want refused naming the switch", resp.StatusCode)
 	}
 }
@@ -758,7 +747,7 @@ func TestAFirstMessageReusingAHeldConversationsIDIsRefused(t *testing.T) {
 
 	w.revokeMail(t)
 
-	other, err := w.h.b.CreateUser("w@example.com", wallStart)
+	other, err := w.h.b.AdmitUser(createIssuer, "w@example.com", "w@example.com", wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -957,70 +946,34 @@ func TestRegisteredSaysTheBrokerReadsReplies(t *testing.T) {
 	}
 }
 
-// startMailAction signs U in on the page for a mail-grant action, and returns the form's token.
-func startMailAction(t *testing.T, h *harness, si *signInIssuer, action string) string {
-	t.Helper()
-
-	authURL, err := h.b.signInMgr.StartAction(action)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u, _ := url.Parse(authURL)
-	si.expectedNonce = u.Query().Get("nonce")
-
-	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), u.Query().Get("state"), "test-code")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return token
-}
-
-func submitMailAction(h *harness, path, token, userLabel string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, path, nil)
-	req.PostForm = url.Values{"token": {token}, "user_label": {userLabel}}
-
-	w := httptest.NewRecorder()
-
-	switch path {
-	case "/mail-grant-submit":
-		h.b.handleMailGrantSubmit(w, req)
-	default:
-		h.b.handleMailRevokeSubmit(w, req)
-	}
-
-	return w
-}
-
 // TestAMailGrantMadeOnThePageTakesEffectAndItsRevokeWithdrawsIt proves U grants V by typing V's user label
 // on the form the page renders after U's sign-in, and revokes it the same way. It catches a page action
 // that writes the grant the wrong way round, or a revoke that leaves it.
 func TestAMailGrantMadeOnThePageTakesEffectAndItsRevokeWithdrawsIt(t *testing.T) {
-	h, si := newSignInHarness(t)
+	iss := oidctest.New(t, "u-sub", "u@example.com")
+	h, page := pageHarness(t, iss)
 
-	u, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now())
+	u, err := h.b.AdmitUser(iss.URL, "u-sub", "u@example.com", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	v, err := h.b.CreateUser("v@example.com", time.Now())
+	v, err := h.b.AdmitUser(createIssuer, "v@example.com", "v@example.com", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	rec := submitMailAction(h, "/mail-grant-submit", startMailAction(t, h, si, actionMailGrant), v.UserLabel)
-	if rec.Code != http.StatusOK || rec.Header().Get("Content-Security-Policy") != "frame-ancestors 'none'" {
-		t.Fatalf("grant: %d %s", rec.Code, rec.Body.String())
+	status, body := page.Submit(actionMailGrant, url.Values{"user_label": {v.UserLabel}})
+	if status != http.StatusOK || page.Header.Get("Content-Security-Policy") != "frame-ancestors 'none'" {
+		t.Fatalf("grant: %d %s", status, body)
 	}
 
 	if _, ok := h.data().MailGrants[u.ID][v.ID]; !ok || len(h.data().MailGrants[v.ID]) != 0 {
 		t.Fatalf("grants after the grant = %+v, want U's grant to V only", h.data().MailGrants)
 	}
 
-	rec = submitMailAction(h, "/mail-revoke-submit", startMailAction(t, h, si, actionMailRevoke), v.UserLabel)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("revoke: %d %s", rec.Code, rec.Body.String())
+	if status, body := page.Submit(actionMailRevoke, url.Values{"user_label": {v.UserLabel}}); status != http.StatusOK {
+		t.Fatalf("revoke: %d %s", status, body)
 	}
 
 	if _, ok := h.data().MailGrants[u.ID][v.ID]; ok {
@@ -1032,36 +985,44 @@ func TestAMailGrantMadeOnThePageTakesEffectAndItsRevokeWithdrawsIt(t *testing.T)
 // carries no user label sent before the sign-in, and that a delegation's token cannot submit a mail grant.
 // It catches a page that prefills a cross-site request's parameters, or that accepts any token.
 func TestAMailGrantFormStartsEmptyAndATokenOfAnotherActionChangesNothing(t *testing.T) {
-	h, si := newSignInHarness(t)
+	iss := oidctest.New(t, "u-sub", "u@example.com")
+	h, page := pageHarness(t, iss)
 
-	u, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now())
+	u, err := h.b.AdmitUser(iss.URL, "u-sub", "u@example.com", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	v, err := h.b.CreateUser("v@example.com", time.Now())
+	v, err := h.b.AdmitUser(createIssuer, "v@example.com", "v@example.com", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	authURL, err := h.b.signInMgr.StartAction(actionMailGrant)
+	if status, _ := page.Post("/"+actionMailGrant, url.Values{"user_label": {v.UserLabel}}); status != http.StatusFound {
+		t.Fatalf("starting the mail grant: status %d, want a redirect to the issuer", status)
+	}
+
+	resp, err := iss.Client(t).Get(page.Header.Get("Location"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	pu, _ := url.Parse(authURL)
-	si.expectedNonce = pu.Query().Get("nonce")
+	resp.Body.Close()
 
-	req := httptest.NewRequest(http.MethodGet, "/callback?code=c&state="+pu.Query().Get("state")+"&user_label="+v.UserLabel, nil)
-	rec := httptest.NewRecorder()
-	h.b.handleCallback(rec, req)
+	back, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if body := rec.Body.String(); strings.Contains(body, v.UserLabel) || !strings.Contains(body, `name="user_label"`) {
+	_, body := page.Get("/callback?" + back.RawQuery + "&user_label=" + url.QueryEscape(v.UserLabel))
+	if strings.Contains(body, v.UserLabel) || !strings.Contains(body, `name="user_label"`) {
 		t.Errorf("the form after the callback = %s", body)
 	}
 
-	other := submitMailAction(h, "/mail-grant-submit", startMailAction(t, h, si, "grant"), v.UserLabel)
-	if other.Code == http.StatusOK {
+	_, form := page.SignIn("grant")
+
+	status, _ := page.Post("/mail-grant-submit", url.Values{"token": {oidctest.FormToken(t, form)}, "user_label": {v.UserLabel}})
+	if status == http.StatusOK {
 		t.Error("a delegation's token submitted a mail grant")
 	}
 
@@ -1070,18 +1031,38 @@ func TestAMailGrantFormStartsEmptyAndATokenOfAnotherActionChangesNothing(t *test
 	}
 }
 
-// TestAnUnadmittedSignerCannotGrantMail proves the page checks the signer's admission before a mail
-// grant. It catches a grant made by anyone the identity provider signs in.
+// TestAnUnadmittedSignerCannotGrantMail proves the page checks the signer's admission before a mail grant:
+// a signer nobody admitted gets no form, and a form a user signed in for is refused once the owner revokes
+// that user. It catches a grant made by anyone the identity provider signs in, and one that trusts an
+// admission checked only at the callback.
 func TestAnUnadmittedSignerCannotGrantMail(t *testing.T) {
-	h, si := newSignInHarness(t)
+	iss := oidctest.New(t, "stranger-sub", "stranger@example.com")
+	h, page := pageHarness(t, iss)
 
-	v, err := h.b.CreateUser("v@example.com", time.Now())
+	v, err := h.b.AdmitUser(createIssuer, "v@example.com", "v@example.com", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	rec := submitMailAction(h, "/mail-grant-submit", startMailAction(t, h, si, actionMailGrant), v.UserLabel)
-	if rec.Code != http.StatusForbidden || len(h.data().MailGrants) != 0 {
-		t.Errorf("an unadmitted grant: %d, grants %+v", rec.Code, h.data().MailGrants)
+	if _, body := page.SignIn(actionMailGrant); strings.Contains(body, `name="token"`) {
+		t.Fatalf("a signer nobody admitted got the mail grant form: %s", body)
+	}
+
+	iss.SetUser("u-sub", "u@example.com")
+
+	u, err := h.b.AdmitUser(iss.URL, "u-sub", "u@example.com", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, form := page.SignIn(actionMailGrant)
+
+	if rec := h.admin(http.MethodPost, AdminPathRevokeUser, map[string]string{"user_id": u.ID}); rec.Code != http.StatusOK {
+		t.Fatalf("revoke-user: %d %s", rec.Code, rec.Body)
+	}
+
+	status, body := page.Post("/mail-grant-submit", url.Values{"token": {oidctest.FormToken(t, form)}, "user_label": {v.UserLabel}})
+	if status != http.StatusForbidden || len(h.data().MailGrants) != 0 {
+		t.Errorf("a revoked signer's grant: %d %s, grants %+v", status, body, h.data().MailGrants)
 	}
 }

@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -81,7 +85,230 @@ Run this on the broker host. The holder's node writes them a notice that names t
 		},
 	}
 
-	return []*cobra.Command{pending, approve, forget, confirmUpgrade, breakLease}
+	crossUser := &cobra.Command{
+		Use:   "cross-user <true|false>",
+		Short: "Turn cross-user features on or off",
+		Long: `Turn cross-user features on or off on the broker host. Turning them on first lists every label nobody
+bound. Each is refused from then on, until it is approved on the broker host or bound on the sign-in page.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error { return a.runBrokerCrossUser(cmd, args[0]) },
+	}
+
+	admissions := &cobra.Command{
+		Use:   "admissions",
+		Short: "List the people who signed in on the sign-in page and are not admitted",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, _ []string) error { return a.runBrokerAdmissions(cmd) },
+	}
+
+	admit := &cobra.Command{
+		Use:   "admit <issuer> <sub> <email>",
+		Short: "Admit a person as a new user, by the issuer plus sub their identity provider names them with",
+		Args:  cobra.ExactArgs(3),
+		RunE:  func(cmd *cobra.Command, args []string) error { return a.runBrokerAdmit(cmd, args[0], args[1], args[2]) },
+	}
+
+	link := &cobra.Command{
+		Use:   "link <issuer> <sub> <user-id>",
+		Short: "Map another issuer plus sub to an existing user",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.runBrokerAdmin(cmd, broker.AdminPathLink, map[string]string{"issuer": args[0], "sub": args[1], "user_id": args[2]},
+				fmt.Sprintf("linked issuer %s sub %s to user %s\n", args[0], args[1], args[2]))
+		},
+	}
+
+	bindings := &cobra.Command{
+		Use:   "bindings",
+		Short: "List each user's bound labels, with when each label's node was last seen",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, _ []string) error { return a.runBrokerBindings(cmd) },
+	}
+
+	revokeUser := &cobra.Command{
+		Use:   "revoke-user <user-id>",
+		Short: "Forget all of a user's labels, remove their admissions, and end their leases",
+		Long: `Forget every label bound to the user, remove every issuer plus sub that resolves to them, and drop every
+delegation and mail grant naming them. Every lease held for the user, and every lease their labels hold, ends,
+and each holder's node writes a notice.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error { return a.runBrokerRevokeUser(cmd, args[0]) },
+	}
+
+	return []*cobra.Command{pending, approve, forget, confirmUpgrade, breakLease, crossUser, admissions, admit, link, bindings, revokeUser}
+}
+
+// adminAnswer sends one request to the admin socket and decodes a 2xx answer into out. Any other status
+// becomes the broker's refusal.
+func (a *app) adminAnswer(method, path string, body, out any) error {
+	resp, err := a.adminCall(method, path, body)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode/100 != 2 {
+		var e wire.Error
+
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+
+		return fmt.Errorf("the broker refused: %s", e.Message)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding the answer from %s: %w", path, err)
+	}
+
+	return nil
+}
+
+func (a *app) runBrokerAdmissions(cmd *cobra.Command) error {
+	var ans broker.AdminAdmissions
+	if err := a.adminAnswer(http.MethodGet, broker.AdminPathAdmissions, nil, &ans); err != nil {
+		return err
+	}
+
+	out := cmd.OutOrStdout()
+
+	if len(ans.Admissions) == 0 {
+		_, err := fmt.Fprintln(out, "no one is waiting for admission")
+
+		return err
+	}
+
+	for _, ad := range ans.Admissions {
+		fmt.Fprintf(out, "%s  issuer %s  sub %s  first signed in %s\n", ad.Email, ad.Issuer, ad.Sub, ad.FirstSeen.Format(timeLayout))
+	}
+
+	_, err := fmt.Fprintln(out, "\nAdmit a person with: nitipan broker admit <issuer> <sub> <email>")
+
+	return err
+}
+
+func (a *app) runBrokerAdmit(cmd *cobra.Command, issuer, sub, email string) error {
+	var user broker.UserRecord
+	if err := a.adminAnswer(http.MethodPost, broker.AdminPathAdmit, map[string]string{"issuer": issuer, "sub": sub, "email": email}, &user); err != nil {
+		return err
+	}
+
+	_, err := fmt.Fprintf(cmd.OutOrStdout(), "admitted %s as user %s, with user label %s\n", user.Email, user.ID, user.UserLabel)
+
+	return err
+}
+
+func (a *app) runBrokerBindings(cmd *cobra.Command) error {
+	var ans broker.AdminBindings
+	if err := a.adminAnswer(http.MethodGet, broker.AdminPathBindings, nil, &ans); err != nil {
+		return err
+	}
+
+	out := cmd.OutOrStdout()
+
+	if len(ans.Bindings) == 0 {
+		_, err := fmt.Fprintln(out, "no label is bound to a user")
+
+		return err
+	}
+
+	byUser := map[string][]broker.AdminBinding{}
+
+	for _, bd := range ans.Bindings {
+		byUser[bd.UserID] = append(byUser[bd.UserID], bd)
+	}
+
+	for _, userID := range slices.Sorted(maps.Keys(byUser)) {
+		labels := byUser[userID]
+		fmt.Fprintf(out, "%s  %s  user %s\n", labels[0].UserLabel, labels[0].Email, userID)
+
+		for _, bd := range labels {
+			seen := "never seen"
+			if !bd.LastSeen.IsZero() {
+				seen = "last seen " + bd.LastSeen.Format(timeLayout)
+			}
+
+			fmt.Fprintf(out, "    %s  %s  %s  %s  bound %s\n", bd.Label, bd.Host, bd.User, seen, bd.BoundAt.Format(timeLayout))
+		}
+	}
+
+	return nil
+}
+
+func (a *app) runBrokerRevokeUser(cmd *cobra.Command, userID string) error {
+	var ans broker.RevokedUser
+	if err := a.adminAnswer(http.MethodPost, broker.AdminPathRevokeUser, map[string]string{"user_id": userID}, &ans); err != nil {
+		return err
+	}
+
+	out := cmd.OutOrStdout()
+
+	fmt.Fprintf(out, "revoked user %s\n", userID)
+	fmt.Fprintf(out, "  forgot labels: %s\n", listOrNone(ans.Labels))
+	fmt.Fprintf(out, "  ended leases: %s\n", listOrNone(ans.Leases))
+
+	_, err := fmt.Fprintf(out, "  removed %d admissions, %d delegations, and %d mail grants\n", ans.Admissions, ans.Delegations, ans.MailGrants)
+
+	return err
+}
+
+// timeLayout is how the broker-host commands print a time.
+const timeLayout = "2006-01-02 15:04:05 MST"
+
+func listOrNone(items []string) string {
+	if len(items) == 0 {
+		return "none"
+	}
+
+	return strings.Join(items, ", ")
+}
+
+func (a *app) runBrokerCrossUser(cmd *cobra.Command, arg string) error {
+	enable, err := strconv.ParseBool(arg)
+	if err != nil {
+		return fmt.Errorf("%w: %q is not true or false", exitcode.ErrUsage, arg)
+	}
+
+	resp, err := a.adminCall(http.MethodPost, broker.AdminPathCrossUser, map[string]bool{"enable": enable})
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode/100 != 2 {
+		var e wire.Error
+
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+
+		return fmt.Errorf("the broker refused: %s", e.Message)
+	}
+
+	var ans broker.AdminCrossUser
+	if err := json.NewDecoder(resp.Body).Decode(&ans); err != nil {
+		return fmt.Errorf("decoding the cross-user answer: %w", err)
+	}
+
+	out := cmd.OutOrStdout()
+
+	if !ans.Enabled {
+		_, err = fmt.Fprintln(out, "cross-user features are off.")
+
+		return err
+	}
+
+	if len(ans.Unbound) > 0 {
+		fmt.Fprintln(out, "These labels are bound to nobody. Each is refused from now on, until it is approved on the broker host or bound on the sign-in page:")
+
+		for _, label := range ans.Unbound {
+			fmt.Fprintf(out, "  %s\n", label)
+		}
+
+		fmt.Fprintln(out)
+	}
+
+	_, err = fmt.Fprintln(out, "cross-user features are on.")
+
+	return err
 }
 
 // adminClient talks to the broker's admin socket. No network path reaches it.
@@ -254,7 +481,7 @@ func (a *app) runBrokerPending(cmd *cobra.Command) error {
 		fmt.Fprintf(out, "%s  %s  %s  %s\n", l.Label, l.Host, l.User, state)
 
 		for _, k := range l.Keys {
-			fmt.Fprintf(out, "    key %s  first seen %s\n", k.Fingerprint, k.At.Format("2006-01-02 15:04:05 MST"))
+			fmt.Fprintf(out, "    key %s  first seen %s\n", k.Fingerprint, k.At.Format(timeLayout))
 		}
 	}
 
@@ -297,76 +524,52 @@ func (a *app) nodePairCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "pair",
 		Short: "Print the fingerprint and a fresh pairing code for binding this node on the broker page",
-		Long: `Print the fingerprint of this node's key and a fresh four-word pairing code. The code expires in 10 minutes.
-Bind the node on the broker's sign-in page by entering the label and this code.`,
+		Long: `Print this node's label, the fingerprint of its key, and a fresh four-word pairing code. The code expires
+in 10 minutes. Bind the node on the broker's sign-in page by entering the label and this code. The node
+must have run once, so the broker has its key.`,
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			home, err := a.deps.UserHome()
-			if err != nil {
-				return err
-			}
-
-			cfg, err := config.LoadNode(home, os.Getuid())
-			if err != nil {
-				return err
-			}
-
-			dir, err := a.deps.StateDir()
-			if err != nil {
-				return fmt.Errorf("resolving the state directory: %w", err)
-			}
-
-			fp, err := node.Fingerprint(dir)
-			if err != nil {
-				return fmt.Errorf("%w: %w", exitcode.ErrUsage, err)
-			}
-
-			code := broker.GeneratePairingCode()
-			hash := broker.HashPairingCode(code)
-
-			cl := &http.Client{}
-			reqBody := map[string]string{
-				"pairing_hash": hash,
-			}
-
-			data, err := json.Marshal(reqBody)
-			if err != nil {
-				return fmt.Errorf("encoding the request: %w", err)
-			}
-
-			req, err := http.NewRequest(http.MethodPost, cfg.Broker+wire.PathPair, bytes.NewReader(data))
-			if err != nil {
-				return fmt.Errorf("building the request: %w", err)
-			}
-
-			key, err := node.LoadKey(dir)
-			if err != nil {
-				return err
-			}
-
-			req.Header.Set("Authorization", "Bearer "+key)
-
-			resp, err := cl.Do(req)
-			if err != nil {
-				return fmt.Errorf("sending pairing code to broker: %w", err)
-			}
-
-			defer resp.Body.Close()
-
-			if resp.StatusCode/100 != 2 {
-				return fmt.Errorf("broker refused the pairing code: %d", resp.StatusCode)
-			}
-
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Fingerprint: %s\n", fp)
-			fmt.Fprintf(out, "Pairing code: %s\n\n", code)
-			fmt.Fprintln(out, "This code expires in 10 minutes. Bind the node on the broker's sign-in page with:")
-			fmt.Fprintf(out, "  Label: (your machine's label from the broker)\n")
-			fmt.Fprintf(out, "  Code: %s\n", code)
-
-			return nil
-		},
+		RunE: func(cmd *cobra.Command, _ []string) error { return a.runNodePair(cmd) },
 	}
+}
+
+func (a *app) runNodePair(cmd *cobra.Command) error {
+	home, err := a.deps.UserHome()
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.LoadNode(home, os.Getuid())
+	if err != nil {
+		return err
+	}
+
+	dir, err := a.deps.StateDir()
+	if err != nil {
+		return fmt.Errorf("resolving the state directory: %w", err)
+	}
+
+	machine, err := a.deps.Machine()
+	if err != nil {
+		return fmt.Errorf("identifying this machine: %w", err)
+	}
+
+	fp, err := node.Fingerprint(dir)
+	if err != nil {
+		return fmt.Errorf("%w: %w", exitcode.ErrUsage, err)
+	}
+
+	code := broker.GeneratePairingCode()
+
+	label, err := node.Pair(context.Background(), cfg, dir, machine.ID, os.Getuid(), broker.HashPairingCode(code))
+	if err != nil {
+		return fmt.Errorf("sending the pairing code to the broker: %w", err)
+	}
+
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Label: %s\nFingerprint: %s\nPairing code: %s\n\n"+
+		"This code expires in 10 minutes. Bind the node on the broker's sign-in page with its label and this code.\n",
+		label, fp, code)
+
+	return err
 }
 
 func (a *app) nodeRekeyCmd() *cobra.Command {

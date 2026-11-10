@@ -1,11 +1,18 @@
 package broker
 
 import (
+	"bytes"
+	"crypto/subtle"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/monoclock"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/repoid"
 	"github.com/space-armada/nitipan/internal/wire"
@@ -33,7 +40,7 @@ func TestMigrateV1ToV2CreatesOwnerAndBindsPinnedLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v2Bytes, err := MigrateV1ToV2(v1Bytes)
+	v2Bytes, err := MigrateV1ToV2(v1Bytes, wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +166,7 @@ func TestMigrateV1ToV2RewritesActingForOnPinnedLabelLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v2Bytes, err := MigrateV1ToV2(v1Bytes)
+	v2Bytes, err := MigrateV1ToV2(v1Bytes, wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +274,7 @@ func TestMigrateV1ToV2PreservesAllFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v2Bytes, err := MigrateV1ToV2(v1Bytes)
+	v2Bytes, err := MigrateV1ToV2(v1Bytes, wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,5 +314,297 @@ func TestMigrateV1ToV2PreservesAllFields(t *testing.T) {
 
 	if v2Data.Counter != 42 {
 		t.Errorf("Counter = %d, want 42", v2Data.Counter)
+	}
+}
+
+// TestForgetStripsHashFromKeptV1File tests that forgetting a label strips its hash from
+// the kept .v1 file for rollback safety.
+func TestForgetStripsHashFromKeptV1File(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "broker.json")
+
+	v1Data := &Data{
+		Version: record.Version{Major: 1, Minor: 1},
+		Nodes: map[string]NodeRecord{
+			"m1/1000": {KeyHash: "hash1", Label: "label1"},
+		},
+		Labels: map[string]LabelRecord{
+			"label1": {MachineID: "m1", UID: 1000},
+		},
+		Pins: map[string]PinRecord{
+			"label1": {PinnedHash: "hash1"},
+		},
+	}
+
+	v1Bytes, err := json.Marshal(v1Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v2Bytes, err := MigrateV1ToV2(v1Bytes, wallStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path, v2Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path+".v1", v1Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path, StoreOptions{Volume: localVolume{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer store.Close()
+
+	clock := monoclock.NewFake(time.Hour)
+	wall := &wallClock{t: wallStart}
+	cfg := Config{Store: store, Term: testTerm, Clock: clock, Now: wall.Now, Version: "test"}
+	b := New(cfg)
+
+	if err := b.Forget("label1"); err != nil {
+		t.Fatal(err)
+	}
+
+	keptBytes, err := os.ReadFile(path + ".v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var keptData Data
+	if err := json.Unmarshal(keptBytes, &keptData); err != nil {
+		t.Fatal(err)
+	}
+
+	if keptData.Pins["label1"].Forgotten {
+		if keptData.Nodes["m1/1000"].KeyHash != "" {
+			t.Error("key hash not stripped from kept file after forget")
+		}
+	}
+}
+
+// TestRollbackAfterForgetRefusesKey tests that after migration and forget, the kept .v1 file
+// has the forgotten key hash stripped, so an older v1 broker reading it would refuse the key.
+func TestRollbackAfterForgetRefusesKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "broker.json")
+
+	v1Data := &Data{
+		Version: record.Version{Major: 1, Minor: 1},
+		Nodes: map[string]NodeRecord{
+			"m1/1000": {KeyHash: keyHash("key1"), Label: "label1"},
+		},
+		Labels: map[string]LabelRecord{
+			"label1": {MachineID: "m1", UID: 1000, User: "user1", Host: "host1", Derivation: 1},
+		},
+		Pins: map[string]PinRecord{
+			"label1": {PinnedHash: keyHash("key1")},
+		},
+	}
+
+	v1Bytes, err := json.Marshal(v1Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v2Bytes, err := MigrateV1ToV2(v1Bytes, wallStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path, v2Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path+".v1", v1Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path, StoreOptions{Volume: localVolume{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clock := monoclock.NewFake(time.Hour)
+	wall := &wallClock{t: wallStart}
+	cfg := Config{Store: store, Term: testTerm, Clock: clock, Now: wall.Now, Version: "test"}
+	b := New(cfg)
+
+	if err := b.Forget("label1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	keptBytes, err := os.ReadFile(path + ".v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var keptData Data
+	if err := json.Unmarshal(keptBytes, &keptData); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, exists := keptData.Nodes["m1/1000"]; exists {
+		t.Error("node record still exists in kept file, but should be deleted so v1 refuses the key")
+	}
+
+	pin := keptData.Pins["label1"]
+	if !pin.Forgotten {
+		t.Error("pin.Forgotten = false, want true so v1 notePending refuses the key")
+	}
+
+	if pin.PinnedHash != "" {
+		t.Error("pinned hash not stripped from kept .v1 file after forget")
+	}
+}
+
+// TestConfirmUpgradeDeletesKeptFile tests that confirming the upgrade deletes the kept file
+// and reports that rollback is then impossible.
+func TestConfirmUpgradeDeletesKeptFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "broker.json")
+
+	v1Data := &Data{
+		Version: record.Version{Major: 1, Minor: 1},
+		Nodes: map[string]NodeRecord{
+			"m1/1000": {KeyHash: "hash1", Label: "label1"},
+		},
+		Labels: map[string]LabelRecord{
+			"label1": {MachineID: "m1", UID: 1000},
+		},
+		Pins: map[string]PinRecord{
+			"label1": {PinnedHash: "hash1"},
+		},
+	}
+
+	v1Bytes, err := json.Marshal(v1Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v2Bytes, err := MigrateV1ToV2(v1Bytes, wallStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path, v2Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path+".v1", v1Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path, StoreOptions{Volume: localVolume{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer store.Close()
+
+	if err := store.DeleteKeptFile(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(path + ".v1"); err == nil {
+		t.Error("kept file still exists after confirm")
+	}
+}
+
+// TestUpgradeWithQueuedMailPreservesLabelKeyAndMail tests that upgrading from 1.x to 2.0
+// with queued mail preserves the label, key, and mail delivery.
+func TestUpgradeWithQueuedMailPreservesLabelKeyAndMail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "broker.json")
+
+	msgID := "msg-1"
+	v1Data := &Data{
+		Version: record.Version{Major: 1, Minor: 1},
+		Nodes: map[string]NodeRecord{
+			"m1/1000": {KeyHash: keyHash("key1"), Label: "label1"},
+		},
+		Labels: map[string]LabelRecord{
+			"label1": {MachineID: "m1", UID: 1000, User: "user1", Host: "host1", Derivation: 1},
+		},
+		Pins: map[string]PinRecord{
+			"label1": {PinnedHash: keyHash("key1")},
+		},
+		Mail: map[string]MailRecord{
+			msgID: {
+				ID:         msgID,
+				Kind:       wire.EventMail,
+				FromLabel:  "other-label",
+				ToLabel:    "label1",
+				ToSession:  "session1",
+				ToAddress:  "addr1",
+				Stage:      "queued",
+				Body:       "queued message",
+				EnqueuedAt: time.Now(),
+				StageAt:    time.Now(),
+			},
+		},
+	}
+
+	v1Bytes, err := json.Marshal(v1Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v2Bytes, err := MigrateV1ToV2(v1Bytes, wallStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path, v2Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path, StoreOptions{Volume: localVolume{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer store.Close()
+
+	d := store.Data()
+
+	if d.Labels["label1"].MachineID != "m1" || d.Labels["label1"].UID != 1000 {
+		t.Error("label changed after migration")
+	}
+
+	nk := NodeKey{MachineID: "m1", UID: 1000}
+	if d.Nodes[nk.String()].KeyHash != keyHash("key1") {
+		t.Error("key hash changed after migration")
+	}
+
+	if subtle.ConstantTimeCompare([]byte(d.Nodes[nk.String()].KeyHash), []byte(keyHash("key1"))) != 1 {
+		t.Error("key hash comparison failed")
+	}
+
+	if d.Mail[msgID].Stage != wire.StageQueued || d.Mail[msgID].Body != "queued message" {
+		t.Error("queued mail changed after migration")
+	}
+
+	clock := monoclock.NewFake(time.Hour)
+	wall := &wallClock{t: wallStart}
+	cfg := Config{Store: store, Term: testTerm, Clock: clock, Now: wall.Now, Version: "test"}
+	b := New(cfg)
+
+	n := nodeID{Machine: "m1", UID: 1000, Key: "key1"}
+
+	req := httptest.NewRequest("POST", wire.PathHeartbeat, bytes.NewReader([]byte(`{"version":"1.0"}`)))
+	req.Header.Set("Authorization", "Bearer "+n.Key)
+	req.Header.Set(wire.HeaderMachine, n.Machine)
+	req.Header.Set(wire.HeaderUID, "1000")
+
+	w := httptest.NewRecorder()
+	b.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK && w.Code != http.StatusNoContent {
+		t.Errorf("authentication failed after migration: status = %d", w.Code)
 	}
 }

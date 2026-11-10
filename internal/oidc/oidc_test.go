@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -157,7 +158,7 @@ func TestNewClientFetchesDiscoveryDocument(t *testing.T) {
 	ti := newTestIssuer(t)
 	caPath := ti.writeCACert(t)
 
-	client, err := NewClient(ti.config(caPath))
+	client, err := fetchedClient(ti.config(caPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +177,7 @@ func TestNewClientRefusesWrongIssuerInDiscovery(t *testing.T) {
 	ti.wrongIssuer = true
 	caPath := ti.writeCACert(t)
 
-	_, err := NewClient(ti.config(caPath))
+	_, err := fetchedClient(ti.config(caPath))
 	if err == nil {
 		t.Error("client accepted wrong issuer in discovery")
 	}
@@ -188,11 +189,12 @@ func TestNewClientRefusesWrongIssuerInDiscovery(t *testing.T) {
 
 func TestNewClientRefusesPlainHTTPIssuerOffLoopback(t *testing.T) {
 	cfg := Config{
-		Issuer:   "http://example.com",
-		ClientID: "test",
+		Issuer:      "http://example.com",
+		ClientID:    "test",
+		RedirectURL: "https://broker.example/callback",
 	}
 
-	_, err := NewClient(cfg)
+	_, err := fetchedClient(cfg)
 	if err == nil {
 		t.Error("client accepted plain HTTP issuer off loopback")
 	}
@@ -221,7 +223,7 @@ func TestNewClientAcceptsPlainHTTPOnLoopback(t *testing.T) {
 		RedirectURL: server.URL + "/callback",
 	}
 
-	if _, err := NewClient(cfg); err != nil {
+	if _, err := fetchedClient(cfg); err != nil {
 		t.Errorf("client refused loopback HTTP: %v", err)
 	}
 }
@@ -230,7 +232,7 @@ func TestExchangeValidatesClaimsAndReturnsSubject(t *testing.T) {
 	ti := newTestIssuer(t)
 	caPath := ti.writeCACert(t)
 
-	client, err := NewClient(ti.config(caPath))
+	client, err := fetchedClient(ti.config(caPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +260,7 @@ func TestExchangeRefusesExpiredToken(t *testing.T) {
 	ti.expiredToken = true
 	caPath := ti.writeCACert(t)
 
-	client, err := NewClient(ti.config(caPath))
+	client, err := fetchedClient(ti.config(caPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +280,7 @@ func TestExchangeRefusesWrongNonce(t *testing.T) {
 	ti.wrongNonce = true
 	caPath := ti.writeCACert(t)
 
-	client, err := NewClient(ti.config(caPath))
+	client, err := fetchedClient(ti.config(caPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +300,7 @@ func TestExchangeRefusesWrongAudience(t *testing.T) {
 	ti.wrongAud = true
 	caPath := ti.writeCACert(t)
 
-	client, err := NewClient(ti.config(caPath))
+	client, err := fetchedClient(ti.config(caPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +320,7 @@ func TestExchangeRefusesRedirectingTokenEndpoint(t *testing.T) {
 	ti.redirectEndpoint = true
 	caPath := ti.writeCACert(t)
 
-	client, err := NewClient(ti.config(caPath))
+	client, err := fetchedClient(ti.config(caPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +339,7 @@ func TestAuthorizationURLContainsPKCEAndNonce(t *testing.T) {
 	ti := newTestIssuer(t)
 	caPath := ti.writeCACert(t)
 
-	client, err := NewClient(ti.config(caPath))
+	client, err := fetchedClient(ti.config(caPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +348,10 @@ func TestAuthorizationURLContainsPKCEAndNonce(t *testing.T) {
 	nonce := GenerateNonce()
 	verifier := GeneratePKCEVerifier()
 
-	authURL := client.AuthorizationURL(state, nonce, verifier)
+	authURL, err := client.AuthorizationURL(state, nonce, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	u, err := url.Parse(authURL)
 	if err != nil {
@@ -418,7 +423,6 @@ func TestAudienceMatchesHandlesStringAndArray(t *testing.T) {
 func TestPlainHTTPTokenEndpointRefusedOffLoopback(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		// Return discovery with plain HTTP token endpoint
 		scheme := "http"
 		if strings.Contains(r.Host, "localhost") || strings.Contains(r.Host, "127.0.0.1") {
 			scheme = "https"
@@ -442,8 +446,53 @@ func TestPlainHTTPTokenEndpointRefusedOffLoopback(t *testing.T) {
 		RedirectURL: server.URL + "/callback",
 	}
 
-	_, err := NewClient(cfg)
+	_, err := fetchedClient(cfg)
 	if err == nil {
 		t.Error("client accepted plain HTTP token endpoint off loopback")
+	}
+}
+
+// fetchedClient builds a client and fetches its discovery document at once, so a test sees a discovery
+// refusal where it happens.
+func fetchedClient(cfg Config) (*Client, error) {
+	c, err := New(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := c.discover(); err != nil {
+		return nil, err
+	}
+
+	return c, nil
+}
+
+type redirectURLTest struct {
+	Name        string
+	RedirectURL string
+	Refused     bool
+}
+
+var redirectURLTests = []redirectURLTest{
+	{Name: "https", RedirectURL: "https://broker.example/callback"},
+	{Name: "plain HTTP on loopback", RedirectURL: "http://127.0.0.1:8443/callback"},
+	{Name: "plain HTTP on localhost", RedirectURL: "http://localhost:8443/callback"},
+	{Name: "plain HTTP off loopback", RedirectURL: "http://broker.example/callback", Refused: true},
+	{Name: "missing", RedirectURL: "", Refused: true},
+}
+
+// TestNewClientRefusesAPlainHTTPRedirectURLOffLoopback proves the client refuses a redirect URL that is
+// missing or plain HTTP off loopback, as it refuses such an issuer. The provider sends the authorization
+// code there, so a plain-HTTP hop lets anyone on the path take the code. It catches a config the broker
+// accepts and then leaks codes through.
+func TestNewClientRefusesAPlainHTTPRedirectURLOffLoopback(t *testing.T) {
+	for _, test := range redirectURLTests {
+		t.Run(test.Name, func(t *testing.T) {
+			_, err := New(Config{Issuer: "https://issuer.example", ClientID: "test", RedirectURL: test.RedirectURL})
+
+			if refused := errors.Is(err, ErrRedirectURLHTTP); refused != test.Refused {
+				t.Errorf("New with redirect URL %q: %v, want refused %v", test.RedirectURL, err, test.Refused)
+			}
+		})
 	}
 }

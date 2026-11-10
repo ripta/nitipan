@@ -24,15 +24,14 @@ func DeriveUserLabel(userID string) string {
 }
 
 // MigrateV1ToV2 migrates a store from major 1 to major 2. It assigns an owner ID, creates the owner
-// user, binds every pinned label to the owner, and rewrites acting_for on leases held by those labels.
-func MigrateV1ToV2(old []byte) ([]byte, error) {
+// user, binds every pinned label to the owner, and rewrites acting_for on leases held by those labels. The
+// owner's record and each binding carry now.
+func MigrateV1ToV2(old []byte, now time.Time) ([]byte, error) {
 	var v1 Data
 
 	if err := json.Unmarshal(old, &v1); err != nil {
 		return nil, fmt.Errorf("decoding v1 store: %w", err)
 	}
-
-	now := time.Now()
 
 	v2 := newData()
 	v2.Version = record.Version{Major: 2, Minor: 0}
@@ -46,6 +45,22 @@ func MigrateV1ToV2(old []byte) ([]byte, error) {
 
 	owner := assignOwner(v2, now)
 	ownerID, ownerLabel := owner.ID, owner.UserLabel
+
+	// Every key a 1.x store holds predates scheme reports, so each stays marked as one that never reported,
+	// whatever it reports after the upgrade.
+	for _, rec := range v1.Nodes {
+		v2.KeySchemes[rec.KeyHash] = schemeUnreported
+	}
+
+	for _, pin := range v1.Pins {
+		if pin.PinnedHash != "" {
+			v2.KeySchemes[pin.PinnedHash] = schemeUnreported
+		}
+
+		for h := range pin.Pending {
+			v2.KeySchemes[h] = schemeUnreported
+		}
+	}
 
 	pinnedLabels := map[string]bool{}
 

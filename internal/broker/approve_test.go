@@ -3,12 +3,12 @@ package broker
 import (
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/oidc/oidctest"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
@@ -161,28 +161,35 @@ func TestApprovingAFingerprintInAdvanceBindsTheLabelWhenItsKeyArrives(t *testing
 // TestABindingToADifferentUserBouncesEveryMessageHeldForTheLabel proves a label forgotten with mail held
 // for it, then bound to a different user, bounces that mail to its senders with its body, and the new
 // user's node never receives it. One message was sent and never acked, and one queued after the forget.
-// It catches a rebind that bounces only stored mail, which leaves queued mail for the new user's node.
+// The binding also drops the delegation a third user made to the label. It catches a rebind that bounces
+// only stored mail, which leaves queued mail for the new user's node, and one that keeps a delegation the
+// third user made to someone else's machine.
 func TestABindingToADifferentUserBouncesEveryMessageHeldForTheLabel(t *testing.T) {
-	h := newHarness(t, nil)
+	h := newCrossUserHarness(t)
 
-	a, err := h.b.CreateUser("a@example.com", wallStart)
+	// The sender is the owner, whose scope a forgotten label counts in while cross-user features are off,
+	// so its mail to the forgotten label stays mail between one user's machines.
+	a := h.data().Users[h.data().OwnerID]
+
+	b, err := h.b.AdmitUser(createIssuer, "b@example.com", "b@example.com", wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	b, err := h.b.CreateUser("b@example.com", wallStart)
+	c, err := h.b.AdmitUser(createIssuer, "c@example.com", "c@example.com", wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for _, n := range []nodeID{alice, bob} {
-		if err := h.b.BindLabelToUser(h.registerMail(n), a.ID, wallStart); err != nil {
-			t.Fatal(err)
-		}
+		h.registerMail(n)
+		h.bindNode(t, n, a.ID)
 	}
 
 	fromLabel := h.data().Nodes[alice.key().String()].Label
 	toLabel := h.data().Nodes[bob.key().String()].Label
+
+	h.delegate(t, c, toLabel)
 
 	h.reportSessions(alice, senderSession)
 	h.reportSessions(bob, recipientSession)
@@ -211,10 +218,14 @@ func TestABindingToADifferentUserBouncesEveryMessageHeldForTheLabel(t *testing.T
 
 	newBob := nodeID{Machine: bob.Machine, UID: bob.UID, Key: "reissued"}
 	h.registerMail(newBob)
+	h.bindNode(t, newBob, b.ID)
 
-	if err := h.b.BindLabelToUser(toLabel, b.ID, wallStart.Add(time.Hour)); err != nil {
-		t.Fatal(err)
+	if _, ok := h.data().Delegations[c.ID][toLabel]; ok {
+		t.Error("the binding to a different user kept C's delegation to the label")
 	}
+
+	// The new user's node is served only once cross-user features are on.
+	h.crossUserOn(t)
 
 	bodies := map[string]string{mailIDs[0]: "sent, never acked", mailIDs[1]: "queued after the forget"}
 
@@ -246,27 +257,25 @@ func TestABindingToADifferentUserBouncesEveryMessageHeldForTheLabel(t *testing.T
 	}
 }
 
-// bindOnPage stores a pairing code for a label and submits the page's bind form for it as the signed-in
-// user, as a user binding a machine on the sign-in page does.
-func bindOnPage(t *testing.T, h *harness, si *signInIssuer, label string) *httptest.ResponseRecorder {
+// pagePairingCode is the code the page rebind tests pair with.
+const pagePairingCode = "page-pairing-code-words"
+
+// bindOnPage has node n send a pairing code for label and submits the page's bind form with it as the
+// signed-in user, as a user binding a machine on the sign-in page does. A node the broker refuses to pair
+// leaves no code, so the bind meets the page's answer to a wrong code.
+func bindOnPage(t *testing.T, h *harness, page *oidctest.Browser, n nodeID, label string) (status int, body string) {
 	t.Helper()
 
-	storePairingCode(t, h.b, label, "word-word-word-word", h.wall.Now().Add(PairingCodeExpiry))
+	h.pair(n, pagePairingCode)
 
-	req := httptest.NewRequest(http.MethodPost, "/bind-submit", nil)
-	req.PostForm = url.Values{"token": {startMailAction(t, h, si, "bind")}, "label": {label}, "code": {"word-word-word-word"}}
-
-	w := httptest.NewRecorder()
-	h.b.handleBindSubmit(w, req)
-
-	return w
+	return page.Submit("bind", url.Values{"label": {label}, "code": {pagePairingCode}})
 }
 
-// pageRebindWorld is a broker with the sign-in page. Alice's and Bob's labels are bound to A and hold
-// mail sessions, and the page's signer is B.
+// pageRebindWorld is a broker with the sign-in page and cross-user features off. Alice's and Bob's labels
+// are bound to the owner A and hold mail sessions, and the page's signer is B.
 type pageRebindWorld struct {
-	h  *harness
-	si *signInIssuer
+	h    *harness
+	page *oidctest.Browser
 
 	a, b             UserRecord
 	fromLabel, label string
@@ -276,25 +285,22 @@ type pageRebindWorld struct {
 func newPageRebindWorld(t *testing.T) *pageRebindWorld {
 	t.Helper()
 
-	h, si := newSignInHarness(t)
+	iss := oidctest.New(t, "b-sub", "b@example.com")
+	h, page := pageHarness(t, iss)
 
-	b, err := h.b.AdmitUser(si.issuer, si.subject, si.email, wallStart)
+	b, err := h.b.AdmitUser(iss.URL, "b-sub", "b@example.com", wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	a, err := h.b.CreateUser("a@example.com", wallStart)
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := h.data().Users[h.data().OwnerID]
 
 	for _, n := range []nodeID{alice, bob} {
-		if err := h.b.BindLabelToUser(h.registerMail(n), a.ID, wallStart); err != nil {
-			t.Fatal(err)
-		}
+		h.registerMail(n)
+		h.bindNode(t, n, a.ID)
 	}
 
-	w := &pageRebindWorld{h: h, si: si, a: a, b: b}
+	w := &pageRebindWorld{h: h, page: page, a: a, b: b}
 	w.fromLabel = h.data().Nodes[alice.key().String()].Label
 	w.label = h.data().Nodes[bob.key().String()].Label
 
@@ -323,10 +329,11 @@ func TestAPageRebindStampsItsBouncesWithTheBrokersClock(t *testing.T) {
 
 	rebindAt := wallStart.Add(time.Hour)
 	w.h.wall.Set(rebindAt)
-	w.h.registerMail(nodeID{Machine: bob.Machine, UID: bob.UID, Key: "reissued"})
+	reissued := nodeID{Machine: bob.Machine, UID: bob.UID, Key: "reissued"}
+	w.h.registerMail(reissued)
 
-	if resp := bindOnPage(t, w.h, w.si, w.label); resp.Code != http.StatusOK {
-		t.Fatalf("page bind: status %d, %s", resp.Code, resp.Body.String())
+	if status, body := bindOnPage(t, w.h, w.page, reissued, w.label); status != http.StatusOK {
+		t.Fatalf("page bind: status %d, %s", status, body)
 	}
 
 	if got := w.h.data().Bindings[w.label]; got.UserID != w.b.ID || !got.BoundAt.Equal(rebindAt) {
@@ -363,7 +370,7 @@ func TestAPinnedLabelIsNeverReboundWhileTheBrokerAwaitsAnAck(t *testing.T) {
 		t.Fatalf("A's node got %+v", got)
 	}
 
-	if resp := bindOnPage(t, w.h, w.si, w.label); resp.Code == http.StatusOK {
+	if status, _ := bindOnPage(t, w.h, w.page, bob, w.label); status == http.StatusOK {
 		t.Fatal("the page bound a pinned label to a different user without a forget")
 	}
 
@@ -422,16 +429,13 @@ func TestApprovingAPinnedLabelAgainBindsItUnlessACoworkerHoldsIt(t *testing.T) {
 		t.Errorf("binding after approving again = %+v, want the owner", got)
 	}
 
-	coworker, err := h.b.CreateUser("coworker@example.com", wallStart)
+	coworker, err := h.b.AdmitUser(createIssuer, "coworker@example.com", "coworker@example.com", wallStart)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	coworkerLabel := h.register(bob).Label
-
-	if err := h.b.BindLabelToUser(coworkerLabel, coworker.ID, wallStart); err != nil {
-		t.Fatal(err)
-	}
+	h.register(bob)
+	coworkerLabel := h.bindNode(t, bob, coworker.ID)
 
 	if _, err := h.b.Approve(coworkerLabel, wire.Fingerprint(wire.KeyHash(bob.Key))); !errors.Is(err, ErrAlreadyPinned) ||
 		!strings.Contains(err.Error(), coworker.UserLabel) {
@@ -440,5 +444,54 @@ func TestApprovingAPinnedLabelAgainBindsItUnlessACoworkerHoldsIt(t *testing.T) {
 
 	if got := h.data().Bindings[coworkerLabel]; got.UserID != coworker.ID {
 		t.Errorf("the coworker's binding = %+v, want it kept", got)
+	}
+}
+
+// TestRebindToSameUserKeepsMailAndDelegations proves a label forgotten and then bound again to the same
+// user, as a reinstalled machine is, keeps the mail queued for it and a delegation another user made to it.
+// It catches a rebind that treats every binding after a forget as a new user, which bounces the user's own
+// mail and drops a delegation nobody revoked.
+func TestRebindToSameUserKeepsMailAndDelegations(t *testing.T) {
+	h := newCrossUserHarness(t)
+
+	a := h.data().Users[h.data().OwnerID]
+
+	c, err := h.b.AdmitUser(createIssuer, "c@example.com", "c@example.com", wallStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, n := range []nodeID{alice, bob} {
+		h.registerMail(n)
+		h.bindNode(t, n, a.ID)
+	}
+
+	toLabel := h.data().Nodes[bob.key().String()].Label
+
+	h.delegate(t, c, toLabel)
+
+	h.reportSessions(alice, senderSession)
+	h.reportSessions(bob, recipientSession)
+
+	to := h.mailName(toLabel, recipientSession)
+
+	if err := h.b.Forget(toLabel); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp := h.send(alice, mailIDs[0], to, "queued after the forget", senderSession); resp.StatusCode != http.StatusOK {
+		t.Fatalf("send to the forgotten label: status %d", resp.StatusCode)
+	}
+
+	newBob := nodeID{Machine: bob.Machine, UID: bob.UID, Key: "reissued"}
+	h.registerMail(newBob)
+	h.bindNode(t, newBob, a.ID)
+
+	if got := h.data().Mail[mailIDs[0]]; got.Bounced {
+		t.Errorf("message = %+v, bounced by a rebind to the same user", got)
+	}
+
+	if _, ok := h.data().Delegations[c.ID][toLabel]; !ok {
+		t.Error("the rebind to the same user dropped C's delegation to the label")
 	}
 }

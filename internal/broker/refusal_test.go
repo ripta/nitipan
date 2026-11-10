@@ -202,27 +202,32 @@ func TestTheHiddenHolderIsToldOncePerCoworkerAcrossARestart(t *testing.T) {
 	}
 }
 
-// TestAnOverlapReportShowsNoMirrorTheAskerCannotDiscover proves V's `shared` claim on a name U's
-// mirrored `machine` lease overlaps carries no overlap naming that mirror, while U's own claim on the
-// name still reports it. It catches an overlap report that skips the discovery rule for `shared` grants,
-// which would hand V the local paths and names discovery hides.
+// TestAnOverlapReportShowsNoMirrorTheAskerCannotDiscover proves V's claim on a name U's mirrored `machine`
+// lease overlaps carries no overlap naming that mirror, while U's own claim on the name still reports it.
+// For a `user` claim the report stays within one user's scope, and for a `shared` claim it follows the
+// discovery rule. It catches an overlap report that skips either rule, which would hand V the local paths
+// and names discovery hides.
 func TestAnOverlapReportShowsNoMirrorTheAskerCannotDiscover(t *testing.T) {
-	w := newAuthzWorld(t, true)
-	entries := svcName("svc/a")
+	for _, reach := range []string{wire.ReachUser, wire.ReachShared} {
+		t.Run(reach, func(t *testing.T) {
+			w := newAuthzWorld(t, true)
+			entries := svcName("svc/a")
 
-	w.h.snapshot(w.uNode, machineMirror(t, "MU", "hu", &wire.Derived{State: wire.DerivedOK, Derivation: 1, Entries: entries}, "/src/svc/a"))
+			w.h.snapshot(w.uNode, machineMirror(t, "MU", "hu", &wire.Derived{State: wire.DerivedOK, Derivation: 1, Entries: entries}, "/src/svc/a"))
 
-	res, raw := w.claimRaw(t, w.vNode, "LV", wire.ReachShared, entries, "v", w.v.UserLabel)
-	if res.Code != wire.CodeGranted || len(res.Overlaps) != 0 || bytes.Contains(raw, []byte("MU")) {
-		t.Fatalf("V's shared claim reports U's mirror: %s", raw)
-	}
+			res, raw := w.claimRaw(t, w.vNode, "LV", reach, entries, "v", w.v.UserLabel)
+			if res.Code != wire.CodeGranted || len(res.Overlaps) != 0 || bytes.Contains(raw, []byte("MU")) {
+				t.Fatalf("V's %s claim reports U's mirror: %s", reach, raw)
+			}
 
-	if res := w.releaseAs(t, w.vNode, "release-v", "LV", "v"); res.Code != wire.CodeReleased {
-		t.Fatalf("V's release: %+v", res)
-	}
+			if res := w.releaseAs(t, w.vNode, "release-v", "LV", "v"); res.Code != wire.CodeReleased {
+				t.Fatalf("V's release: %+v", res)
+			}
 
-	res, raw = w.claimRaw(t, w.uNode, "LU", wire.ReachShared, entries, "u", w.u.UserLabel)
-	if res.Code != wire.CodeGranted || len(res.Overlaps) != 1 || res.Overlaps[0].Mirror.Lease != "MU" {
-		t.Fatalf("U's shared claim does not report U's own mirror: %s", raw)
+			res, raw = w.claimRaw(t, w.uNode, "LU", reach, entries, "u", w.u.UserLabel)
+			if res.Code != wire.CodeGranted || len(res.Overlaps) != 1 || res.Overlaps[0].Mirror.Lease != "MU" {
+				t.Fatalf("U's %s claim does not report U's own mirror: %s", reach, raw)
+			}
+		})
 	}
 }

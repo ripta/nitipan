@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,9 @@ import (
 
 // authzWorld is a broker with two users. U has one label of their own. V has one label of their own and
 // a shared agent's label, which holds U's delegation.
+//
+// With cross-user features off, the broker serves only its owner's labels and unbound labels. U is then the
+// owner, and V's own label stays unbound, so the world is the one scope the broker runs.
 type authzWorld struct {
 	h *harness
 
@@ -32,15 +36,20 @@ type authzWorld struct {
 func newAuthzWorld(t *testing.T, crossUser bool) *authzWorld {
 	t.Helper()
 
-	h := newHarness(t, nil)
+	h := newCrossUserHarness(t)
 	now := time.Now()
 
-	u, err := h.b.CreateUser("u@example.com", now)
-	if err != nil {
-		t.Fatal(err)
+	u := h.data().Users[h.data().OwnerID]
+
+	if crossUser {
+		var err error
+
+		if u, err = h.b.AdmitUser(createIssuer, "u@example.com", "u@example.com", now); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	v, err := h.b.CreateUser("v@example.com", now)
+	v, err := h.b.AdmitUser(createIssuer, "v@example.com", "v@example.com", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,23 +62,19 @@ func newAuthzWorld(t *testing.T, crossUser bool) *authzWorld {
 	}
 
 	w.uLabel = w.bind(t, w.uNode, u.ID)
-	w.vLabel = w.bind(t, w.vNode, v.ID)
+
+	if crossUser {
+		w.vLabel = w.bind(t, w.vNode, v.ID)
+	} else {
+		w.vLabel = h.register(w.vNode).Label
+	}
+
 	w.agentLabel = w.bind(t, w.agent, v.ID)
 
 	h.delegate(t, u, w.agentLabel)
 
 	if crossUser {
-		h.b.mu.Lock()
-		err := h.b.commit(func(d *Data) error {
-			d.CrossUserEnabled = true
-
-			return nil
-		})
-		h.b.mu.Unlock()
-
-		if err != nil {
-			t.Fatal(err)
-		}
+		h.crossUserOn(t)
 	}
 
 	return w
@@ -106,6 +111,17 @@ func (h *harness) delegate(t *testing.T, u UserRecord, label string) {
 	}
 }
 
+// grantMail lets granter receive mail from sender, as granter's page action does.
+func (h *harness) grantMail(t *testing.T, granter, sender UserRecord) {
+	t.Helper()
+
+	h.signIn(t, granter)
+
+	if _, _, err := h.b.GrantMail(testDelegationIssuer, granter.ID, sender.UserLabel, h.wall.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // undelegate revokes u's delegation to label, as u's page action does.
 func (h *harness) undelegate(t *testing.T, u UserRecord, label string) {
 	t.Helper()
@@ -120,12 +136,9 @@ func (h *harness) undelegate(t *testing.T, u UserRecord, label string) {
 func (w *authzWorld) bind(t *testing.T, n nodeID, userID string) string {
 	t.Helper()
 
-	label := w.h.register(n).Label
-	if err := w.h.b.BindLabelToUser(label, userID, time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	w.h.register(n)
 
-	return label
+	return w.h.bindNode(t, n, userID)
 }
 
 // claimAs claims a lease from node n, with acting_for set to the given user label, and requires a grant.
@@ -258,7 +271,7 @@ func TestACoworkerCannotForceBreakAnotherUsersSharedLease(t *testing.T) {
 }
 
 // TestWithCrossUserOffAnyNodeMayForceBreak proves the single-scope break rule holds while cross-user
-// features are off: a node bound to another user may still force-break a lease. It catches a cross-user
+// features are off: an unbound label may still force-break the owner's lease. It catches a cross-user
 // break check that runs before the owner turns the features on.
 func TestWithCrossUserOffAnyNodeMayForceBreak(t *testing.T) {
 	w := newAuthzWorld(t, false)
@@ -355,8 +368,9 @@ func TestAnAgentsLeaseForUCountsOnlyInUsUserScope(t *testing.T) {
 
 // TestRevokingADelegationTellsTheAgentsNode proves U's revoke of the agent's delegation ends the
 // agent's lease for U as an end fact queued for the agent's node, which writes the holder its notice,
-// and leaves the agent's lease for its own user live. It catches a revoke that drops leases silently,
-// and one that ends every lease the label holds.
+// and leaves the agent's lease for its own user live. A renew of the ended lease answers ended and does
+// not revive it. It catches a revoke that drops leases silently, one that ends every lease the label
+// holds, and one a renewal undoes.
 func TestRevokingADelegationTellsTheAgentsNode(t *testing.T) {
 	w := newAuthzWorld(t, true)
 	w.claimAs(t, w.agent, "L-for-u", wire.ReachUser, name("svc"), "g", w.u.UserLabel)
@@ -370,6 +384,14 @@ func TestRevokingADelegationTellsTheAgentsNode(t *testing.T) {
 
 	if !w.announced(t, w.agent, "L-for-u") {
 		t.Fatal("the agent's node was not told that the revoke ended L-for-u")
+	}
+
+	if got := w.h.renew(w.agent, "L-for-u"); len(got) != 1 || got[0].Code != wire.CodeEnded || got[0].EndedBy != "delegation revoked" {
+		t.Fatalf("renewing L-for-u after the revoke: %+v, want ended by the revoke", got)
+	}
+
+	if g := w.grant("L-for-u"); g == nil || g.State != wire.StateEnded {
+		t.Fatalf("L-for-u after the renew: %+v, want it still ended", g)
 	}
 
 	if g := w.grant("L-own"); g == nil || g.State != wire.StateLive {
@@ -562,9 +584,9 @@ func TestADelegatedLabelDiscoversTheDelegatingUsersLeases(t *testing.T) {
 	}
 }
 
-// TestWithCrossUserOffDiscoveryFiltersNothing proves discovery shows every lease while cross-user
-// features are off, as the single scope it then is. It catches a filter that runs before the owner
-// turns the features on.
+// TestWithCrossUserOffDiscoveryFiltersNothing proves discovery from an unbound label shows every lease of
+// the owner's while cross-user features are off, as the single scope it then is. It catches a filter that
+// runs before the owner turns the features on.
 func TestWithCrossUserOffDiscoveryFiltersNothing(t *testing.T) {
 	w, names := discoveryWorld(t, false)
 	d := w.discover(t, w.vNode, names, "name-u")
@@ -581,9 +603,9 @@ func TestWithCrossUserOffDiscoveryFiltersNothing(t *testing.T) {
 }
 
 // TestAnOldVersionClaimNamingADelegatorIsSubstituted proves a claim from before explicit acting_for
-// acts as the label's own bound user, even when it names a user who delegated to the label. It catches
-// a broker that honors a delegation on an unauthenticated value, which an older CLI fills with an OS
-// user name that can collide with a user label.
+// acts as the label's own bound user, whether it names a user who delegated to the label or one who did
+// not. It catches a broker that honors a delegation on an unauthenticated value, which an older CLI fills
+// with an OS user name that can collide with a user label, and one that passes such a value through.
 func TestAnOldVersionClaimNamingADelegatorIsSubstituted(t *testing.T) {
 	w := newAuthzWorld(t, true)
 
@@ -595,6 +617,14 @@ func TestAnOldVersionClaimNamingADelegatorIsSubstituted(t *testing.T) {
 	}, &res)
 	if status != http.StatusOK || res.Code != wire.CodeGranted || res.Lease.ActingFor != w.v.UserLabel {
 		t.Fatalf("old-version claim naming U: status %d, %+v, want a grant for the agent's own user", status, res)
+	}
+
+	status = w.h.call(w.vNode, wire.PathClaim, wire.Claim{
+		Version: wire.Current, ID: "L2", Reach: wire.ReachUser, Entries: name("other"), Derivation: 1, Anchor: "anchor-L2",
+		Holder: holder("v"), ActingFor: w.u.UserLabel,
+	}, &res)
+	if status != http.StatusOK || res.Code != wire.CodeGranted || res.Lease.ActingFor != w.v.UserLabel {
+		t.Fatalf("old-version claim naming U from a label U never delegated to: status %d, %+v, want a grant for V", status, res)
 	}
 }
 
@@ -618,7 +648,7 @@ func endedForU(t *testing.T) *authzWorld {
 // every lease held for the user, which would tell the holder the wrong cause and send a second end.
 func TestRevokingLeavesEndFactsAsTheyWere(t *testing.T) {
 	revokes := map[string]func(w *authzWorld) error{
-		"revoke user": func(w *authzWorld) error { return w.h.b.RevokeUser(w.u.ID) },
+		"revoke user": func(w *authzWorld) error { _, err := w.h.b.RevokeUser(w.u.ID); return err },
 		"revoke delegation": func(w *authzWorld) error {
 			_, err := w.h.b.RevokeDelegation(testDelegationIssuer, w.u.ID, w.agentLabel)
 
@@ -688,7 +718,7 @@ func TestARevokedUserCannotGrantOrRevokeADelegation(t *testing.T) {
 	w := newAuthzWorld(t, true)
 	w.h.signIn(t, w.v)
 
-	if err := w.h.b.RevokeUser(w.v.ID); err != nil {
+	if _, err := w.h.b.RevokeUser(w.v.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -706,5 +736,99 @@ func TestARevokedUserCannotGrantOrRevokeADelegation(t *testing.T) {
 
 	if granted {
 		t.Error("the revoked user's grant took effect")
+	}
+}
+
+// TestRevokingAUserEndsEveryLeaseADelegationOfTheirsAuthorized proves revoking U ends both kinds of lease a
+// delegation authorized: the shared agent's lease for U, and the lease U's own label holds for V under V's
+// delegation. Each end tells the holder's node. Revoking U drops the delegations naming U in both
+// directions. It catches a revoke that drops V's delegation to U's label but leaves the lease it
+// authorized live, so U's forgotten machine keeps holding a name for V.
+func TestRevokingAUserEndsEveryLeaseADelegationOfTheirsAuthorized(t *testing.T) {
+	w := newAuthzWorld(t, true)
+	w.h.delegate(t, w.v, w.uLabel)
+
+	w.claimAs(t, w.agent, "L-agent-for-u", wire.ReachUser, name("agent"), "g", w.u.UserLabel)
+	w.claimAs(t, w.uNode, "L-u-for-v", wire.ReachUser, name("for-v"), "u", w.v.UserLabel)
+	w.claimAs(t, w.vNode, "L-v", wire.ReachUser, name("v"), "v", w.v.UserLabel)
+
+	rec := w.h.admin(http.MethodPost, AdminPathRevokeUser, map[string]string{"user_id": w.u.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke-user: %d %s", rec.Code, rec.Body)
+	}
+
+	var revoked RevokedUser
+	if err := json.NewDecoder(rec.Body).Decode(&revoked); err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(revoked.Labels, []string{w.uLabel}) || !slices.Equal(revoked.Leases, []string{"L-agent-for-u", "L-u-for-v"}) ||
+		revoked.Delegations != 2 {
+		t.Errorf("revoke-user answered %+v, want U's label, both leases, and both delegations", revoked)
+	}
+
+	for _, id := range []string{"L-agent-for-u", "L-u-for-v"} {
+		if g := w.grant(id); g == nil || g.State != wire.StateEnded || g.EndedBy != "user revoked" {
+			t.Errorf("%s after revoking U: %+v, want it ended by the revoke", id, g)
+		}
+	}
+
+	if !w.announced(t, w.agent, "L-agent-for-u") {
+		t.Error("the agent's node was not told its lease for U ended")
+	}
+
+	if g := w.grant("L-v"); g == nil || g.State != wire.StateLive {
+		t.Errorf("V's own lease after revoking U: %+v, want it live", g)
+	}
+
+	d := w.h.data()
+
+	if _, ok := d.Delegations[w.u.ID]; ok {
+		t.Errorf("U's delegations survive the revoke: %v", d.Delegations[w.u.ID])
+	}
+
+	if _, ok := d.Delegations[w.v.ID][w.uLabel]; ok {
+		t.Error("V's delegation to U's label survives the revoke")
+	}
+}
+
+// TestARevokeWhoseStoreWriteFailsLeavesTheUserWhole proves revoking a user is one store write. When it
+// fails, the user keeps every label, admission, delegation, and lease, and the broker stops. It cannot
+// catch a revoke split over several writes whose first one fails, since that one also changes nothing.
+// It pins the single write, so no failure leaves a user half revoked.
+func TestARevokeWhoseStoreWriteFailsLeavesTheUserWhole(t *testing.T) {
+	w := newAuthzWorld(t, true)
+	w.claimAs(t, w.agent, "L-agent-for-u", wire.ReachUser, name("agent"), "g", w.u.UserLabel)
+
+	before, err := json.Marshal(w.h.data())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.RemoveAll(filepath.Dir(w.h.path)); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := w.h.admin(http.MethodPost, AdminPathRevokeUser, map[string]string{"user_id": w.u.ID}); rec.Code/100 == 2 {
+		t.Fatalf("revoke-user with a failing store write: %d %s", rec.Code, rec.Body)
+	}
+
+	after, err := json.Marshal(w.h.data())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(before, after) {
+		t.Errorf("a failed revoke changed the store:\nbefore %s\nafter  %s", before, after)
+	}
+
+	if g := w.grant("L-agent-for-u"); g == nil || g.State != wire.StateLive {
+		t.Errorf("the agent's lease after a failed revoke: %+v, want it live", g)
+	}
+
+	select {
+	case <-w.h.b.Done():
+	default:
+		t.Error("a failed store write did not stop the broker")
 	}
 }

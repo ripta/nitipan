@@ -825,7 +825,7 @@ func TestEveryStageOfAMessageCarriesAMonotonicRank(t *testing.T) {
 }
 
 func TestTheNetworkHandlerServesNoApprovalRoute(t *testing.T) {
-	h := newHarness(t, nil)
+	h := newCrossUserHarness(t)
 
 	adminPaths := []string{
 		AdminPathPending, AdminPathApprove, AdminPathForget, AdminPathConfirmUpgrade, AdminPathAdmissions, AdminPathAdmit,
