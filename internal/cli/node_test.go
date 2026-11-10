@@ -218,3 +218,21 @@ func TestALockHolderReapsBrokerRequestsAndRepliesOfADeadRequester(t *testing.T) 
 		}
 	}
 }
+
+func TestSetupNodePinsCodexExecutionInputsInThePrintedPlist(t *testing.T) {
+	w := newWorld(t)
+	term := w.terminal(900)
+	term.env["CODEX_HOME"] = "/trusted/custom & home"
+	var out, errOut bytes.Buffer
+	deps := w.deps(term, &out, &errOut)
+	deps.LookPath = func(name string) (string, error) {
+		if name == "codex" {
+			return "/trusted/bin/codex", nil
+		}
+		return "", errors.New("not on path")
+	}
+	if status := Execute(deps, []string{"setup", "node"}); status != exitcode.OK {
+		t.Fatalf("status %d: %s", status, errOut.String())
+	}
+	wantContains(t, "stdout", out.String(), "<string>--codex-path</string>", "<string>/trusted/bin/codex</string>", "<string>--codex-home</string>", "<string>/trusted/custom &amp; home</string>")
+}

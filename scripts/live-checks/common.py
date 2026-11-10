@@ -415,3 +415,49 @@ class FakeServer:
     def stop(self) -> None:
         self.server.shutdown()
         self.server.server_close()
+
+
+MAIL_FILES: set[Path] = set()
+
+
+def store_mail(session: str, body: str) -> Path:
+    """Publish synthetic mail at the node's durable-output boundary, with an owned random ID."""
+    from datetime import datetime, timezone
+    value = uuid.uuid4().int
+    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    message = "".join(alphabet[(value >> (5 * i)) & 31] for i in reversed(range(26)))
+    inbox = STATE / "mail/inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    path = inbox / f"{session}.{message}.json"
+    value = {"version": "1.0", "id": message, "kind": "mail", "to_session": session,
+             "to_address": "fixture@local", "sender": "fixture@sender", "sender_verified": True,
+             "body": body, "stored_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+    temp = inbox / f".harness-{RUNID}-{message}"
+    MAIL_FILES.update((path, temp, STATE / "mail/read" / f"{message}.json"))
+    temp.write_text(json.dumps(value))
+    temp.chmod(0o600)
+    temp.replace(path)
+    return path
+
+
+def sweep_mail() -> None:
+    """Remove only readable files belonging to this run's sessions and generated message IDs."""
+    registrations = STATE / "mail/reg"
+    for path in registrations.glob("*.json"):
+        try:
+            reg = json.loads(path.read_text())
+            if reg.get("current") not in SESSIONS or reg.get("version") != "1.0":
+                continue
+            identity = reg["identity"]
+            if path.name != identity + ".json":
+                continue
+            MAIL_FILES.add(path)
+            MAIL_FILES.add(STATE / "mail/ring" / (identity + ".lock"))
+            for sub in ("ring", "wait"):
+                sibling = STATE / "mail" / sub / path.name
+                if sibling.exists() and json.loads(sibling.read_text()).get("version") == "1.0":
+                    MAIL_FILES.add(sibling)
+        except (OSError, ValueError, KeyError):
+            continue
+    for path in MAIL_FILES:
+        path.unlink(missing_ok=True)

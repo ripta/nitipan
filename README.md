@@ -359,8 +359,19 @@ key. No agent session may run as the broker's OS user on the broker host.
 
 For Claude Code, `nitipan setup claude` prints the hooks. A waiter hook wakes an idle session when mail arrives. The node
 rings the session's inbox socket when no waiter is armed. Every ring only says that mail is pending. Only `nitipan mail
-read` removes it. A Claude Code setting of `crossSessionInbound: refuse` stops the waiter. Codex and opencode delivery
-comes later.
+read` removes it. A Claude Code setting of `crossSessionInbound: refuse` stops the waiter. Codex and opencode also register their mailboxes at session start or through the server plugin, and on every mail
+call. Codex's SessionStart and turn hooks are printed by `setup codex`. The node rings idle Codex sessions through
+`codex queue`. Save the LaunchAgent printed by `setup node` with the Codex executable and `CODEX_HOME` it resolves.
+The node executes only those trusted values. A session using another `CODEX_HOME` gets turn reminders and no queue
+push; `mail status` explains the mismatch. Queueing also reaches an embedded Codex TUI without a daemon in the tested
+Codex version.
+
+The opencode server plugin watches for mail and rings through `session.prompt`. Its context hook repeats unread-mail
+reminders during later turns and tool steps, even after an ignored wake. These reminders start no new turn. It
+publishes presence while loaded,
+and `mail status` reports missing or stale presence. Restart the service after replacing its installed plugin. Sessions
+on one shared host keep separate mailboxes and ring ledgers. Every wake path only signals; the session runs
+`nitipan mail read` to consume its mail.
 
 ## Codex and opencode
 

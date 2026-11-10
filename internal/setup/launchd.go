@@ -26,7 +26,9 @@ type DaemonInput struct {
 	// Home is the home directory from the user database.
 	Home string
 
-	UID int
+	CodexPath string
+	CodexHome string
+	UID       int
 }
 
 // DaemonLabel is the launchd label of a daemon.
@@ -80,6 +82,10 @@ func daemonText(in DaemonInput, daemon, intro string) string {
 	plist := PlistPath(in, daemon)
 	logPath := filepath.Join(in.Home, "Library", "Logs", "nitipan", daemon+".log")
 
+	extra := ""
+	if daemon == Node && in.CodexPath != "" {
+		extra = fmt.Sprintf("\n    <string>--codex-path</string>\n    <string>%s</string>\n    <string>--codex-home</string>\n    <string>%s</string>", html.EscapeString(in.CodexPath), html.EscapeString(in.CodexHome))
+	}
 	return fmt.Sprintf(`%[1]s
 Save this as %[2]s:
 
@@ -92,7 +98,7 @@ Save this as %[2]s:
   <key>ProgramArguments</key>
   <array>
     <string>%[4]s</string>
-    <string>%[5]s</string>
+    <string>%[5]s</string>%[9]s
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -116,5 +122,5 @@ To stop it:
 
 nitipan prints these steps and writes nothing.
 `, intro, plist, DaemonLabel(daemon), html.EscapeString(in.Executable), daemon, html.EscapeString(logPath),
-		filepath.Dir(logPath), in.UID)
+		filepath.Dir(logPath), in.UID, extra)
 }

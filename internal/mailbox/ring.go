@@ -32,6 +32,9 @@ type Ledger struct {
 // MailKey is the ledger key of a mail message.
 func MailKey(id string) string { return "mail:" + id }
 
+// PluginFreshness bounds how long a plugin presence remains current without a heartbeat.
+const PluginFreshness = 15 * time.Second
+
 // RingRetention is how long a rung key stays in the ledger.
 const RingRetention = 8 * 24 * time.Hour
 
@@ -275,7 +278,7 @@ func Waiter(root, identity string) (WaiterPresence, bool) {
 // Disarm removes the presence file when it still names the process.
 func Disarm(root string, w WaiterPresence) {
 	cur, ok := Waiter(root, w.Identity)
-	if !ok || cur.PID != w.PID || !cur.Start.Equal(w.Start) {
+	if !ok || cur.PID != w.PID || !cur.Start.Equal(w.Start) || WaiterProblem(root, w.Identity) != "" {
 		return
 	}
 

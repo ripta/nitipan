@@ -639,3 +639,40 @@ func TestClaimAndUnclaimWriteNoLedgerForAnIdentityWithoutARegistration(t *testin
 		t.Errorf("a ring ledger exists for an identity with no registration: %v", err)
 	}
 }
+
+// A shared host must not turn another conversation into a pre-clear alias. Claude's process aliases
+// are covered separately; these sessions exist concurrently.
+func TestSharedHostMailRegistrationsKeepConcurrentSessionsSeparate(t *testing.T) {
+	root := t.TempDir()
+	for _, agent := range []string{"codex", "opencode"} {
+		one := reg(25, "first")
+		one.Agent = agent
+		a, err := Refresh(root, one, t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		two := one
+		two.Current = "second"
+		b, err := Refresh(root, two, t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.Identity == b.Identity || b.Holds("first") {
+			t.Fatalf("%s merged concurrent sessions: %+v %+v", agent, a, b)
+		}
+	}
+}
+
+func TestForeignRegistrationWithAnAbsentLocalPIDStaysUnknownWhileALocalDeadHostIsDead(t *testing.T) {
+	table := proctest.New(record.PlatformDarwin, 1)
+	checker := &liveness.Checker{Procs: table, Local: machine}
+	foreign := reg(999, "foreign")
+	foreign.Machine = record.Machine{ID: "another-machine", Host: "other"}
+	if !Live(foreign, checker) {
+		t.Fatal("a foreign machine's missing local PID was classified dead")
+	}
+	local := reg(999, "local")
+	if Live(local, checker) {
+		t.Fatal("a genuinely dead local process was classified live")
+	}
+}

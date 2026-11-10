@@ -178,7 +178,26 @@ func codex(in Input) string {
      command = %[4]s
      timeout = 3
 
-   Codex runs a hook only after you trust it. Open /hooks in Codex and trust both entries.
+   Codex runs a hook only after you trust it. Open /hooks in Codex and trust the entries.
+
+   For mail reminders during turns, add both hooks and trust them too:
+
+     [[hooks.UserPromptSubmit]]
+     [[hooks.UserPromptSubmit.hooks]]
+     type = "command"
+     command = %[5]s
+     timeout = 3
+
+     [[hooks.PostToolUse]]
+     [[hooks.PostToolUse.hooks]]
+     type = "command"
+     command = %[5]s
+     timeout = 3
+
+   SessionStart also registers the mailbox. Turn reminders never consume mail. The node wakes idle
+   sessions through codex queue, using only the Codex path and home printed by nitipan setup node.
+   Save that LaunchAgent outside the sandbox. A session under a different CODEX_HOME gets reminders
+   but no queue push; nitipan mail status explains the mismatch.
 
 3. A short unload delay. Put this line at the top of ~/.codex/config.toml, before any [table]:
 
@@ -196,7 +215,7 @@ nitipan reads config.toml and hooks.json under %[2]s. It trusts a file only
 when the file is older than the running host, so a change you have not restarted for reads as
 unknown.
 `, in.StateDir, "$CODEX_HOME (default ~/.codex)", tomlString(shellWord(in.Executable)+" hook session-start"),
-		tomlString(shellWord(in.Executable)+" hook session-end"))
+		tomlString(shellWord(in.Executable)+" hook session-end"), tomlString(shellWord(in.Executable)+" hook mail-turn"))
 }
 
 var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
@@ -212,7 +231,9 @@ func shellWord(s string) string {
 
 func opencode(in Input) string {
 	return fmt.Sprintf(`opencode needs nitipan's two plugins before a session can acquire a lease. They mark the sessions
-that a TUI has open and that the service is running.
+that a TUI has open and that the service is running. The server plugin also registers mailboxes,
+watches for pending mail, publishes its presence, and rings with session.prompt. Only mail read
+consumes a message. A missing or stale watcher is visible in nitipan mail status.
 
 1. Install the plugins into your opencode plugins directory. This writes plugin files and nothing
    else, and it bakes nitipan's absolute path into them:

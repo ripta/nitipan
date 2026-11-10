@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -29,11 +30,15 @@ func (a *app) nodeCmd() *cobra.Command {
 		Short:  "Run the node that mirrors this machine's leases to the broker",
 		Hidden: true,
 		Args:   cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			return a.runNode()
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			path, _ := cmd.Flags().GetString("codex-path")
+			home, _ := cmd.Flags().GetString("codex-home")
+			return a.runNode(path, home)
 		},
 	}
 
+	cmd.Flags().String("codex-path", "", "trusted Codex executable from the LaunchAgent")
+	cmd.Flags().String("codex-home", "", "trusted Codex home from the LaunchAgent")
 	cmd.AddCommand(a.nodeFingerprintCmd())
 
 	return cmd
@@ -56,7 +61,10 @@ prints the LaunchAgent. The broker reads ~/.config/nitipan/broker.json.`,
 	return cmd
 }
 
-func (a *app) runNode() error {
+func (a *app) runNode(codexPath, codexHome string) error {
+	if codexPath != "" && (!filepath.IsAbs(codexPath) || !filepath.IsAbs(codexHome)) {
+		return errors.New("codex path and home must both be absolute")
+	}
 	stateDir, err := a.deps.StateDir()
 	if err != nil {
 		return fmt.Errorf("resolving the state directory: %w", err)
@@ -112,6 +120,9 @@ func (a *app) runNode() error {
 		Version:   version.Version,
 		Config:    cfg,
 		ExecPath:  exe,
+		CodexPath: codexPath,
+		CodexHome: codexHome,
+		Home:      home,
 		Now:       a.deps.Now,
 		Warn:      func(msg string) { fmt.Fprintf(a.deps.Stderr, "nitipan: node: %s\n", msg) },
 	})
@@ -184,7 +195,15 @@ func (a *app) daemonInput() (setup.DaemonInput, error) {
 		return setup.DaemonInput{}, err
 	}
 
-	return setup.DaemonInput{Executable: exe, Home: home, UID: os.Getuid()}, nil
+	in := setup.DaemonInput{Executable: exe, Home: home, UID: os.Getuid()}
+	if path, err := a.deps.LookPath("codex"); err == nil && filepath.IsAbs(path) {
+		in.CodexPath = path
+		in.CodexHome, err = a.codexHome()
+		if err != nil {
+			return in, err
+		}
+	}
+	return in, nil
 }
 
 // runSetupDaemon prints the LaunchAgent for the node or the broker.

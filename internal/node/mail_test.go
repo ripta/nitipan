@@ -733,3 +733,93 @@ func TestARingForARegistrationReapedAfterItWasPickedWritesNoLedger(t *testing.T)
 		}
 	}
 }
+
+// The executable is a fixture at the process boundary. This proves node routing, trusted arguments,
+// and ring ownership; the live harness separately proves that the installed Codex consumes a queue.
+func TestCodexQueueRingsOnlyTheAddressedSessionWithTrustedConfiguration(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "calls")
+	exe := filepath.Join(t.TempDir(), "codex")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$CODEX_HOME\" \"$@\" >> '" + capture + "'\n"
+	if err := os.WriteFile(exe, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n, err := New(Options{StateDir: root, Machine: secondMachine, Config: config.Node{Broker: "https://broker.example"}, CodexPath: exe, CodexHome: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := mailbox.Refresh(root, mailbox.Registration{Agent: "codex", PID: 42, Start: startA, Machine: secondMachine, Current: "one", Endpoint: mailbox.Endpoint{CodexHome: home}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	b.Current = "two"
+	b, err = mailbox.Refresh(root, b, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := state.NewID()
+	if err := mailbox.Store(root, mailbox.Message{ID: id, ToSession: "one", Kind: mailbox.KindMail, Body: "secret body"}); err != nil {
+		t.Fatal(err)
+	}
+	n.ringMail()
+	n.ringMail()
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := home + "\nqueue\n--thread\none\n--message\n" + mailbox.RingText(1) + "\n"
+	if string(data) != want {
+		t.Fatalf("queue arguments %q, want %q", data, want)
+	}
+	if len(mailbox.Rung(root, a.Identity)) != 1 || len(mailbox.Rung(root, b.Identity)) != 0 {
+		t.Fatal("ring ledger crossed session boundaries")
+	}
+	msgs, _, _ := mailbox.Pending(root, []string{"one"})
+	if len(msgs) != 1 || msgs[0].Body != "secret body" {
+		t.Fatal("ring consumed the message")
+	}
+}
+
+func TestCodexHomeMismatchAndFailedQueueLeaveMailAvailableForAnotherRing(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	exe := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	n, err := New(Options{StateDir: root, Machine: secondMachine, Config: config.Node{Broker: "https://broker.example"}, CodexPath: exe, CodexHome: home, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := mailbox.Refresh(root, mailbox.Registration{Agent: "codex", PID: 42, Start: startA, Machine: secondMachine, Current: "one", Endpoint: mailbox.Endpoint{CodexHome: "/attacker/home"}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := state.NewID()
+	if err := mailbox.Store(root, mailbox.Message{ID: id, ToSession: "one", Kind: mailbox.KindMail}); err != nil {
+		t.Fatal(err)
+	}
+	n.ringMail()
+	if len(mailbox.Rung(root, r.Identity)) != 0 {
+		t.Fatal("mismatch claimed the ring")
+	}
+	r.Endpoint.CodexHome = home
+	if _, err := mailbox.Refresh(root, r, now); err != nil {
+		t.Fatal(err)
+	}
+	n.ringMail()
+	if len(mailbox.Rung(root, r.Identity)) != 0 {
+		t.Fatal("failed queue kept its claim")
+	}
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(ringRetry)
+	n.ringMail()
+	if len(mailbox.Rung(root, r.Identity)) != 1 {
+		t.Fatal("later successful queue never rang")
+	}
+}

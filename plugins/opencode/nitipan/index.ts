@@ -11,7 +11,7 @@
 //
 // The two paths below are filled in when `nitipan setup opencode --install-plugins` writes this file.
 import { spawn } from "node:child_process"
-import { closeSync, constants, openSync, readdirSync, writeSync } from "node:fs"
+import { closeSync, constants, openSync, readdirSync, writeSync, watch, mkdirSync } from "node:fs"
 import { join } from "node:path"
 
 const NITIPAN: string = "@@NITIPAN@@"
@@ -74,7 +74,7 @@ function hook(subcommand: string, input: unknown) {
 }
 
 function sessionID(event: any): string | undefined {
-  return event?.data?.sessionID ?? event?.sessionID ?? event?.properties?.sessionID
+  return event?.data?.sessionID ?? event?.sessionID ?? event?.properties?.sessionID ?? event?.data?.info?.id ?? event?.properties?.info?.id ?? event?.data?.id
 }
 
 // Who last marked a session on. An event owns the session until its next end event. A scan owns
@@ -194,22 +194,93 @@ export default {
     const controller = new AbortController()
     const timers: ReturnType<typeof setTimeout>[] = []
 
-    const watch = async () => {
+    const mailSessions = new Set<string>()
+    let mailBusy = false
+    let mailAgain = false
+    const mailCall = (command: string, input: unknown): Promise<any> => new Promise((resolve, reject) => {
+      const child = spawn(NITIPAN, ["hook", command], { stdio: ["pipe", "pipe", "pipe"], timeout: 5000 })
+      let out = "", err = ""
+      child.stdout.on("data", (chunk) => out += String(chunk))
+      child.stderr.on("data", (chunk) => err += String(chunk))
+      child.on("error", reject)
+      child.on("close", (code) => {
+        if (code !== 0) reject(new Error(`${command}: ${code}: ${err.trim()}`))
+        else {
+          if (err.trim()) note(err.trim())
+          try { resolve(out.trim() ? JSON.parse(out) : null) } catch (e) { reject(e) }
+        }
+      })
+      child.stdin.on("error", () => {})
+      child.stdin.end(JSON.stringify(input))
+    })
+    // Context hooks run when the agent is already taking a step. They repeat unread reminders without
+    // claiming waking rings or adding a new turn to the session's queue.
+    await ctx.session.hook("context", async (context: any) => {
+      if (controller.signal.aborted) return
+      try {
+        const reminders = await mailCall("mail-reminder", { session_id: context.sessionID })
+        for (const reminder of reminders ?? []) context.system.push({ text: reminder.ring })
+      } catch (e) { note(`mail context reminder failed: ${e}`) }
+    })
+
+    const pollMail = async () => {
+      if (controller.signal.aborted || !mailSessions.size) return
+      if (mailBusy) { mailAgain = true; return }
+      mailBusy = true
+      try {
+        do {
+          mailAgain = false
+          const sessions = [...mailSessions]
+          for (let offset = 0; offset < sessions.length; offset += SCAN_LIMIT) {
+            const ids = sessions.slice(offset, offset + SCAN_LIMIT)
+            const rings = await mailCall("mail-poll", { session_id: ids[0], sessions: ids })
+            for (const ring of rings ?? []) {
+              try {
+                if (controller.signal.aborted) throw new Error("plugin stopped before prompt")
+                await ctx.session.prompt({ sessionID: ring.session_id, delivery: "queue", text: ring.ring })
+              } catch (e) {
+                await mailCall("mail-retry", { session_id: ring.session_id, keys: ring.keys })
+                note(`mail ring for ${ring.session_id} failed: ${e}`)
+              }
+            }
+          }
+        } while (mailAgain && !controller.signal.aborted)
+      } catch (e) { note(`mail watcher failed: ${e}`) }
+      finally { mailBusy = false }
+    }
+    const discoverMail = async () => {
+      try {
+        const page = await ctx.session.list({ limit: SCAN_LIMIT, order: "desc" })
+        for (const s of page?.data ?? []) if (typeof s?.id === "string") mailSessions.add(s.id)
+        await pollMail()
+      } catch (e) { note(`mail session discovery failed: ${e}`) }
+    }
+    const inbox = join(STATE_DIR, "mail", "inbox")
+    mkdirSync(inbox, { recursive: true, mode: 0o700 })
+    const mailWatcher = watch(inbox, () => { void pollMail() })
+    mailWatcher.on("error", (e) => note(`mail watch failed: ${e}`))
+    const mailTimer = setInterval(() => { void pollMail() }, 5000)
+    void discoverMail()
+
+    const watchEvents = async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         if (controller.signal.aborted) break
 
         const type: string = event?.type ?? ""
-        if (!type.startsWith("session.execution.")) continue
-
+        if (!type.startsWith("session.")) continue
         const id = sessionID(event)
         if (!id) continue
+        if (type === "session.deleted") { mailSessions.delete(id); continue }
+        mailSessions.add(id)
+        void pollMail()
+        if (!type.startsWith("session.execution.")) continue
 
         if (type === "session.execution.started") markOn(id, EVENT)
         else markOff(id)
       }
     }
 
-    watch().catch((e) => {
+    watchEvents().catch((e) => {
       if (!controller.signal.aborted) note(`event stream ended: ${e}`)
     })
 
@@ -220,6 +291,10 @@ export default {
 
     return () => {
       controller.abort()
+      mailWatcher.close()
+      clearInterval(mailTimer)
+      const ids = [...mailSessions]
+      if (ids.length) void mailCall("mail-stop", { session_id: ids[0], sessions: ids.slice(-SCAN_LIMIT) }).catch((e) => note(`mail teardown failed: ${e}`))
       for (const timer of timers) clearTimeout(timer)
     }
   },

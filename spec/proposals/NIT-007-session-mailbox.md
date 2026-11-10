@@ -139,10 +139,12 @@ Log.
   that sends or reads mail refreshes it from its own environment. That covers a session started before the hook was
   installed, and gives every sender a reply address. A send is refused unless its sender is a registered session that its
   node reported as live, so every bounce has a mailbox to land in. Amended 2026-11-08; see Decision Log
-- A registration stores the holder's identity fields, which are agent, PID, process start, and every session ID the
-  process has held, plus the delivery endpoint. It stores no name. The node checks the fields with NIT-001's liveness
-  rule before it rings. A later registration for the same identity replaces the earlier one, which is how an endpoint
-  is refreshed
+- A registration stores the holder's identity fields and the delivery endpoint. Claude Code registrations are keyed by
+  agent, PID, and process start, and retain every session ID the process held across `/clear`. Codex and opencode
+  registrations also key on the session ID, since their shared hosts run several conversations at once. Each keeps
+  only its own session ID. It stores no name. The node checks the process and NIT-001's per-session liveness rule before
+  it rings. A later registration for the same identity replaces the earlier one, which is how an endpoint is refreshed.
+  Amended 2026-11-08; see Decision Log
 - The mail address is `<mail name>@<label>`. The mail name is derived from the agent and the session ID through
   NIT-001's word list. A Claude Code mail name has its own domain separator. A Codex or opencode mail name uses
   NIT-001's identity string unchanged, so it equals their handle, since both handles are already keyed by session ID.
@@ -332,7 +334,8 @@ node holds the code for each mechanism.
 - A Codex registration's `CODEX_HOME` is compared with the plist's, never run. On a mismatch the node skips the push
   and does not mark the message rung. It logs the reason, and `mail status` shows it. The session still gets the
   non-waking rings
-- Whether an embedded Codex TUI picks up `codex queue` with no daemon is unverified. M2 records it
+- An embedded Codex TUI picks up `codex queue` without a daemon in Codex 0.167.0. M2 records the scripted observation.
+  Amended 2026-11-08; see Decision Log
 - The Claude Code socket ring writes the undocumented body. Its format risk is accepted. A refused post is reported
 
 One per-agent list keeps an agent's identity and delivery in one place. A new agent cannot gain an adapter and silently
@@ -654,7 +657,7 @@ Check to test, by the bullet order above:
 
 ### M2: opencode and Codex delivery
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - The opencode plugin rings its sessions through `session.prompt`, publishes presence, and a scripted test shows an
   idle opencode session waking and reading its mail
@@ -664,6 +667,39 @@ Check to test, by the bullet order above:
   plist's gets no push, its message stays unrung, and `mail status` says why
 - Codex turn hooks and the opencode plugin ring when mail is pending
 - Whether `codex queue` reaches an embedded TUI with no daemon is recorded in the As built block
+
+**As built:**
+
+- Codex and opencode mail is enabled. Their mailbox registration is per conversation on a shared host; Claude Code
+  keeps its pre-clear aliases. Process death and the existing per-session liveness rules prevent rings to dead
+  registrations. See the run best guess in the Decision Log.
+- Codex execution uses the executable and configuration home passed in the node's printed LaunchAgent arguments.
+  Its environment uses fixed system paths and the home from the OS account database. Registration data supplies only
+  the home comparison and session identity. Missing trusted configuration or a home mismatch leaves mail unrung,
+  with the reason in status output. Failed queue commands return their ring claims for a later attempt.
+- The opencode server plugin watches the inbox and publishes presence while polling its known sessions. The Go helper
+  owns version checks and ring claims; the plugin sends only the ring through the installed API's text field. A
+  refused prompt returns the claim. Status reports missing or stale plugin presence. Codex turn hooks and the
+  opencode plugin provide reminders without consuming message content. The opencode context hook repeats unread
+  reminders in later model steps, including after a tool result, without touching the waking ledger or adding a turn.
+- Scripted trials on macOS 26.6.2 with Codex 0.167.0 and opencode 2.2.6 woke idle sessions and ran explicit mail reads,
+  using private agent homes and fake model providers. The node's durable mailbox output is the live fixtures' input;
+  process-boundary tests cover the node's trusted execution arguments and ledger behavior. No production broker or
+  real model was used. The same Codex trial reached an embedded TUI with no daemon: queue exited 0, the session read
+  its mail, and no control socket existed before or after the command.
+- Milestone review found that a local PID absence could classify a foreign-machine registration as dead. Local process
+  death is now checked only for the same machine; a foreign registration stays unknown and cannot be reaped or expire
+  its unread mail on that basis. A regression failed before the repair and preserves genuine local-host death too.
+- Review also found that the opencode watcher stopped reminding once a waking key was claimed. A scripted trial
+  reproduced it by ignoring the wake and inspecting the subsequent turn and post-tool model requests. Both lacked a
+  reminder. The installed context hook now adds a text object to the model's system context through a separate
+  non-claiming helper. The repaired trial confirms both requests contain the reminder, no new wake is queued, and only
+  explicit read consumes the message.
+- The Codex live harness needed a macOS Python fallback for non-reaping child exit observation. It uses the operating
+  system's waitid through libc when Python exposes no os.waitid, so cleanup still owns each process group until reap.
+- The opencode probe's tabs check failed with tabs disabled on the installed CLI. The committed harness and committed
+  plugin reproduced it. The focused mailbox trial passed independently. The
+  [run report](../reports/20261108-nit-007-m2-opencode-codex-delivery.md) records the attempts and remaining state.
 
 ## Decision Log
 
@@ -836,6 +872,20 @@ Check to test, by the bullet order above:
   minor. Otherwise the file stays. ADR-04 says an old binary never removes a session file of a higher version or one
   it cannot decode. NIT-008's "removed with its registration" holds for files this binary can use. A leftover
   registration reads as dead because its process is dead, so nothing rings it.
+
+- 2026-11-08 (run best guess): "Mailbox registration" described one process-keyed registration retaining every session
+  ID. That merges concurrent Codex and opencode sessions on a shared host into one current conversation, which lets
+  one session read another's mail. Their mailbox registrations now also key on the session ID, with one ID each.
+  Claude Code retains process identity and pre-clear aliases. The registration and endpoint remain version 1.0:
+  older CLIs refuse mail for these agents, and an older node never pushes to them. The optional Codex home is comparison
+  data only. A pooled shared-host registration is unusable rather than guessed at or rewritten. Both node versions
+  continue to understand Claude Code registrations. Only one node version runs at a time, under its existing flock.
+- 2026-11-08 (run best guess): M2 extends the existing private fake-provider harnesses. Node process-boundary tests prove
+  the trusted executable, home, target, and ring-only arguments. Live harnesses publish synthetic mail at the durable
+  local mailbox boundary and prove the installed agent's wake path followed by explicit mail read. They do not need
+  an enrolled production broker or a real model provider.
+- 2026-11-08: "Per-agent delivery adapters" said embedded Codex queue delivery was unverified. The M2 scripted trial on
+  Codex 0.167.0 observed queue exit 0, a ring-triggered mail read, and no control socket before or after the command.
 
 ## References
 

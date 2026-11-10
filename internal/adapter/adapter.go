@@ -60,7 +60,8 @@ const (
 
 // Registration fields a push mechanism needs in a session's registration.
 const (
-	FieldSocket = "socket"
+	FieldSocket    = "socket"
+	FieldCodexHome = "codex_home"
 )
 
 // Delivery names the wake mechanisms of an agent and the registration fields its endpoint needs.
@@ -134,7 +135,7 @@ func Codex() Adapter {
 		SessionVar: "CODEX_SESSION_ID",
 		Markers:    []string{"CODEX_THREAD_ID", "CODEX_VERSION"},
 		Signature:  codexSignature,
-		Delivery:   Delivery{Push: PushCodexQueue},
+		Delivery:   Delivery{Push: PushCodexQueue, RequiredFields: []string{FieldCodexHome}},
 	}
 }
 
