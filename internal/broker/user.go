@@ -27,6 +27,9 @@ var (
 
 	// ErrUserAlreadyAdmitted means the issuer plus sub is already admitted to a user.
 	ErrUserAlreadyAdmitted = errors.New("this issuer plus sub is already admitted to a user")
+
+	// ErrNotAdmitted means no user is admitted under the issuer plus sub, or the admission was removed.
+	ErrNotAdmitted = errors.New("not admitted")
 )
 
 // CreateUser creates a new user with a broker-assigned ID and derived user label. It checks for
@@ -281,6 +284,11 @@ func (b *Broker) BindLabelToUser(label, userID string, now time.Time) error {
 		break
 	}
 
+	user, known := b.store.Data().Users[userID]
+	if !known {
+		return fmt.Errorf("user %q: %w", userID, ErrUnknownUser)
+	}
+
 	nk := NodeKey{MachineID: labelRec.MachineID, UID: labelRec.UID}
 
 	existingBinding := b.store.Data().Bindings[label]
@@ -299,7 +307,9 @@ func (b *Broker) BindLabelToUser(label, userID string, now time.Time) error {
 		b.dropDelegationsToLabel(label)
 	}
 
-	return b.commit(func(d *Data) error {
+	next := b.g.clone()
+
+	err := b.commit(func(d *Data) error {
 		d.Pins[label] = PinRecord{PinnedHash: hash}
 
 		if rec, ok := d.Nodes[nk.String()]; ok {
@@ -307,7 +317,6 @@ func (b *Broker) BindLabelToUser(label, userID string, now time.Time) error {
 			d.Nodes[nk.String()] = rec
 		}
 
-		user := d.Users[userID]
 		d.Bindings[label] = BindingRecord{
 			UserID:            userID,
 			LastBoundUser:     lastBoundUser,
@@ -315,15 +324,47 @@ func (b *Broker) BindLabelToUser(label, userID string, now time.Time) error {
 			BoundAt:           now,
 		}
 
-		knownUserLabels := make(map[string]bool)
-		for _, u := range d.Users {
-			knownUserLabels[u.UserLabel] = true
+		moveLeasesToBoundUser(next, d, label, user.UserLabel)
+
+		return next.encode(d)
+	})
+	if err != nil {
+		return err
+	}
+
+	b.g = next
+
+	return nil
+}
+
+// moveLeasesToBoundUser sets acting_for on every lease label holds to the label's newly bound user. A
+// renewal carries only the node credential, so a value the label claimed under before would otherwise
+// outlive the binding. That covers an unbound label's lease, counted in the owner's scope, which already
+// names a known user.
+//
+// A lease held for a user who still delegates to the label keeps that user, since the delegation
+// authorized it. A rebind to a different user has already dropped every delegation to the label, so its
+// leases all move.
+func moveLeasesToBoundUser(s *gstate, d *Data, label, userLabel string) {
+	delegators := map[string]bool{}
+
+	for delegatorID, delegations := range d.Delegations {
+		if _, ok := delegations[label]; !ok {
+			continue
 		}
 
-		rewriteActingForInLeases(d.Leases, label, user.UserLabel, knownUserLabels)
+		if delegator, ok := d.Users[delegatorID]; ok && delegator.UserLabel != "" {
+			delegators[delegator.UserLabel] = true
+		}
+	}
 
-		return nil
-	})
+	for _, g := range s.grants {
+		if g.Node != label || g.ActingFor == userLabel || delegators[g.ActingFor] {
+			continue
+		}
+
+		g.ActingFor = userLabel
+	}
 }
 
 func (b *Broker) bounceMailForLabel(label string) error {
@@ -363,7 +404,8 @@ func (b *Broker) RevokeUser(userID string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if _, ok := b.store.Data().Users[userID]; !ok {
+	user, ok := b.store.Data().Users[userID]
+	if !ok {
 		return fmt.Errorf("user %q: %w", userID, ErrUnknownUser)
 	}
 
@@ -371,6 +413,13 @@ func (b *Broker) RevokeUser(userID string) error {
 	for label, binding := range b.store.Data().Bindings {
 		if binding.UserID == userID {
 			labelsToForget = append(labelsToForget, label)
+		}
+	}
+
+	var leasesToEnd []string
+	for id, g := range b.g.grants {
+		if g.ActingFor == user.UserLabel && endable(g) {
+			leasesToEnd = append(leasesToEnd, id)
 		}
 	}
 
@@ -382,6 +431,27 @@ func (b *Broker) RevokeUser(userID string) error {
 
 	for _, label := range labelsToForget {
 		b.dropDelegationsToLabel(label)
+	}
+
+	if len(leasesToEnd) > 0 {
+		err := b.mutate(func(s *gstate) error {
+			for _, id := range leasesToEnd {
+				g := s.grants[id]
+				g.State = wire.StateEnded
+				g.Revision++
+				g.EndedBy = "user revoked"
+			}
+
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		for _, id := range leasesToEnd {
+			delete(b.dl, id)
+			b.announceLocked(b.g.grants[id])
+		}
 	}
 
 	return b.commit(func(d *Data) error {
@@ -476,4 +546,106 @@ func (b *Broker) SetCrossUserEnabled(enable bool) error {
 
 		return nil
 	})
+}
+
+// endable reports whether a revoke ends the lease. An end fact already says who took or ended it, so a
+// revoke leaves it as it is.
+func endable(g *grant) bool {
+	return g.State == wire.StateLive || g.State == wire.StateLapsed
+}
+
+// admittedLocked resolves the user an issuer plus sub was admitted under. The page checks it inside the
+// action's own lock, so a "revoke user" that lands after the sign-in refuses the action.
+func (b *Broker) admittedLocked(issuer, sub string) (UserRecord, error) {
+	d := b.store.Data()
+
+	userID, ok := d.IssuerSubs[issuerSubKey(issuer, sub)]
+	if !ok {
+		return UserRecord{}, fmt.Errorf("issuer %q sub %q: %w", issuer, sub, ErrNotAdmitted)
+	}
+
+	user, ok := d.Users[userID]
+	if !ok {
+		return UserRecord{}, fmt.Errorf("user %q: %w", userID, ErrUnknownUser)
+	}
+
+	return user, nil
+}
+
+// GrantDelegation grants a delegation from the user admitted under issuer plus sub to label, and returns
+// the user. The label may then claim with acting_for set to the user. It still breaks only the leases it
+// holds and the leases of its own user, never the user's other leases.
+func (b *Broker) GrantDelegation(issuer, sub, label string, now time.Time) (UserRecord, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	user, err := b.admittedLocked(issuer, sub)
+	if err != nil {
+		return UserRecord{}, err
+	}
+
+	err = b.commit(func(d *Data) error {
+		if d.Delegations[user.ID] == nil {
+			d.Delegations[user.ID] = make(map[string]time.Time)
+		}
+
+		d.Delegations[user.ID][label] = now
+
+		return nil
+	})
+
+	return user, err
+}
+
+// RevokeDelegation revokes the delegation from the user admitted under issuer plus sub to label. Every
+// live or lapsed lease that label holds for the user ends, and the holder's node writes a notice. It
+// returns the user.
+func (b *Broker) RevokeDelegation(issuer, sub, label string) (UserRecord, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	user, err := b.admittedLocked(issuer, sub)
+	if err != nil {
+		return UserRecord{}, err
+	}
+
+	var toEnd []string
+
+	for id, g := range b.g.grants {
+		if g.ActingFor == user.UserLabel && g.Node == label && endable(g) {
+			toEnd = append(toEnd, id)
+		}
+	}
+
+	err = b.mutate(func(s *gstate) error {
+		for _, id := range toEnd {
+			g := s.grants[id]
+			g.State = wire.StateEnded
+			g.Revision++
+			g.EndedBy = "delegation revoked"
+		}
+
+		return nil
+	})
+	if err != nil {
+		return UserRecord{}, err
+	}
+
+	for _, id := range toEnd {
+		delete(b.dl, id)
+		b.announceLocked(b.g.grants[id])
+	}
+
+	err = b.commit(func(d *Data) error {
+		if d.Delegations[user.ID] != nil {
+			delete(d.Delegations[user.ID], label)
+			if len(d.Delegations[user.ID]) == 0 {
+				delete(d.Delegations, user.ID)
+			}
+		}
+
+		return nil
+	})
+
+	return user, err
 }

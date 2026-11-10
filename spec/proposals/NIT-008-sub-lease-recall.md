@@ -197,7 +197,8 @@ NIT-007's rings cover pending notices and pending requests, not only mail:
   verdict. A notice delivery keeps, such as a "parent ended" notice waiting on its repair, never rings. NIT-006's
   notice that a coworker's `shared` claim was refused by the session's lease never rings either, turn hooks included.
   A refused claim costs the coworker nothing, so a ringing notice would let them wake the session's agent with no
-  mail grant. Amended 2026-10-24; see Decision Log
+  mail grant. Its cause is `shared-claim-refused`, and that cause is how a ring path tells it apart. Amended
+  2026-11-10; see Decision Log
 - A ring also fires for a pending request whose target lease the session holds. That is the idle parent in NIT-003's
   accepted risk, whose requester waits on it. The notices with a waiting reader are the `recalled` notice and NIT-003's
   request granted, declined, and lapsed
@@ -317,7 +318,8 @@ None.
 
 - Every NIT-007 wake path rings for a notice that delivery would deliver now, and for a pending request on a lease the
   session holds, naming `nitipan list`
-- A notice that delivery keeps or drops never rings
+- A notice that delivery keeps or drops never rings. Neither does a notice with the cause `shared-claim-refused`.
+  Amended 2026-11-10; see Decision Log
 - A waking path rings once per notice or request with no node running. A re-armed waiter does not ring again for an
   ignored one, and a replaced `recalled` notice rings again
 
@@ -373,6 +375,10 @@ None.
   entry corrects the file's header. The text said the ledger "carries NIT-001's envelope with `major.minor`". That
   envelope is a lease record's footprint, liveness, and holder, which a ledger of rung keys has no use for. The ledger
   carries a `major.minor` version and its registration's identity, and ADR-04's reader rules apply to the version.
+- 2026-11-10 (autonomous): NIT-006 M2 built the refused-claim notice. "Telling the sub-lessee" said the notice never
+  rings, but it gave no way for a ring path to recognize it. It now names the notice's cause, `shared-claim-refused`,
+  and M3's check names it too. Nothing else about the rule changed. The bullet's marker moved from the 2026-10-24 entry
+  to this one.
 
 ## References
 

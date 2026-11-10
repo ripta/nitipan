@@ -76,53 +76,55 @@ func MigrateV1ToV2(old []byte) ([]byte, error) {
 		v2.Leases[key] = raw
 	}
 
-	knownUserLabels := map[string]bool{ownerLabel: true}
-
-	for label := range pinnedLabels {
-		rewriteActingForInLeases(v2.Leases, label, ownerLabel, knownUserLabels)
+	if err := rewriteActingForInLeases(v2.Leases, pinnedLabels, ownerLabel); err != nil {
+		return nil, err
 	}
 
 	return json.Marshal(v2)
 }
 
-// rewriteActingForInLeases rewrites acting_for in leases held by a label when it does not resolve
-// to a known user label. This is shared between migration and binding.
-func rewriteActingForInLeases(leases map[string]json.RawMessage, label, newUserLabel string, knownUserLabels map[string]bool) {
+// leaseHolderNode is the part of a stored lease the migration reads. Node is the label of the node that
+// holds the lease, which every stored lease carries, as wire.Lease does.
+type leaseHolderNode struct {
+	Node      string `json:"node"`
+	ActingFor string `json:"acting_for"`
+}
+
+// rewriteActingForInLeases moves every lease a pinned label holds to the owner's user label. No user
+// label exists before the upgrade but the owner's, and no delegation either, so every such lease moves. A
+// binding on a running broker moves leases with moveLeasesToBoundUser instead.
+//
+// The rewrite edits only acting_for in each lease's JSON object, so every other field keeps its bytes.
+func rewriteActingForInLeases(leases map[string]json.RawMessage, pinnedLabels map[string]bool, ownerLabel string) error {
+	ownerValue, err := json.Marshal(ownerLabel)
+	if err != nil {
+		return fmt.Errorf("encoding the owner's user label: %w", err)
+	}
+
 	for key, raw := range leases {
-		var lease struct {
-			ActingFor string `json:"acting_for"`
-		}
-
+		var lease leaseHolderNode
 		if err := json.Unmarshal(raw, &lease); err != nil {
+			return fmt.Errorf("decoding the stored lease %s: %w", key, err)
+		}
+
+		if !pinnedLabels[lease.Node] || lease.ActingFor == ownerLabel {
 			continue
 		}
 
-		var full map[string]interface{}
-		if err := json.Unmarshal(raw, &full); err != nil {
-			continue
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return fmt.Errorf("decoding the stored lease %s: %w", key, err)
 		}
 
-		holder, ok := full["holder"].(map[string]interface{})
-		if !ok {
-			continue
-		}
+		fields["acting_for"] = ownerValue
 
-		leaseLabel, ok := holder["label"].(string)
-		if !ok || leaseLabel != label {
-			continue
-		}
-
-		if lease.ActingFor == "" || lease.ActingFor == newUserLabel || knownUserLabels[lease.ActingFor] {
-			continue
-		}
-
-		full["acting_for"] = newUserLabel
-
-		rewritten, err := json.Marshal(full)
+		rewritten, err := json.Marshal(fields)
 		if err != nil {
-			continue
+			return fmt.Errorf("encoding the stored lease %s: %w", key, err)
 		}
 
 		leases[key] = rewritten
 	}
+
+	return nil
 }

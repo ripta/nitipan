@@ -336,8 +336,12 @@ func (b *Broker) Handler() http.Handler {
 	if b.signInMgr != nil {
 		mux.HandleFunc("GET /signin", b.handleSignInPage)
 		mux.HandleFunc("POST /bind", b.handleBindLabel)
+		mux.HandleFunc("POST /grant", b.handleGrantDelegation)
+		mux.HandleFunc("POST /revoke", b.handleRevokeDelegation)
 		mux.HandleFunc("GET /callback", b.handleCallback)
 		mux.HandleFunc("POST /bind-submit", b.handleBindSubmit)
+		mux.HandleFunc("POST /grant-submit", b.handleGrantSubmit)
+		mux.HandleFunc("POST /revoke-submit", b.handleRevokeSubmit)
 	}
 
 	return mux
@@ -545,6 +549,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		TermMillis:      b.cfg.Term.Milliseconds(),
 		KeepaliveMillis: b.cfg.Keepalive.Milliseconds(),
 		CrossUser:       crossUserEnabled,
+
+		ActingForExplicit: true,
 	})
 }
 

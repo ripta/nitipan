@@ -346,6 +346,7 @@ const (
 	AdminPathBindings       = "/bindings"
 	AdminPathRevokeUser     = "/revoke-user"
 	AdminPathCrossUser      = "/cross-user"
+	AdminPathBreak          = "/break"
 )
 
 // AdminHandler serves the approval commands. It is mounted on the admin socket only.
@@ -364,6 +365,7 @@ func (b *Broker) AdminHandler() http.Handler {
 	mux.HandleFunc("GET "+AdminPathBindings, b.handleAdminBindings)
 	mux.HandleFunc("POST "+AdminPathRevokeUser, b.handleAdminRevokeUser)
 	mux.HandleFunc("POST "+AdminPathCrossUser, b.handleAdminCrossUser)
+	mux.HandleFunc("POST "+AdminPathBreak, b.handleAdminBreak)
 
 	return mux
 }
@@ -541,6 +543,79 @@ func (b *Broker) handleAdminCrossUser(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (b *Broker) handleAdminBreak(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LeaseID string `json:"lease_id"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	if req.LeaseID == "" {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, "the break names no lease ID")
+
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.sweepLocked()
+
+	g := b.g.grants[req.LeaseID]
+	if g == nil {
+		writeErr(w, http.StatusNotFound, wire.CodeNotFound, "the broker has no such lease")
+
+		return
+	}
+
+	over := g.State == wire.StateTaken || g.State == wire.StateEnded
+	if over {
+		err := b.mutate(func(s *gstate) error {
+			delete(s.grants, req.LeaseID)
+
+			return nil
+		})
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
+
+			return
+		}
+
+		delete(b.dl, req.LeaseID)
+		w.WriteHeader(http.StatusNoContent)
+
+		return
+	}
+
+	by := "broker owner"
+	if owner := b.store.Data().Users[b.store.Data().OwnerID].UserLabel; owner != "" {
+		by += " " + owner
+	}
+
+	err := b.mutate(func(s *gstate) error {
+		e := s.grants[req.LeaseID]
+		e.State = wire.StateEnded
+		e.Revision++
+		e.EndedBy = by
+
+		return nil
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
+
+		return
+	}
+
+	delete(b.dl, req.LeaseID)
+	b.announceLocked(b.g.grants[req.LeaseID])
 
 	w.WriteHeader(http.StatusNoContent)
 }

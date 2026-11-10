@@ -2,10 +2,13 @@ package broker
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/space-armada/nitipan/internal/record"
+	"github.com/space-armada/nitipan/internal/repoid"
+	"github.com/space-armada/nitipan/internal/wire"
 )
 
 func TestMigrateV1ToV2CreatesOwnerAndBindsPinnedLabels(t *testing.T) {
@@ -91,46 +94,63 @@ func TestMigrateV1ToV2CreatesOwnerAndBindsPinnedLabels(t *testing.T) {
 	}
 }
 
+// v1Grant is a lease as a 1.x broker stored it: the wire lease, which names its holder's label in `node`,
+// plus the holder node's machine and UID. The 1.x holder record carries no label of its own.
+func v1Grant(id, label, machine string, uid int, actingFor string) json.RawMessage {
+	g := grant{
+		Lease: wire.Lease{
+			ID: id, Reach: wire.ReachUser, State: wire.StateLive, Revision: 1, Token: 1,
+			Entries: []repoid.Name{repoid.New([]string{"root-" + id}, "/src/"+id, false, false)},
+			Anchor:  "anchor-" + id, Holder: wire.Holder{Key: "key-" + id, Agent: "claude", User: "ripta"},
+			ActingFor: actingFor, Node: label, Liveness: wire.LiveAlive,
+		},
+		Machine: machine, UID: uid, Derivation: 1,
+	}
+
+	raw, err := json.Marshal(g)
+	if err != nil {
+		panic(err)
+	}
+
+	return raw
+}
+
+type migrateActingForTest struct {
+	Name      string
+	Lease     string
+	Owner     bool
+	ActingFor string
+}
+
+// The pinned label is "pinned-label" on m1/501, and "loose-label" on m2/502 was never pinned.
+var migrateActingForTests = []migrateActingForTest{
+	{Name: "a pinned label's lease for an OS user moves to the owner", Lease: "pinned-os-user", Owner: true},
+	{Name: "a pinned label's lease with no acting_for moves to the owner", Lease: "pinned-empty", Owner: true},
+	{Name: "an unpinned label's lease keeps its acting_for", Lease: "loose-os-user", ActingFor: "ripta"},
+}
+
+// TestMigrateV1ToV2RewritesActingForOnPinnedLabelLeases upgrades a store whose leases have the shape a 1.x
+// broker wrote, and reads them back through the broker's own lease decoder. It catches a migration that
+// finds a label's leases by a field 1.x leases never carried, which leaves every legacy acting_for in place.
 func TestMigrateV1ToV2RewritesActingForOnPinnedLabelLeases(t *testing.T) {
-	ownerLabel := "owner-user-label"
-
-	lease1 := map[string]interface{}{
-		"holder":     map[string]interface{}{"label": "label1"},
-		"acting_for": "old-os-user",
-	}
-
-	lease2 := map[string]interface{}{
-		"holder":     map[string]interface{}{"label": "label2"},
-		"acting_for": "another-user",
-	}
-
-	lease3 := map[string]interface{}{
-		"holder":     map[string]interface{}{"label": "label1"},
-		"acting_for": ownerLabel,
-	}
-
-	lease1Bytes, _ := json.Marshal(lease1)
-	lease2Bytes, _ := json.Marshal(lease2)
-	lease3Bytes, _ := json.Marshal(lease3)
-
 	v1Data := &Data{
 		Version: record.Version{Major: 1, Minor: 1},
 		Nodes: map[string]NodeRecord{
-			"m1/501": {KeyHash: "hash1", Label: "label1"},
-			"m2/502": {KeyHash: "hash2", Label: "label2"},
+			"m1/501": {KeyHash: "hash1", Label: "pinned-label"},
+			"m2/502": {KeyHash: "hash2", Label: "loose-label"},
 		},
 		Labels: map[string]LabelRecord{
-			"label1": {MachineID: "m1", UID: 501},
-			"label2": {MachineID: "m2", UID: 502},
+			"pinned-label": {MachineID: "m1", UID: 501},
+			"loose-label":  {MachineID: "m2", UID: 502},
 		},
 		Pins: map[string]PinRecord{
-			"label1": {PinnedHash: "hash1"},
-			"label2": {},
+			"pinned-label": {PinnedHash: "hash1"},
+			"loose-label":  {},
 		},
 		Leases: map[string]json.RawMessage{
-			"lease1": lease1Bytes,
-			"lease2": lease2Bytes,
-			"lease3": lease3Bytes,
+			"pinned-os-user": v1Grant("pinned-os-user", "pinned-label", "m1", 501, "ripta"),
+			"pinned-empty":   v1Grant("pinned-empty", "pinned-label", "m1", 501, ""),
+			"loose-os-user":  v1Grant("loose-os-user", "loose-label", "m2", 502, "ripta"),
 		},
 	}
 
@@ -149,33 +169,40 @@ func TestMigrateV1ToV2RewritesActingForOnPinnedLabelLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	owner := v2Data.Users[v2Data.OwnerID]
-
-	var rewritten1 map[string]interface{}
-	if err := json.Unmarshal(v2Data.Leases["lease1"], &rewritten1); err != nil {
+	s, err := loadGState(&v2Data)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if rewritten1["acting_for"] != owner.UserLabel {
-		t.Errorf("lease1 acting_for = %q, want %q (rewritten)", rewritten1["acting_for"], owner.UserLabel)
-	}
+	ownerLabel := v2Data.Users[v2Data.OwnerID].UserLabel
 
-	var unchanged2 map[string]interface{}
-	if err := json.Unmarshal(v2Data.Leases["lease2"], &unchanged2); err != nil {
-		t.Fatal(err)
-	}
+	for _, test := range migrateActingForTests {
+		t.Run(test.Name, func(t *testing.T) {
+			g := s.grants[test.Lease]
+			if g == nil {
+				t.Fatalf("lease %s is missing after the migration", test.Lease)
+			}
 
-	if unchanged2["acting_for"] != "another-user" {
-		t.Errorf("lease2 acting_for = %q, want %q (unchanged, label not pinned)", unchanged2["acting_for"], "another-user")
-	}
+			want := test.ActingFor
+			if test.Owner {
+				want = ownerLabel
+			}
 
-	var unchanged3 map[string]interface{}
-	if err := json.Unmarshal(v2Data.Leases["lease3"], &unchanged3); err != nil {
-		t.Fatal(err)
-	}
+			if g.ActingFor != want {
+				t.Errorf("acting_for = %q, want %q", g.ActingFor, want)
+			}
 
-	if unchanged3["acting_for"] != owner.UserLabel {
-		t.Errorf("lease3 acting_for = %q, want %q (already owner label)", unchanged3["acting_for"], owner.UserLabel)
+			var before grant
+			if err := json.Unmarshal(v1Data.Leases[test.Lease], &before); err != nil {
+				t.Fatal(err)
+			}
+
+			before.ActingFor = want
+
+			if !reflect.DeepEqual(*g, before) {
+				t.Errorf("the migration changed more than acting_for:\n got %+v\nwant %+v", *g, before)
+			}
+		})
 	}
 }
 

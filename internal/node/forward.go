@@ -38,6 +38,12 @@ func (n *Node) forwardClaim(ctx context.Context, req handoff.Request) (json.RawM
 		return nil, err
 	}
 
+	explicit := req.Version >= handoff.ActingForSince
+	if explicit && !n.actingFor.Load() {
+		return nil, fmt.Errorf("the broker predates claims for another user, and would count this one in the "+
+			"label's own user's scope. Upgrade the broker: %w", ErrBrokerTooOld)
+	}
+
 	n.rememberLate(req.ID, lateReply{holder: body.Holder, kind: req.Kind, anchor: body.Anchor})
 
 	sent := n.clockNow()
@@ -46,7 +52,8 @@ func (n *Node) forwardClaim(ctx context.Context, req handoff.Request) (json.RawM
 
 	err := n.cl.call(ctx, wire.PathClaim, wire.Claim{
 		Version: wire.Current, ID: req.ID, Reach: body.Reach, Entries: body.Entries, Derivation: body.Derivation,
-		Anchor: body.Anchor.ID, Holder: wireHolder(body.Holder), ActingFor: body.ActingFor, Description: body.Description,
+		Anchor: body.Anchor.ID, Holder: wireHolder(body.Holder), ActingFor: body.ActingFor,
+		ActingForExplicit: explicit, Description: body.Description,
 	}, &res)
 	if err != nil {
 		return nil, err

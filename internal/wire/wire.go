@@ -145,6 +145,10 @@ type Registered struct {
 	// CrossUser is true when the broker has cross-user features enabled. Once a node sees this set,
 	// it refuses to send its key over plain HTTP.
 	CrossUser bool `json:"cross_user,omitempty"`
+
+	// ActingForExplicit is true when the broker reads a claim's acting_for_explicit field. A broker
+	// that predates it omits it, and the node then answers a claim for another user "broker too old".
+	ActingForExplicit bool `json:"acting_for_explicit,omitempty"`
 }
 
 // MirroredLease is one lease of the machine's state directory, as the node saw it. A record the node

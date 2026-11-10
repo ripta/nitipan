@@ -827,7 +827,13 @@ func TestEveryStageOfAMessageCarriesAMonotonicRank(t *testing.T) {
 func TestTheNetworkHandlerServesNoApprovalRoute(t *testing.T) {
 	h := newHarness(t, nil)
 
-	for _, p := range []string{AdminPathPending, AdminPathApprove, AdminPathForget, "/v1/approve", "/v1/forget", "/v1/pending"} {
+	adminPaths := []string{
+		AdminPathPending, AdminPathApprove, AdminPathForget, AdminPathConfirmUpgrade, AdminPathAdmissions, AdminPathAdmit,
+		AdminPathLink, AdminPathBindings, AdminPathRevokeUser, AdminPathCrossUser, AdminPathBreak,
+		"/v1/approve", "/v1/forget", "/v1/pending",
+	}
+
+	for _, p := range adminPaths {
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			resp := h.do(method, p, alice, map[string]string{"label": "x", "fingerprint": "y"})
 			if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {

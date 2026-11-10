@@ -16,7 +16,7 @@ user, scopes leases by user, and gates mail between users behind grants made on 
 | Milestone | Run status | Commits |
 |-----------|------------|---------|
 | NIT-006 M1 | DONE | `nitipan: bind node labels to users through an OIDC sign-in page` |
-| NIT-006 M2 | QUEUED | |
+| NIT-006 M2 | DONE | `nitipan: scope leases by user and let shared agents act under delegations` |
 | NIT-006 M3 | QUEUED | |
 
 ## Approved plan and authorization
@@ -140,3 +140,91 @@ Test cost: the full race suite took about 434 s of wall time, as before the mile
 `internal/cli`.
 
 Left to the user: an optional sign-in against a real identity provider in a real browser.
+
+### NIT-006 M2: Authorization and shared agents
+
+In progress. The work runs as narrow slices, one implementer each.
+
+- Slice 1 added per-user scope for `user`-reach conflicts, and kept overlap reports within one user. Slice 2 added
+  delegations, the page's grant and revoke actions, final lease ends on revoke, and the `--acting-for` claim flag on
+  request version 5.
+- Two implementers marked M2 DONE while slices 3 to 6 were unbuilt. One left five `t.Skip` stubs. A refactor of the
+  conflict check broke per-user scope, and `TestUserLeasesAcrossUsersDontConflict` caught it. The coordinator found
+  each of these by rerunning the tests through cg. Each implementer was sent back, and the status went back to
+  IN PROGRESS.
+- The node had marked an explicit `acting_for` by setting the wire message's minor version to 1. That overloads the
+  message version. The coordinator had it replaced with an explicit `acting_for_explicit` field on the claim, which
+  older brokers ignore.
+- From break authorization on, the implementer runs on Opus. The earlier implementers kept repeating the same misses.
+  The Opus run proved each new test by disabling its code and watching the test fail.
+- That run also fixed an `isOwnLease` bug. An asker with no user record matched every lease whose `acting_for` was
+  empty.
+
+Best guesses recorded so far:
+
+- A release by a lease's own user, when that user is not the holder, ends the lease through the break path, and the
+  holder's node is told. A plain delete would leave the holder's anchor behind. The release must name an explicit
+  ID. A release by name, and the death causes, stay limited to the holder's node.
+- The cross-user break and discovery rules apply only while cross-user features are on. That follows "While
+  cross-user features are off, the broker counts an unbound label's leases in the owner's scope".
+- A lease or mirror with no resolvable owner shows in discovery only when it is `shared`. This fails closed.
+
+M2 milestone review. The `adr-impact` agent found M2 consistent with ADR-03, ADR-05, ADR-06, ADR-07, and ADR-08. It
+found no uncovered decisions. The reviewer, run on Opus, reported 19 findings. All of them go to a fix round.
+
+Confirmed holes:
+
+- With cross-user features off, an unbound label's explicit `acting_for` passed through unchecked. Binding then
+  left the lease in another user's scope.
+- Overlap reports for a `shared` claim showed a coworker's mirrored paths.
+
+Confirmed gaps:
+
+- A new node had no gate when it forwarded an explicit `acting_for` claim to the M1 broker. That broker silently
+  substitutes the field.
+- `nitipan release <id>` could not reach the broker for a lease the user does not hold locally.
+- An old-version claim naming a delegator was accepted, against the settled text.
+- Revoke rewrote end facts.
+- The owner's break wrote an empty owner name.
+- Text and code disagreed about scope while cross-user features are off.
+
+Plausible findings, all fixed:
+
+- A break of an ended lease returned its full view to any node.
+- An admission race in the page's delegation actions.
+- A mirror with an unresolvable owner failed open.
+
+Best guesses this round settles, each amended into the proposal:
+
+- While cross-user features are off, the broker runs one scope for conflicts and overlaps, as it does for breaks and
+  discovery.
+- Overlap reports never show another user's mirror, at any reach. The proposal's own reason for the rule covers the
+  `shared` case.
+- The unused `Result.Hidden` response field is removed. The redacted refusal is a message every CLI already prints,
+  so no new response version is needed.
+- The store stays at 2.0. The planned 2.1 minor bump would have stranded a rollback to M1, and no 2.0 store has
+  shipped.
+- A release by an ID with no local record goes to the broker when the node is running.
+
+Fix round results. All 19 findings were fixed. Each code fix has a regression test that failed on the unfixed code.
+For finding 4, the broker now advertises `acting_for_explicit` support with a flag in its registration answer. A
+version comparison would not work, because the broker version is a free-form build string. A node answers "broker
+too old" for an explicit claim when the flag is missing.
+
+Two more bugs surfaced in follow-up rounds. Both were fixed under failing-first tests.
+
+- Binding a label rewrote leases only in the stored copy, not in the broker's in-memory leases. The next write undid
+  the rewrite. Binding now moves every lease the label holds to the bound user, in both copies. A lease held for a
+  user who still delegates to the label keeps that user.
+- M1's v1-to-v2 migration found a label's leases through a `holder.label` field that real stored leases do not have.
+  So the upgrade rewrote `acting_for` on no real lease. M1's test had passed only because it built lease JSON by hand
+  with that field. The migration now matches on the lease's `node` field. Its test marshals the real stored type.
+  The proposal records this as a correction of fact.
+
+Checks: `make ci` exited 0, and the coordinator reran it before committing. `proposals.py check` and `freeze` both
+returned no findings.
+
+ADR candidates considered: "capabilities are advertised by a flag at registration, not by version comparison". It
+fails the "What Earns an ADR" bar, because it shapes only the broker and node contract. NIT-007's mail capability
+already follows the same pattern. The candidate "the cross-user rules apply only once the owner turns them on" is
+carried by NIT-006's settled text, so it needs no ADR.

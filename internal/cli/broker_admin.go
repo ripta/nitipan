@@ -69,7 +69,19 @@ upgrade are refused after a rollback.`,
 		},
 	}
 
-	return []*cobra.Command{pending, approve, forget, confirmUpgrade}
+	breakLease := &cobra.Command{
+		Use:   "break <lease-id>",
+		Short: "End any broker lease from the broker host",
+		Long: `End a broker lease as the broker owner. This breaks any lease, including another user's live shared lease.
+Run this on the broker host. The holder's node writes them a notice that names the broker owner.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.runBrokerAdmin(cmd, broker.AdminPathBreak, map[string]string{"lease_id": args[0]},
+				fmt.Sprintf("broke lease %s\n", args[0]))
+		},
+	}
+
+	return []*cobra.Command{pending, approve, forget, confirmUpgrade, breakLease}
 }
 
 // adminClient talks to the broker's admin socket. No network path reaches it.

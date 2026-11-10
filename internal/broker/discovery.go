@@ -275,6 +275,10 @@ func (b *Broker) handleWhoHolds(w http.ResponseWriter, r *http.Request, asker No
 	ans := wire.WhoHoldsAnswer{Version: wire.Current, Found: []wire.Found{}}
 
 	for _, g := range b.sortedGrantsLocked(shownGrant) {
+		if !b.grantVisibleTo(asker, g) {
+			continue
+		}
+
 		hit := len(req.Names) > 0 && repoid.OverlapAny(g.Entries, req.Names)
 		if addr != nil {
 			hit = g.Node == addr.Label && b.matchesName(g.Holder, g.Node, addr.Handle)
@@ -288,6 +292,10 @@ func (b *Broker) handleWhoHolds(w http.ResponseWriter, r *http.Request, asker No
 	unjudged := 0
 
 	for _, m := range b.mirrorsLocked() {
+		if !b.mirrorVisibleTo(asker, m) {
+			continue
+		}
+
 		match, unknown := b.judge(asker, req, addr, m)
 
 		switch {
@@ -310,7 +318,7 @@ func (b *Broker) handleWhoHolds(w http.ResponseWriter, r *http.Request, asker No
 	writeJSON(w, http.StatusOK, ans)
 }
 
-func (b *Broker) handleWhoIs(w http.ResponseWriter, r *http.Request, _ NodeKey) {
+func (b *Broker) handleWhoIs(w http.ResponseWriter, r *http.Request, asker NodeKey) {
 	var req wire.WhoIs
 
 	if !decodeBody(w, r, &req, func() wire.Version { return req.Version }) {
@@ -332,6 +340,10 @@ func (b *Broker) handleWhoIs(w http.ResponseWriter, r *http.Request, _ NodeKey) 
 	holders := map[string]bool{}
 
 	for _, g := range b.sortedGrantsLocked(shownGrant) {
+		if !b.grantVisibleTo(asker, g) {
+			continue
+		}
+
 		if g.Holder.Name == req.Name || b.matchesName(g.Holder, g.Node, req.Name) {
 			ans.Found = append(ans.Found, b.foundGrant(g))
 			holders[g.Node+"\x00"+g.Holder.Key] = true
@@ -341,6 +353,10 @@ func (b *Broker) handleWhoIs(w http.ResponseWriter, r *http.Request, _ NodeKey) 
 	unjudged := 0
 
 	for _, m := range b.mirrorsLocked() {
+		if !b.mirrorVisibleTo(asker, m) {
+			continue
+		}
+
 		if m.rec == nil {
 			// An unreadable record names no holder, so it cannot be matched. It may be the one asked for.
 			unjudged++
@@ -377,7 +393,10 @@ func (b *Broker) handleWhoIs(w http.ResponseWriter, r *http.Request, _ NodeKey) 
 //
 // The grant's own anchor and its holder's other leases on the same machine are the holder's own files,
 // and a sub-lease delegated from the anchor stays inside it.
-func (b *Broker) overlapsFor(g *grant, mirrors []mirror) []wire.Overlap {
+//
+// An overlap shows to the asker only when its discovery shows both leases. Once cross-user features are
+// on, another user's mirror carries local paths and names the asker has no need to read, at any reach.
+func (b *Broker) overlapsFor(asker NodeKey, g *grant, mirrors []mirror) []wire.Overlap {
 	if g.State != wire.StateLive || (g.Reach != wire.ReachUser && g.Reach != wire.ReachShared) {
 		return nil
 	}
@@ -401,6 +420,10 @@ func (b *Broker) overlapsFor(g *grant, mirrors []mirror) []wire.Overlap {
 			continue
 		}
 
+		if !b.mirrorVisibleTo(asker, m) || !b.grantVisibleTo(asker, g) {
+			continue
+		}
+
 		out = append(out, wire.Overlap{
 			ID: g.ID + "/" + m.id, Grant: b.foundGrant(g), Mirror: b.foundMirror(m, wire.StateMirrored, ""),
 		})
@@ -416,7 +439,7 @@ func (b *Broker) overlapsForNode(node NodeKey) []wire.Overlap {
 	var out []wire.Overlap
 
 	for _, g := range b.sortedGrantsLocked(func(g *grant) bool { return g.State == wire.StateLive }) {
-		for _, o := range b.overlapsFor(g, mirrors) {
+		for _, o := range b.overlapsFor(node, g, mirrors) {
 			if g.nodeKey() == node || o.Mirror.Node == b.labelOfLocked(node) {
 				out = append(out, o)
 			}
@@ -455,4 +478,39 @@ func (b *Broker) handleWhoAmI(w http.ResponseWriter, r *http.Request, key NodeKe
 	b.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, wire.WhoAmIAnswer{Version: wire.Current, UserLabel: userLabel})
+}
+
+// visibleTo reports whether discovery shows the asking node a lease of the given reach whose owners
+// are the given user labels. While cross-user features are off there is one scope, and every lease
+// shows. Once they are on, a shared lease shows to every bound user. A user lease or a mirrored
+// machine lease shows only to its owners and to labels holding an owner's delegation, since it carries
+// local paths and names that coworkers have no need to read.
+func (b *Broker) visibleTo(asker NodeKey, reach string, owners ...string) bool {
+	d := b.store.Data()
+	if !d.CrossUserEnabled || reach == wire.ReachShared {
+		return true
+	}
+
+	label := d.Nodes[asker.String()].Label
+	me := b.boundUserLabel(label)
+
+	for _, owner := range owners {
+		if owner == "" {
+			continue
+		}
+
+		if owner == me || b.labelHoldsDelegation(label, owner) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (b *Broker) grantVisibleTo(asker NodeKey, g *grant) bool {
+	return g.nodeKey() == asker || b.visibleTo(asker, g.Reach, g.ActingFor, b.boundUserLabel(g.Node))
+}
+
+func (b *Broker) mirrorVisibleTo(asker NodeKey, m mirror) bool {
+	return m.node == asker || b.visibleTo(asker, record.ReachMachine, b.boundUserLabel(m.label))
 }

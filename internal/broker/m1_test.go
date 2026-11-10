@@ -645,8 +645,9 @@ func TestRebindToSameUserKeepsMailAndDelegations(t *testing.T) {
 	}
 }
 
-// TestBindingRewritesActingForInLeases tests that binding a label rewrites acting_for
-// in its leases to the bound user.
+// TestBindingRewritesActingForInLeases tests that binding a label rewrites a legacy OS user name in
+// acting_for on its leases to the bound user, as a lease of a label the upgrade left unbound carries.
+// It catches a binding that leaves the legacy value, which a renewal would carry past the binding.
 func TestBindingRewritesActingForInLeases(t *testing.T) {
 	h := newHarness(t, nil)
 
@@ -661,22 +662,22 @@ func TestBindingRewritesActingForInLeases(t *testing.T) {
 	labelAlice := regAlice.Label
 
 	leaseID := "lease-1"
-	lease := map[string]interface{}{
-		"holder":     map[string]interface{}{"label": labelAlice},
-		"acting_for": "old-os-user",
-	}
 
-	leaseBytes, _ := json.Marshal(lease)
-
-	if err := h.b.commit(func(d *Data) error {
-		if d.Leases == nil {
-			d.Leases = make(map[string]json.RawMessage)
+	h.b.mu.Lock()
+	err = h.b.mutate(func(s *gstate) error {
+		s.grants[leaseID] = &grant{
+			Lease: wire.Lease{
+				ID: leaseID, Reach: wire.ReachUser, State: wire.StateLive, Revision: 1, Entries: name("svc"),
+				Holder: holder("a"), ActingFor: "old-os-user", Node: labelAlice,
+			},
+			Machine: alice.Machine, UID: alice.UID, Derivation: 1,
 		}
 
-		d.Leases[leaseID] = leaseBytes
-
 		return nil
-	}); err != nil {
+	})
+	h.b.mu.Unlock()
+
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -684,15 +685,8 @@ func TestBindingRewritesActingForInLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d := h.data()
-
-	var rewritten map[string]interface{}
-	if err := json.Unmarshal(d.Leases[leaseID], &rewritten); err != nil {
-		t.Fatal(err)
-	}
-
-	if rewritten["acting_for"] != user.UserLabel {
-		t.Errorf("acting_for = %q, want %q", rewritten["acting_for"], user.UserLabel)
+	if held, stored := h.leaseActingFor(t, leaseID); held != user.UserLabel || stored != user.UserLabel {
+		t.Errorf("acting_for held %q, stored %q, want %q", held, stored, user.UserLabel)
 	}
 }
 

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/space-armada/nitipan/internal/oidc"
+	"github.com/space-armada/nitipan/internal/repoid"
+	"github.com/space-armada/nitipan/internal/wire"
 )
 
 type signInIssuer struct {
@@ -952,5 +954,267 @@ func TestParametersBeforeSignInIgnored(t *testing.T) {
 
 	if strings.Contains(body, "evil") || strings.Contains(body, "parameter") || strings.Contains(body, "injected") {
 		t.Error("callback page echoed query parameters")
+	}
+}
+
+// TestGrantDelegationParametersBeforeSignInIgnored tests that parameters sent before sign-in are
+// ignored for grant delegation.
+func TestGrantDelegationParametersBeforeSignInIgnored(t *testing.T) {
+	h, si := newSignInHarness(t)
+
+	if _, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
+	reg := h.register(n)
+	label := reg.Label
+
+	authURL, err := h.b.signInMgr.StartAction("grant")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	u, _ := url.Parse(authURL)
+	state := u.Query().Get("state")
+	nonce := u.Query().Get("nonce")
+
+	si.expectedNonce = nonce
+
+	req := httptest.NewRequest("GET", "/callback?code=test-code&state="+state+"&label="+label, nil)
+	w := httptest.NewRecorder()
+
+	h.b.handleCallback(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, `<input type="text" name="label"`) {
+		t.Error("form should have empty label input")
+	}
+
+	if strings.Contains(body, label) && !strings.Contains(body, "User ID:") {
+		t.Error("label from URL query should not appear in form")
+	}
+}
+
+// TestCrossSitePostGrantDelegationChangesNothing tests that a cross-site POST without a valid
+// token changes nothing for grant delegation.
+func TestCrossSitePostGrantDelegationChangesNothing(t *testing.T) {
+	h, si := newSignInHarness(t)
+
+	user, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
+	reg := h.register(n)
+	label := reg.Label
+
+	req := httptest.NewRequest("POST", "/grant-submit", nil)
+	req.PostForm = url.Values{
+		"token": {"fake-token"},
+		"label": {label},
+	}
+	w := httptest.NewRecorder()
+
+	h.b.handleGrantSubmit(w, req)
+
+	if w.Code == http.StatusOK {
+		t.Error("cross-site post with fake token was accepted")
+	}
+
+	d := h.data()
+	if delegations, ok := d.Delegations[user.ID]; ok {
+		if _, hasDelegation := delegations[label]; hasDelegation {
+			t.Error("cross-site post created a delegation")
+		}
+	}
+}
+
+// TestUnadmittedUserCannotGrant tests that an unadmitted user cannot grant a delegation.
+func TestUnadmittedUserCannotGrant(t *testing.T) {
+	h, si := newSignInHarness(t)
+
+	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
+	reg := h.register(n)
+	label := reg.Label
+
+	authURL, err := h.b.signInMgr.StartAction("grant")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	u, _ := url.Parse(authURL)
+	state := u.Query().Get("state")
+	nonce := u.Query().Get("nonce")
+
+	si.expectedNonce = nonce
+
+	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("POST", "/grant-submit", nil)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.PostForm = url.Values{
+		"token": {token},
+		"label": {label},
+	}
+	w := httptest.NewRecorder()
+
+	h.b.handleGrantSubmit(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+
+	if !strings.Contains(w.Body.String(), "not admitted") {
+		t.Error("error should mention not admitted")
+	}
+}
+
+// TestGrantDelegationTakesEffect tests that granting a delegation takes effect.
+func TestGrantDelegationTakesEffect(t *testing.T) {
+	h, si := newSignInHarness(t)
+
+	user, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
+	reg := h.register(n)
+	label := reg.Label
+
+	authURL, err := h.b.signInMgr.StartAction("grant")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	u, _ := url.Parse(authURL)
+	state := u.Query().Get("state")
+	nonce := u.Query().Get("nonce")
+
+	si.expectedNonce = nonce
+
+	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("POST", "/grant-submit", nil)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.PostForm = url.Values{
+		"token": {token},
+		"label": {label},
+	}
+	w := httptest.NewRecorder()
+
+	h.b.handleGrantSubmit(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	d := h.data()
+	delegations, ok := d.Delegations[user.ID]
+	if !ok {
+		t.Fatal("no delegations found for user")
+	}
+
+	if _, hasDelegation := delegations[label]; !hasDelegation {
+		t.Error("delegation was not created")
+	}
+}
+
+// TestRevokeDelegationTakesEffectAndEndsLeases tests that revoking a delegation takes effect and
+// ends the label's leases for U.
+func TestRevokeDelegationTakesEffectAndEndsLeases(t *testing.T) {
+	h, si := newSignInHarness(t)
+
+	user1, err := h.b.AdmitUser(si.issuer, si.subject, si.email, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	user2, err := h.b.CreateUser("other@example.com", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
+	reg := h.register(n)
+	label := reg.Label
+
+	if err := h.b.BindLabelToUser(label, user2.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	h.delegate(t, user1, label)
+
+	var res wire.Result
+	status := h.call(n, wire.PathClaim, wire.Claim{
+		Version: wire.Current, ID: "L1", Reach: wire.ReachUser,
+		Entries:    []repoid.Name{repoid.New([]string{rootA}, "svc", false, false)},
+		Derivation: 1, Anchor: "anchor-L1", Holder: holder("a"), ActingFor: user1.UserLabel, ActingForExplicit: true,
+	}, &res)
+	if status != http.StatusOK || res.Code != wire.CodeGranted {
+		t.Fatalf("claim failed: status %d, code %s", status, res.Code)
+	}
+
+	authURL, err := h.b.signInMgr.StartAction("revoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	u, _ := url.Parse(authURL)
+	state := u.Query().Get("state")
+	nonce := u.Query().Get("nonce")
+
+	si.expectedNonce = nonce
+
+	token, _, _, err := h.b.signInMgr.HandleCallback(context.Background(), state, "test-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("POST", "/revoke-submit", nil)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.PostForm = url.Values{
+		"token": {token},
+		"label": {label},
+	}
+	w := httptest.NewRecorder()
+
+	h.b.handleRevokeSubmit(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	d := h.data()
+	if delegations, ok := d.Delegations[user1.ID]; ok {
+		if _, hasDelegation := delegations[label]; hasDelegation {
+			t.Error("delegation was not removed")
+		}
+	}
+
+	facts := h.b.Facts()
+	foundEnded := false
+	for _, l := range facts {
+		if l.ID == "L1" && l.State == wire.StateEnded {
+			foundEnded = true
+
+			if l.EndedBy != "delegation revoked" {
+				t.Errorf("lease should have EndedBy='delegation revoked', got %q", l.EndedBy)
+			}
+
+			break
+		}
+	}
+
+	if !foundEnded {
+		t.Fatalf("lease L1 should be ended after delegation revoked")
 	}
 }

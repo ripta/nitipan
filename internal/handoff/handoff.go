@@ -39,9 +39,14 @@ const (
 // Versions this binary writes. A reader refuses a version it does not know, and a node keeps
 // answering every request version it ever accepted.
 const (
-	RequestVersion  = 4
+	RequestVersion  = 5
 	PresenceVersion = 1
 )
+
+// ActingForSince is the first claim request version whose acting_for is explicit: a user label the
+// CLI asks to claim for, never an OS user name for the broker to replace. An older node answers such a
+// claim "node too old", so it is never forwarded under a version whose acting_for the broker replaces.
+const ActingForSince = 5
 
 // MaxAge is how old a request may be when the node forwards it. The node judges by its own clock,
 // which is the clock the CLI used, since both run on one machine.

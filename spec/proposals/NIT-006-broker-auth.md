@@ -125,12 +125,14 @@ exists.
   also removes those hashes from it, so a rollback never brings back a key forgotten since. The broker deletes the file
   only when the owner confirms on the broker host that no rollback is wanted, and the confirm output says a rollback
   is then impossible. Amended 2026-11-08; see Decision Log
-- Binding a label rewrites every lease it holds whose `acting_for` is not a user label to the newly bound user. The
-  upgrade is one case: it binds the pinned labels to the owner, so their leases move to the owner's scope. A label
-  nobody approved keeps a legacy `acting_for` until it is bound. While cross-user features are off, the broker counts
-  an unbound label's leases in the owner's scope, the only one there is. Renewals carry only the node credential, so
-  without the rewrite a legacy OS user name would outlive the binding, and a new `user` claim from the same person
-  would land in a different scope and be granted over it
+- Binding a label rewrites every lease it holds to the newly bound user. A lease held for a user who still delegates
+  to the label keeps that user, since the delegation authorized it. A rebind to a different user drops those
+  delegations first, so all of the label's leases move. The upgrade is one case: it binds the pinned labels to the
+  owner, so their leases move to the owner's scope. A label nobody approved keeps a legacy `acting_for` until it is
+  bound. While cross-user features are off, the broker counts an unbound label's leases in the owner's scope, the only
+  one there is, and the binding moves them out of it. Renewals carry only the node credential, so without the rewrite
+  a stale value would outlive the binding, and a new `user` claim from the same person would land in a different
+  scope and be granted over it. Amended 2026-11-10; see Decision Log
 - `sender_verified` keeps its NIT-007 meaning: the sender is one of the recipient user's own enrolled nodes. Mail from
   another user's node carries the sender's bound user in a new field, and leaves `sender_verified` absent. Setting
   `sender_verified` on a coworker's mail would make an older reader show it as the user's own mail, against ADR-04's
@@ -192,11 +194,13 @@ The research covers identity only. It does not say who may break whose lease, or
 user's scope without that user's approval.
 
 Decision (autonomous): owners act on their own leases, the broker owner can act on any, and a shared agent acts for a
-user only under that user's standing delegation.
+user only under that user's standing delegation. Amended 2026-11-10; see Decision Log.
 
 - A user may claim in their own `user` scope and at `shared` reach. A lease is a user's own when its holder's bound
   user is that user, or when its `acting_for` is that user. So a user can release or break a lease a shared agent
-  holds for them
+  holds for them. A release from a label other than the holder's names the lease's ID. It ends the lease as a break
+  does, so the holder's node is told and drops its anchor. A release by name, and a death report, stay with the
+  holder's own node
 - A user may `break --force` only their own leases. A coworker's live `shared` lease ends by release, its term, a death
   report, or a break by its own user or the broker owner
 - The broker owner may break any lease, through a command on the broker host. Like approve, forget, "revoke user", and
@@ -209,17 +213,24 @@ user only under that user's standing delegation.
 - M1's "match" is defined by this rule: a record's `acting_for` matches when it is the node's bound user, or a user
   who delegated to this label
 - A request version from before this proposal carries an OS user name in `acting_for`. The broker treats it as
-  unauthenticated and substitutes the node's bound user. An older CLI's claims then keep working in its own user's
-  scope, and none can claim for another user
+  unauthenticated and substitutes the node's bound user, even when the value names a user who delegated to the
+  label. An older CLI's claims then keep working in its own user's scope, and none can claim for another user. A
+  label nobody approved counts in the broker owner's scope, under M1's unbound-label rule, and its claim for another
+  user is refused with an error that names the approve step. Amended 2026-11-10; see Decision Log
 - A claim for another user rides a new request version, which carries that user's user label. An older node answers
   it with "node too old" rather than forwarding it under the old version, where the broker would substitute the
-  agent's own user and the lease would silently count in the wrong scope. Amended 2026-10-24; see Decision Log
+  agent's own user and the lease would silently count in the wrong scope. A node whose broker predates the field
+  answers "broker too old" for the same reason. Amended 2026-11-10; see Decision Log
 - Discovery shows `shared` leases to every bound user. `user` leases and mirrored `machine` leases show only to their
   owner and to labels holding the owner's delegation. A name lookup across users matches only `shared` leases.
-  Mirrored leases carry local paths and names, which coworkers have no need to read
-- Overlap reports between `user` leases and mirrored `machine` leases, under NIT-004's "Machine leases and user leases
-  on the same path", go only between leases of one user. Across users they would leak the mirrored paths discovery
-  hides
+  Mirrored leases carry local paths and names, which coworkers have no need to read. A lease or mirror whose owner
+  the broker cannot resolve shows only when it is `shared`, so an unknown owner fails closed
+- The scope, break, discovery, and overlap rules here apply only while cross-user features are on. While they are
+  off, the broker runs one scope, as M1's unbound-label rule says: `user` leases conflict whoever holds them, any
+  label may break any lease, and discovery hides nothing. Amended 2026-11-10; see Decision Log
+- Overlap reports between wider-reach leases and mirrored `machine` leases, under NIT-004's "Machine leases and user
+  leases on the same path", never show another user's mirror, at any reach. An overlap shows to the asker only when
+  discovery shows the asker both leases. Across users they would leak the mirrored paths discovery hides. Amended 2026-11-10; see Decision Log
 
 This leaves one residual. The node keeps renewing a holder whose liveness reads unknown, under NIT-004's "Lease term
 and renewal". A coworker's `shared` lease on such a holder then never ends by term or death report. Only that coworker
@@ -410,7 +421,10 @@ Node and broker:
   bound only by approval on the broker host, which binds it to the owner. An old node gets no cross-user mail, and its
   cross-user sends are refused at send
 - New node to old broker: the node learns the broker's version at registration. `whoami`, pairing codes, and
-  cross-user mail report "broker too old". Leases and single-user mail keep working under NIT-004 and NIT-007
+  cross-user mail report "broker too old". So does a claim for another user, since an old broker ignores the field
+  that marks `acting_for` explicit and would substitute the label's own user. The broker says at registration that it
+  reads the field, and the node forwards no such claim to a broker that did not say so. Leases and single-user mail
+  keep working under NIT-004 and NIT-007. Amended 2026-11-10; see Decision Log
 
 CLI and node:
 
@@ -422,7 +436,8 @@ CLI and node:
   unverified. An old reader does not show the sender-user field. It never shows a coworker's mail as the user's own
 
 Broker store: the change is a new major version, under "Node credential". An older broker refuses the new file and
-starts from the previous one NIT-004 keeps.
+starts from the previous one NIT-004 keeps. The refused-claim notice record rides in that major version, with no
+minor version of its own. Amended 2026-11-10; see Decision Log.
 
 Raising a user label's derivation version follows ADR-05's migration rules, as machine labels do.
 
@@ -435,7 +450,7 @@ they conflict, the refusal can name a lease discovery hides from V. If they do n
 U's `user`-reach work off the same files.
 
 Decision (autonomous): they conflict in both directions, as NIT-004 says. A refusal shows each conflicting lease only
-at the detail discovery would show the asker.
+at the detail discovery would show the asker. Amended 2026-11-10; see Decision Log.
 
 - V's `shared` claim refused by U's `user` lease says only that the name V asked about is held at `user` reach by
   another user. It names no holder, path, or user. It tells V the ways forward: wait for the lease to end, or ask the
@@ -444,11 +459,13 @@ at the detail discovery would show the asker.
   lease key and V's user label, never the name V asked for, so V puts no text of its choosing in front of U's agent.
   It is delivered on U's next nitipan call and never rings, turn hooks included. Under NIT-008 a pending notice rings,
   and a refused claim costs V nothing, so a ringing notice would let V wake U's idle agents with no mail grant. This
-  notice kind is an exception to NIT-008's ring rule. At most one such notice goes out per lease per coworker. U can
-  then release or reach out, so V is not left only with the broker owner
+  notice kind is an exception to NIT-008's ring rule. At most one such notice goes out per lease per coworker. The
+  broker records the coworker in the lease before it sends the notice, so a restart sends no second one, and a
+  notice lost on the way is not sent again. U can then release or reach out, so V is not left only with the broker
+  owner
 - A label holding U's delegation, and U asking against V's visible `shared` lease, get the full refusal NIT-004 gives
-- A refusal with no holder takes a new response version, so a CLI from before this proposal never prints an empty
-  holder. An older CLI gets a refusal it already knows, without the hidden lease's details
+- A refusal by a hidden lease is a message in the shape every CLI already prints, with only the leases the asker can
+  see. A CLI from before this proposal never prints an empty holder, so no new response version is needed. Amended 2026-11-10; see Decision Log
 
 This leaves one residual. V can probe `shared` claims across a repo to learn where coworkers hold hidden `user`
 leases, one yes or no per claim. V must already have the repo, and each probe that succeeds takes a real lease. A
@@ -532,9 +549,10 @@ Amended 2026-10-24; see Decision Log.
   user on that host could run them. Mitigation: none is reachable through a node, and `setup` says to run the broker
   as an OS user, or on a host, where no agent session runs.
 - **A delegated label acts in the delegator's scope** — likelihood: medium, impact: medium.
-  Any session on a label U delegated to, a prompt-injected one included, can claim and break in U's scope and read
-  U's `user` and mirrored leases. Accepted: a delegation takes U's identity proof on the broker page, and revoking it
-  ends the label's leases for U at once. A narrower grant per action is a per-grant knob nobody named.
+  Any session on a label U delegated to, a prompt-injected one included, can claim in U's scope and read U's `user`
+  and mirrored leases. It breaks only the leases it holds and the leases of its own user, never U's other leases.
+  Accepted: a delegation takes U's identity proof on the broker page, and revoking it ends the label's leases for U
+  at once. A narrower grant per action is a per-grant knob nobody named. Amended 2026-11-10; see Decision Log.
 - **A granted coworker's session drives the user's agents through mail** — likelihood: medium, impact: high.
   A woken idle Codex or opencode session runs an unattended turn on the sender's text. Mitigation: mail crosses users
   only under the recipient user's grant, first messages reach only sessions holding a `shared` lease, replies ride on
@@ -621,7 +639,7 @@ Amended 2026-10-24; see Decision Log.
 
 **As built:**
 
-Store 2.0 adds user identity collections: Users, IssuerSubs, PendingAdmissions, Bindings, Delegations, MailGrants, Conversations, PairingCodes, SchemeReports, CrossUserEnabled, and OwnerID. MigrateV1ToV2 in internal/broker/migrate.go binds every pinned label to the owner, copies all v1 fields, and rewrites acting_for on their leases. Tests: TestMigrateV1ToV2CreatesOwnerAndBindsPinnedLabels in internal/broker/migrate_test.go proves upgrade binds pinned labels with key and label unchanged. TestMigrateV1ToV2RewritesActingForOnPinnedLabelLeases in internal/broker/migrate_test.go proves binding rewrites acting_for. TestMigrateV1ToV2PreservesAllFields in internal/broker/migrate_test.go proves migration preserves every v1 field including Sessions, Outcomes, and Counter. TestMajorMigrationKeepsThePreviousFileAndAnOlderBrokerStartsFromIt in internal/broker/store_test.go proves the major version change and rollback to the kept file. TestUpgradeWithQueuedMailPreservesLabelKeyAndMail in internal/broker/m1_test.go proves migration preserves label, key, and queued mail.
+Store 2.0 adds user identity collections: Users, IssuerSubs, PendingAdmissions, Bindings, Delegations, MailGrants, Conversations, PairingCodes, SchemeReports, CrossUserEnabled, and OwnerID. MigrateV1ToV2 in internal/broker/migrate.go binds every pinned label to the owner, copies all v1 fields, and rewrites acting_for to the owner's user label on every lease a pinned label holds. It finds those leases by the lease's `node` field, the holder's label, as the running broker's binding does. A lease with no acting_for moves too, and no other field of the lease changes. Tests: TestMigrateV1ToV2CreatesOwnerAndBindsPinnedLabels in internal/broker/migrate_test.go proves upgrade binds pinned labels with key and label unchanged. TestMigrateV1ToV2RewritesActingForOnPinnedLabelLeases in internal/broker/migrate_test.go proves the upgrade rewrites acting_for on leases stored in the 1.x grant shape, reads them back through the broker's lease decoder, and leaves an unpinned label's lease alone. TestMigrateV1ToV2PreservesAllFields in internal/broker/migrate_test.go proves migration preserves every v1 field including Sessions, Outcomes, and Counter. TestMajorMigrationKeepsThePreviousFileAndAnOlderBrokerStartsFromIt in internal/broker/store_test.go proves the major version change and rollback to the kept file. TestUpgradeWithQueuedMailPreservesLabelKeyAndMail in internal/broker/m1_test.go proves migration preserves label, key, and queued mail.
 
 User identity: CreateUser, AdmitUser, LinkIssuerSub, and RecordPendingAdmission in internal/broker/user.go manage user records. DeriveUserLabel produces four-word user labels from user IDs. Pairing codes are four words from the word list, SHA-256 hashed, expiring in 10 minutes with a 5-wrong-code lockout per signer per label. Tests: TestDeriveUserLabelProducesFourWords in internal/broker/user_test.go proves user label derivation. TestGeneratePairingCodeProducesFourWords, TestCheckPairingCodeAcceptsCorrectCode, TestCheckPairingCodeRejectsWrongCode, TestCheckPairingCodeRejectsExpiredCode, TestCheckPairingCodeLocksOutAfterMaxWrongAttempts in internal/broker/user_test.go prove pairing code behavior. TestAdmitUserMapsIssuerSubToUser and TestAdmitUserRefusesDuplicateIssuerSub in internal/broker/user_test.go prove admission.
 
@@ -643,14 +661,16 @@ Rollback safety: StripHashFromKeptFile in internal/broker/store.go deletes the n
 
 ### M2: Authorization and shared agents
 
-**Status:** NOT STARTED
+**Status:** DONE
 
-- `user` leases of two bound users on overlapping names do not conflict. Two labels of one user do
+- Once cross-user features are on, `user` leases of two bound users on overlapping names do not conflict. Two labels
+  of one user do. While they are off, both conflict. Amended 2026-11-10; see Decision Log
 - U's `user` lease and V's `shared` lease on overlapping names conflict both ways. V's refusal names no holder, path,
   or user, and says what V can do next. U gets one notice per lease per coworker, naming only U's lease key and V's
   user label, and it never rings, through a wake path or a turn hook. A label holding U's delegation gets the full
-  refusal. A CLI from before this proposal gets a refusal it knows
-- Overlap reports between `user` leases and mirrored `machine` leases go only between leases of one user
+  refusal. The refusal is a message every CLI already prints, so a CLI from before this proposal never prints an
+  empty holder. Amended 2026-11-10; see Decision Log
+- An overlap report never shows another user's mirrored `machine` lease, at any reach. Amended 2026-11-10; see Decision Log
 - A user can break only their own leases, and the broker owner can break any from the broker host. A coworker's
   `break --force` of another user's live `shared` lease is refused
 - A shared agent's claim with `acting_for` U is refused without U's delegation, and granted with it. The lease counts
@@ -658,10 +678,41 @@ Rollback safety: StripHashFromKeptFile in internal/broker/store.go deletes the n
 - A delegation granted through the request handoff alone is refused. One granted with an identity proof on the broker
   page takes effect, and revoking it ends the agent's leases for U with a notice. Those leases are never revived
 - A request version from before this proposal has its `acting_for` replaced by the node's bound user, and still claims
-  in that user's scope. A claim for another user from a new CLI to an old node gets "node too old"
+  in that user's scope. A claim for another user from a new CLI to an old node gets "node too old", and one through a
+  new node to an old broker gets "broker too old". Amended 2026-11-10; see Decision Log
 - "Revoke user" on U ends every lease held for U
 - Discovery shows another user's `shared` leases, and hides their `user` leases and mirrored leases unless the asker's
   label holds their delegation
+
+**As built:**
+
+Scope follows the cross-user switch. Once it is on, a `user` claim conflicts only within the user its `acting_for`
+names. While it is off, the broker runs one scope. A label nobody approved counts in the broker owner's scope. M1's
+check for that unbound-label rule was not met until review found it here: such a label's `acting_for` had passed
+through unchanged. Binding the label later moves its leases to the bound user, except a lease held for a user who
+still delegates to it. The rewrite runs on the broker's in-memory leases and persists with them.
+
+A refusal across users is filtered before the broker stores the outcome, so a replay returns the same bytes. The
+redacted refusal is a plain message, which every CLI prints as it is. The holder's notice is recorded in the lease by
+the write that stores the outcome, and the event goes out only after that write, so a broker restart sends no second
+one. No test drives a Codex or opencode wake for the notice, since the node's wake path rings only stored mail.
+Overlap reports follow the discovery rule for the asker, so no reach shows another user's mirror.
+
+A break of a lease that already ended answers ended to any node, and carries the lease only to a node that can
+discover it. The owner's break on the broker host names the owner by user label, since the owner may have no email.
+`nitipan release <lease-id>` sends an ID with no record on the machine to the broker while a node runs, which is how
+a user releases a lease a shared agent holds for them.
+
+A claim for another user reaches the broker only when the broker said at registration that it reads explicit
+`acting_for`. Otherwise the node answers "broker too old". A claim without the mark acts as the label's bound user,
+even when it names a user who delegated to the label. Review found that it had honored the delegation.
+
+The page's grant and revoke check the signer's admission under the same lock as the change, so a "revoke user" that
+lands after the sign-in refuses them. Revoking a delegation or a user ends only live and lapsed leases, and leaves an
+end fact as it was.
+
+The notice record rides in store 2.0, and no store minor version was added. The divergences are in the Decision Log
+entries of 2026-11-10.
 
 ### M3: Cross-user mail
 
@@ -803,6 +854,56 @@ Rollback safety: StripHashFromKeptFile in internal/broker/store.go deletes the n
   nitipan never reaches for either. The risk's revisit hook, which waited on a spike, is removed. Its mitigation
   stays "forget label", "revoke user", and "list bindings". A spike ran against the user's login keychain that day
   and was stopped. Its findings were never reviewed and are not recorded.
+- 2026-11-10 (autonomous): M2's implementation narrowed four decisions. "What auth authorizes" had said a user can
+  release a lease a shared agent holds for them, with no mechanism. A release from a label other than the holder's
+  now names the lease's ID and ends it through the break path, since a plain delete would leave the holder's anchor
+  behind. A release by name and a death report stay with the holder's node. The break and discovery rules had no
+  stated gate. They now apply only once cross-user features are on, following M1's single-scope rule for that state.
+  Discovery had no rule for a lease whose owner the broker cannot resolve. It now shows only when `shared`, failing
+  closed. "`user` and `shared` leases across users" had said a refusal with no holder takes a new response version.
+  The mark now rides only replies to claim requests at the request version this proposal adds, and the notice record
+  is kept in the lease and sent at most once. "Version skew" gains the store minor version that record needs. The
+  old-node bullet's 2026-10-24 marker moved to the decision's lead, which now carries this entry's marker.
+- 2026-11-10 (autonomous, run best guess): M2's milestone review changed eight texts.
+  1. "What auth authorizes" said nothing of a label nobody approved, and the broker passed its `acting_for` through.
+     M1's check that such a label's lease conflicts with the owner's while cross-user features are off was therefore
+     not met. The label now counts in the owner's scope, and its claim for another user is refused, naming the
+     approve step. The old-version bullet also says now that a value naming a delegator is substituted too. The
+     broker had honored the delegation on an unauthenticated value.
+  2. The switch bullet covered only break and discovery, and M2's first check said two users' `user` leases never
+     conflict. While cross-user features are off, the broker runs one scope, as the README says and as break and
+     discovery do. The bullet and the check now say the scope rule waits on the switch too.
+  3. The overlap bullet and its M2 check said overlap reports go only between leases of one user. The broker still
+     reported a `shared` grant's overlaps across users, and failed open on an owner it could not resolve. They now say
+     an overlap report never shows another user's mirror, at any reach, and reports follow the discovery rule. The
+     bullet's own reason carries it: across users the report would leak the paths discovery hides.
+  4. "Version skew" listed `whoami`, pairing codes, and cross-user mail as what a new node refuses against an old
+     broker. An old broker ignores the explicit `acting_for` mark and would substitute the label's own user, so a
+     claim for another user now gets "broker too old" too. The broker says it reads the mark with a flag in its
+     registration answer. A comparison of broker versions was not used, since the version is a free-form build string
+     that a development build does not order. The `acting_for` bullet and M2's old-node check name it too.
+  5. "`user` and `shared` leases across users" said a refusal with no holder is marked only in replies to the new
+     claim request version. No CLI read the mark, and the redacted refusal is a message every CLI already prints. The
+     mark is gone, and the bullet and its M2 check say no new response version is needed.
+  6. "Version skew" said the refused-claim notice record adds a store minor version, which an earlier minor refuses.
+     No 2.0 store has shipped, and nothing was pushed. A 2.0 store without the record reads with no notices recorded,
+     and a broker of this major version that predates the record drops it on a rewrite. The record now rides in store
+     2.0 with no minor version. A rollback across the record could send a holder a second notice, which costs
+     nothing.
+  7. The risk "A delegated label acts in the delegator's scope" said the label can break in U's scope. The break
+     rule lets it break only the leases it holds and the leases of its own user, never U's other leases. The risk
+     now says so.
+  8. "Node credential" said binding rewrites only a lease whose `acting_for` is not a user label. An unbound label's
+     lease now names the owner's user label, so binding that label to a coworker left it in the owner's scope. Binding
+     now moves every lease the label holds to the bound user, except one held for a user who still delegates to the
+     label. The rewrite also goes through the broker's in-memory leases. It had changed only the stored copy, which
+     the next lease write overwrote. The upgrade's rewrite is unchanged, since it binds only to the owner.
+- 2026-11-10 (autonomous, run best guess): Correction of fact in M1's As built. The upgrade's `acting_for` rewrite
+  found a label's leases by a `holder.label` field. A stored lease has no such field. It names its holder's label in
+  `node`. So the upgrade rewrote no real lease, and its test passed only on hand-built lease JSON. The rewrite now
+  matches on `node`, as the running broker's binding does, and the test stores leases in the 1.x grant shape. A
+  pinned label's lease with no `acting_for` now moves to the owner too, since "Node credential" moves every lease the
+  label holds. The M1 check and the decisions are unchanged.
 
 ## References
 

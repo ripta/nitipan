@@ -138,12 +138,18 @@ type Forwarder func(ctx context.Context, req handoff.Request) (json.RawMessage, 
 
 // Node is a running node.
 type Node struct {
-	opts   Options
-	cl     *client
-	https  bool
-	term   time.Duration
-	keep   time.Duration
-	label  atomic.Value
+	opts  Options
+	cl    *client
+	https bool
+	term  time.Duration
+	keep  time.Duration
+	label atomic.Value
+
+	// actingFor is true once the broker said at registration that it reads explicit acting_for. A
+	// broker that predates it ignores the field and replaces the value, so a claim for another user
+	// would count in the wrong scope.
+	actingFor atomic.Bool
+
 	seen   map[string]struct{}
 	seenQ  []string
 	forwrd map[string]Forwarder
@@ -370,6 +376,7 @@ func (n *Node) setupSession(ctx context.Context) (sctx context.Context, streamEr
 		return nil, nil, nil, err
 	}
 
+	n.actingFor.Store(reg.ActingForExplicit)
 	n.label.Store(reg.Label)
 	n.term = time.Duration(reg.TermMillis) * time.Millisecond
 	n.keep = time.Duration(reg.KeepaliveMillis) * time.Millisecond

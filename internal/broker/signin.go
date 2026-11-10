@@ -375,20 +375,204 @@ func (b *Broker) handleBindSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (b *Broker) handleGrantDelegation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+
+		return
+	}
+
+	if b.signInMgr == nil {
+		http.Error(w, "OIDC not configured", http.StatusServiceUnavailable)
+
+		return
+	}
+
+	authURL, err := b.signInMgr.StartAction("grant")
+	if err != nil {
+		http.Error(w, "Failed to start sign-in", http.StatusInternalServerError)
+
+		return
+	}
+
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+func (b *Broker) handleRevokeDelegation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+
+		return
+	}
+
+	if b.signInMgr == nil {
+		http.Error(w, "OIDC not configured", http.StatusServiceUnavailable)
+
+		return
+	}
+
+	authURL, err := b.signInMgr.StartAction("revoke")
+	if err != nil {
+		http.Error(w, "Failed to start sign-in", http.StatusInternalServerError)
+
+		return
+	}
+
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+func (b *Broker) handleGrantSubmit(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form", http.StatusBadRequest)
+
+		return
+	}
+
+	token := r.FormValue("token")
+	label := r.FormValue("label")
+
+	if token == "" || label == "" {
+		http.Error(w, "Missing required fields", http.StatusBadRequest)
+
+		return
+	}
+
+	action, claims, err := b.signInMgr.ConsumeToken(token)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid token: %v", err), http.StatusUnauthorized)
+
+		return
+	}
+
+	if action != "grant" {
+		http.Error(w, "Token not for grant action", http.StatusBadRequest)
+
+		return
+	}
+
+	user, err := b.GrantDelegation(claims.Issuer, claims.Subject, label, time.Now())
+	if errors.Is(err, ErrNotAdmitted) {
+		http.Error(w, "User not admitted", http.StatusForbidden)
+
+		return
+	}
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to grant delegation: %v", err), http.StatusInternalServerError)
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	tmpl := template.Must(template.New("grant-success").Parse(grantSuccessHTML))
+	data := struct {
+		Label string
+		Email string
+	}{
+		Label: label,
+		Email: user.Email,
+	}
+
+	if err := tmpl.Execute(w, data); err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+	}
+}
+
+func (b *Broker) handleRevokeSubmit(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form", http.StatusBadRequest)
+
+		return
+	}
+
+	token := r.FormValue("token")
+	label := r.FormValue("label")
+
+	if token == "" || label == "" {
+		http.Error(w, "Missing required fields", http.StatusBadRequest)
+
+		return
+	}
+
+	action, claims, err := b.signInMgr.ConsumeToken(token)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid token: %v", err), http.StatusUnauthorized)
+
+		return
+	}
+
+	if action != "revoke" {
+		http.Error(w, "Token not for revoke action", http.StatusBadRequest)
+
+		return
+	}
+
+	user, err := b.RevokeDelegation(claims.Issuer, claims.Subject, label)
+	if errors.Is(err, ErrNotAdmitted) {
+		http.Error(w, "User not admitted", http.StatusForbidden)
+
+		return
+	}
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to revoke delegation: %v", err), http.StatusInternalServerError)
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	tmpl := template.Must(template.New("revoke-success").Parse(revokeSuccessHTML))
+	data := struct {
+		Label string
+		Email string
+	}{
+		Label: label,
+		Email: user.Email,
+	}
+
+	if err := tmpl.Execute(w, data); err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+	}
+}
+
 const signInPageHTML = `<!DOCTYPE html>
 <html>
 <head>
     <title>nitipan Sign In</title>
     <style>
         body { font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
-        button { padding: 10px 20px; font-size: 16px; }
+        button { padding: 10px 20px; font-size: 16px; margin: 10px 5px; }
     </style>
 </head>
 <body>
     <h1>nitipan Broker Sign In</h1>
-    <p>Bind a machine label to your identity.</p>
+    <p>Choose an action:</p>
     <form method="POST" action="/bind">
-        <button type="submit">Sign In to Bind Label</button>
+        <button type="submit">Bind a Label</button>
+    </form>
+    <form method="POST" action="/grant">
+        <button type="submit">Grant Delegation</button>
+    </form>
+    <form method="POST" action="/revoke">
+        <button type="submit">Revoke Delegation</button>
     </form>
 </body>
 </html>`
@@ -396,7 +580,7 @@ const signInPageHTML = `<!DOCTYPE html>
 const actionFormHTML = `<!DOCTYPE html>
 <html>
 <head>
-    <title>Bind Label</title>
+    <title>{{if eq .Action "bind"}}Bind Label{{else if eq .Action "grant"}}Grant Delegation{{else if eq .Action "revoke"}}Revoke Delegation{{end}}</title>
     <style>
         body { font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
         input { padding: 8px; margin: 5px 0; width: 100%; box-sizing: border-box; }
@@ -405,11 +589,12 @@ const actionFormHTML = `<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <h1>Bind Label</h1>
+    <h1>{{if eq .Action "bind"}}Bind Label{{else if eq .Action "grant"}}Grant Delegation{{else if eq .Action "revoke"}}Revoke Delegation{{end}}</h1>
     <div class="info">
         <p>Signed in as: {{.Email}}</p>
         <p>User ID: {{.UserID}}</p>
     </div>
+    {{if eq .Action "bind"}}
     <p>Enter the label and pairing code shown on your machine:</p>
     <form method="POST" action="/bind-submit">
         <input type="hidden" name="token" value="{{.Token}}">
@@ -420,6 +605,25 @@ const actionFormHTML = `<!DOCTYPE html>
         <p><strong>You are binding this label to your user.</strong></p>
         <button type="submit">Confirm Bind</button>
     </form>
+    {{else if eq .Action "grant"}}
+    <p>Enter the label to delegate to:</p>
+    <form method="POST" action="/grant-submit">
+        <input type="hidden" name="token" value="{{.Token}}">
+        <label>Label:</label>
+        <input type="text" name="label" placeholder="e.g. alpha-bravo-charlie-delta" required>
+        <p><strong>You are granting this label permission to act in your scope.</strong></p>
+        <button type="submit">Confirm Grant</button>
+    </form>
+    {{else if eq .Action "revoke"}}
+    <p>Enter the label to revoke delegation from:</p>
+    <form method="POST" action="/revoke-submit">
+        <input type="hidden" name="token" value="{{.Token}}">
+        <label>Label:</label>
+        <input type="text" name="label" placeholder="e.g. alpha-bravo-charlie-delta" required>
+        <p><strong>You are revoking this label's permission to act in your scope. Its leases held for you will be ended.</strong></p>
+        <button type="submit">Confirm Revoke</button>
+    </form>
+    {{end}}
 </body>
 </html>`
 
@@ -448,5 +652,33 @@ const pendingAdmissionHTML = `<!DOCTYPE html>
 <body>
     <h1>Pending Admission</h1>
     <p>Your sign-in was recorded. Ask the broker owner to admit you.</p>
+</body>
+</html>`
+
+const grantSuccessHTML = `<!DOCTYPE html>
+<html>
+<head>
+    <title>Success</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Success</h1>
+    <p>Delegation granted to {{.Label}} for {{.Email}}.</p>
+</body>
+</html>`
+
+const revokeSuccessHTML = `<!DOCTYPE html>
+<html>
+<head>
+    <title>Success</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Success</h1>
+    <p>Delegation revoked from {{.Label}} for {{.Email}}.</p>
 </body>
 </html>`

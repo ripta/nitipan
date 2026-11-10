@@ -441,6 +441,7 @@ nitipan broker link <issuer> <sub> <user-id>   # map a new issuer plus sub to an
 nitipan broker bindings                        # list all label bindings with last-seen times
 nitipan broker revoke-user <user-id>           # forget all of a user's labels and remove their admission
 nitipan broker cross-user <enable>             # turn cross-user features on or off
+nitipan broker break <lease-id>                # end any broker lease as the broker owner
 ```
 
 The `approve` command binds the label to the broker owner when run on the broker host. A coworker binds through the
@@ -469,6 +470,69 @@ sends its key over plain HTTP again, even when a later response omits the flag.
 
 `nitipan who am-i` prints the caller's user label through the node. The user label is what `acting_for`, cross-user
 mail, delegations, and grants use to name users.
+
+### Lease scopes across users
+
+Each bound user has their own `user` scope. Two users' `user` leases on overlapping names do not conflict. Two labels
+of one user do. Every bound user shares one `shared` scope. A `user` lease and a `shared` lease on overlapping names
+conflict, whichever user holds each. An overlap report never shows another user's mirrored `machine` lease, at any
+reach.
+
+While cross-user features are off, the broker runs one scope, as before. A label nobody approved counts in the broker
+owner's scope then, and its claims for another user are refused.
+
+### Delegating to a shared agent
+
+A shared agent serves several users. It claims in a user's scope only under that user's standing delegation to the
+agent's label. Grant or revoke a delegation on the broker's sign-in page with "Grant Delegation" or "Revoke
+Delegation". Each action needs its own sign-in. Type the agent's label on the form that follows. No request through a
+node can grant or revoke a delegation.
+
+The agent claims for a user with `nitipan acquire --acting-for <user label>`. The user tells the agent their user
+label, which `nitipan who am-i` prints. The lease then counts in that user's `user` scope only. A claim for another
+user without that user's delegation is refused, and the error names the sign-in page. A node from before this feature
+answers such a claim with "node too old", and nitipan writes no request. A node whose broker is from before this
+feature answers "broker too old", and forwards nothing.
+
+A claim without `--acting-for`, or from an older nitipan, acts as the label's own bound user. The broker replaces any
+other value it carries.
+
+Revoking a delegation ends every lease the agent's label holds for that user. The agent's node writes the holder a
+notice. An ended lease is never revived. `nitipan broker revoke-user` ends every lease held for that user the same
+way.
+
+### Releasing and breaking across users
+
+A lease is a user's own when its holder's label is bound to that user, or when its `acting_for` names that user. Any
+of the user's labels may release or `break --force` it. That includes a lease a shared agent holds for the user.
+Name the lease by its ID: `nitipan release <lease-id>`. A release by a label other than the holder's ends the lease,
+and the holder's node writes its holder a notice.
+
+A user may not `break --force` a coworker's lease. A coworker's live `shared` lease ends when its holder releases it,
+when its term runs out, on a death report, or by a break from its own user. The broker owner may end any lease with
+`nitipan broker break <lease-id>` on the broker host. The holder's node then writes a notice that names the broker
+owner by user label, as in "broker owner <user label>". The refusal of a coworker's break names each of these ways forward.
+
+### Discovery across users
+
+`nitipan who holds`, `nitipan who is`, and `nitipan list` show every bound user's `shared` leases. A coworker's
+`user` leases and mirrored `machine` leases show only to that coworker, and to labels holding their delegation. A
+lookup by holder name across users matches only `shared` leases. A lease whose owner the broker cannot resolve shows
+only when it is `shared`.
+
+While cross-user features are off, discovery shows every lease.
+
+### A claim refused by a lease you cannot see
+
+A coworker's hidden `user` lease can refuse your `shared` claim. The refusal then names no holder, path, node, or
+user. It says the name is held at `user` reach by another user. Wait for that lease to end, or ask the broker owner.
+Leases you can see are still listed in full. The refusal is an ordinary message, so an older nitipan prints it the
+same way.
+
+The coworker's node writes them one notice per lease per refused user. It names only their own lease and your user
+label, never the name you asked for. The notice is delivered on the holder's next nitipan call. It never rings, wakes
+no session, and prints nothing from a turn hook. The broker records each notice in the lease, so a broker restart
+sends no second one.
 
 ### Running the broker safely
 
