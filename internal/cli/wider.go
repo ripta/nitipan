@@ -101,6 +101,15 @@ func (a *app) nodeFor(kind string) error {
 	return nil
 }
 
+// nodeAt is nodeFor at an explicit request version, or nodeFor itself for a version of 0.
+func (a *app) nodeAt(kind string, version int) error {
+	if version == 0 {
+		return a.nodeFor(kind)
+	}
+
+	return a.nodeForVersion(kind, version)
+}
+
 // nodeForVersion requires a live node that knows the request kind at the given version.
 func (a *app) nodeForVersion(kind string, version int) error {
 	p, err := a.requireNode()
@@ -119,13 +128,14 @@ func (a *app) nodeForVersion(kind string, version int) error {
 // request the node claimed and did not answer leaves an in-flight record, so a retry of the same
 // command reuses the request ID and the broker returns the same answer.
 func (a *app) roundTrip(stateDir, kind, id, inflight string, body any) (handoff.Reply, error) {
-	return a.roundTripWithActingFor(stateDir, kind, id, inflight, body, false)
+	return a.roundTripAt(stateDir, kind, id, inflight, body, 0)
 }
 
-// roundTripWithActingFor is roundTrip with an explicit acting-for flag. When explicitActingFor is
-// true, the request rides handoff.ActingForSince, which tells the node and broker that acting_for is
-// explicit and must not be replaced silently.
-func (a *app) roundTripWithActingFor(stateDir, kind, id, inflight string, body any, explicitActingFor bool) (handoff.Reply, error) {
+// roundTripAt is roundTrip at an explicit request version. A version of 0 writes the lowest version that
+// carries the kind. A request whose meaning a newer version changes rides that version, as a claim for
+// another user rides handoff.ActingForSince, so an older node answers it "node too old" instead of
+// forwarding it under the old meaning.
+func (a *app) roundTripAt(stateDir, kind, id, inflight string, body any, version int) (handoff.Reply, error) {
 	local, err := a.deps.Machine()
 	if err != nil {
 		return handoff.Reply{}, fmt.Errorf("identifying this machine: %w", err)
@@ -138,14 +148,14 @@ func (a *app) roundTripWithActingFor(stateDir, kind, id, inflight string, body a
 
 	req := handoff.Request{ID: id, Kind: kind, Requester: a.requester(local), CreatedAt: a.deps.Now().UTC(), Body: raw}
 
-	if explicitActingFor {
-		if err := handoff.SubmitVersion(stateDir, req, handoff.ActingForSince); err != nil {
-			return handoff.Reply{}, fmt.Errorf("handing the %s request to the node: %w", kind, err)
-		}
+	if version != 0 {
+		err = handoff.SubmitVersion(stateDir, req, version)
 	} else {
-		if err := handoff.Submit(stateDir, req); err != nil {
-			return handoff.Reply{}, fmt.Errorf("handing the %s request to the node: %w", kind, err)
-		}
+		err = handoff.Submit(stateDir, req)
+	}
+
+	if err != nil {
+		return handoff.Reply{}, fmt.Errorf("handing the %s request to the node: %w", kind, err)
 	}
 
 	deadline := time.Now().Add(a.handoffWait())
@@ -246,19 +256,14 @@ func (a *app) runAcquireWide(cmd *cobra.Command, h adapter.Holder, reach string)
 			exitcode.ErrUsage, reach)
 	}
 
-	explicitActingFor := false
+	// A claim for another user rides the request version that marks acting_for explicit.
+	version := 0
 	if af := optString(cmd, "acting-for"); af != nil && *af != h.User {
-		explicitActingFor = true
+		version = handoff.ActingForSince
 	}
 
-	if explicitActingFor {
-		if err := a.nodeForVersion(handoff.KindClaim, handoff.ActingForSince); err != nil {
-			return err
-		}
-	} else {
-		if err := a.nodeFor(handoff.KindClaim); err != nil {
-			return err
-		}
+	if err := a.nodeAt(handoff.KindClaim, version); err != nil {
+		return err
 	}
 
 	stateDir, err := a.deps.StateDir()
@@ -327,7 +332,7 @@ func (a *app) runAcquireWide(cmd *cobra.Command, h adapter.Holder, reach string)
 		id = e.NewID()
 	}
 
-	rep, err := a.roundTripWithActingFor(stateDir, handoff.KindClaim, id, flight, body, actingFor != h.User)
+	rep, err := a.roundTripAt(stateDir, handoff.KindClaim, id, flight, body, version)
 	if err != nil {
 		// Only an unknown outcome keeps the anchor, since the claim may still be granted.
 		if !errors.Is(err, ErrOutcomeUnknown) {

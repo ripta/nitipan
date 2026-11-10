@@ -403,9 +403,9 @@ func validRequestID(id string) bool {
 // unauthenticated value, so the label's own bound user replaces it, delegations included. An explicit
 // value stands only when it is the label's bound user, or a user who delegated to the label.
 //
-// An unbound label counts in the broker owner's scope, which is M1's rule while cross-user features are
-// off. Once they are on, the broker refuses an unbound label before any claim reaches here. An unbound
-// label has no binding to check a delegation against, so its explicit claim for anyone is refused.
+// An unbound label counts in the broker owner's scope while cross-user features are off. Once they are
+// on, the broker refuses an unbound label before any claim reaches here. An unbound label has no binding
+// to check a delegation against, so its explicit claim for anyone is refused.
 func (b *Broker) resolveActingFor(label, actingFor string, explicit bool) (string, error) {
 	d := b.store.Data()
 

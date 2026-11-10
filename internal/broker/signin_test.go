@@ -543,8 +543,7 @@ func TestExpiredCodeBindsNothing(t *testing.T) {
 	n := nodeID{Machine: "test-machine", UID: 1000, Key: "test-key"}
 	h.register(n)
 
-	now := time.Now()
-	storePairingCode(t, h.b, "test-label", "word-word-word-word", now.Add(-2*time.Hour))
+	storePairingCode(t, h.b, "test-label", "word-word-word-word", h.wall.Now().Add(-2*time.Hour))
 
 	authURL, err := h.b.signInMgr.StartAction("bind")
 	if err != nil {

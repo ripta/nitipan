@@ -150,6 +150,14 @@ type Node struct {
 	// would count in the wrong scope.
 	actingFor atomic.Bool
 
+	// mailReplies is true once the broker said at registration that it reads a mail send's reply_to. A
+	// broker that predates it would carry a reply as a first message.
+	mailReplies atomic.Bool
+
+	// reportDue is true from registration until the complete mail report reaches the broker. The broker
+	// holds mail from another user until then, so the node keeps trying.
+	reportDue atomic.Bool
+
 	seen   map[string]struct{}
 	seenQ  []string
 	forwrd map[string]Forwarder
@@ -377,6 +385,7 @@ func (n *Node) setupSession(ctx context.Context) (sctx context.Context, streamEr
 	}
 
 	n.actingFor.Store(reg.ActingForExplicit)
+	n.mailReplies.Store(reg.MailReplies)
 	n.label.Store(reg.Label)
 	n.term = time.Duration(reg.TermMillis) * time.Millisecond
 	n.keep = time.Duration(reg.KeepaliveMillis) * time.Millisecond
@@ -388,7 +397,8 @@ func (n *Node) setupSession(ctx context.Context) (sctx context.Context, streamEr
 	}
 
 	n.book.setConnected(true)
-	n.reportMail(ctx)
+	n.reportDue.Store(true)
+	n.retryReport(ctx)
 
 	var cancel context.CancelFunc
 	sctx, cancel = context.WithCancel(ctx)
@@ -477,6 +487,7 @@ func (n *Node) runEventLoop(ctx, sctx context.Context, exe fingerprint, streamEr
 			n.ringMail()
 			n.reportReads(sctx)
 		case <-mailTick.C:
+			n.retryReport(sctx)
 			n.serviceMail(sctx)
 		case <-execTick.C:
 			if n.executableChanged(exe) {

@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-11-08
+**Updated:** 2026-11-10
 
 ## Dependencies
 
@@ -112,7 +112,8 @@ exists.
   coworker's host could register a fresh label, or take over a sleeping laptop's unpinned one, and act in the owner's
   scope
 - Approving a label on the broker host binds it to the broker owner, and the approve output says so. A coworker's
-  machine is bound through the page instead
+  machine is bound through the page instead. Approve refuses a label a coworker bound until it is forgotten, so a
+  repeat approval never takes the coworker's label and bounces their mail. Amended 2026-11-10; see Decision Log
 - A label bound to a different user than it was before, such as a reissued Mac whose hardware UUID and uid repeat,
   starts clean. Mail queued for the label bounces to its senders, and every delegation to the label is dropped. The
   new user never receives the old user's mail or acts under the old user's delegations. "Forget label" and "revoke
@@ -379,11 +380,17 @@ conversation ride on the same grant.
   lease on either side, so a requestor holding no lease still gets its guardian's answer. Every reply is admitted by
   the grant that admitted the conversation's first message, never on its own
 - A reply names the message it answers, in a new send request version. The broker keeps each cross-user
-  conversation's grant in its store until 7 days after its last read. An older CLI cannot send a cross-user reply
-- A reconnecting node's stored-and-read report comes first, as NIT-007's "Delivery guarantees" requires. The broker
-  re-checks only messages the node never stored, so no message is both read and bounced
+  conversation's grant in its store while it holds any of the conversation's messages, and until 7 days after its last
+  read. An older CLI cannot send a cross-user reply. Amended 2026-11-10; see Decision Log
+- A reconnecting node's stored-and-read report comes first, as NIT-007's "Delivery guarantees" requires. The node marks
+  that report complete and sends it on every reconnect, even when it holds nothing. The broker holds mail from another
+  user until the connection's complete report arrives, and the node sends a failed one again. The broker then re-checks
+  only messages the node never stored, so no message is both read and bounced. Amended 2026-11-10; see Decision
+  Log
 - A reply is accepted for 7 days after the message it answers was read, the stage NIT-007's "Delivery guarantees"
-  records. A guardian that resumes on day 6 and replies on day 8 still reaches its requestor
+  records. A guardian that resumes on day 6 and replies on day 8 still reaches its requestor. A reply to a message the
+  broker has not seen read is refused, so the node reports reads before it forwards a reply. Amended 2026-11-10; see
+  Decision Log
 - The broker checks the grant and the reach rule at send, and again before delivery to the recipient's node. It
   bounces with "sender no longer allowed" when the grant was revoked, and "recipient holds no `shared` lease" when
   the reach lapsed. Revoking a grant bounces every later message of its conversations, replies included
@@ -394,6 +401,9 @@ conversation ride on the same grant.
 - The broker accepts a cross-user send only from a node whose registered version knows cross-user mail and its bounce
   reasons. An older sender node is refused at send, with an error it reports as a broker refusal. Delivery to an older
   recipient node follows "Node credential"
+- Mail across users needs cross-user features on, as every other cross-user rule does. While they are off, it is
+  refused at send, and a queued message of a conversation bounces with "sender no longer allowed". Amended
+  2026-11-10; see Decision Log
 
 This leaves two residuals. A granted coworker's injected session can still reach every session U made discoverable,
 and wake it. A revocation after a message is stored on U's machine, but before it is read, does not stop it, since the
@@ -420,11 +430,13 @@ Node and broker:
   user from the key's binding, so nothing new is missing. An old node cannot show a pairing code, so its label is
   bound only by approval on the broker host, which binds it to the owner. An old node gets no cross-user mail, and its
   cross-user sends are refused at send
-- New node to old broker: the node learns the broker's version at registration. `whoami`, pairing codes, and
-  cross-user mail report "broker too old". So does a claim for another user, since an old broker ignores the field
+- New node to old broker: the node learns the broker's version at registration. `whoami`, pairing codes, and a
+  cross-user reply report "broker too old". So does a claim for another user, since an old broker ignores the field
   that marks `acting_for` explicit and would substitute the label's own user. The broker says at registration that it
-  reads the field, and the node forwards no such claim to a broker that did not say so. Leases and single-user mail
-  keep working under NIT-004 and NIT-007. Amended 2026-11-10; see Decision Log
+  reads that field, and that it reads a reply's field. The node forwards no such claim or reply to a broker that did not
+  say so. A first message needs no such check. A node cannot tell that it crosses users, and a broker from before this
+  proposal binds no label to a second user. Leases and single-user mail keep working under NIT-004 and NIT-007. Amended
+  2026-11-10; see Decision Log
 
 CLI and node:
 
@@ -647,11 +659,11 @@ OIDC client: internal/oidc/oidc.go implements authorization code flow with PKCE 
 
 Sign-in page: internal/broker/signin.go serves the page on the broker's main listener outside wire.Prefix. Each action runs its own OIDC round trip with fresh state, nonce, and PKCE verifier. No session cookie exists. After callback, an empty form carries a single-use token. Parameters sent before sign-in are never acted on. The bind action takes label plus pairing code. An OIDC binding pins the key and discards other pending keys. Unadmitted sign-ins record pending admissions. Frame-ancestors 'none' CSP header is sent. Tests: TestSignInPageSetsCSP and TestCallbackSetsCSPOnAllPages in internal/broker/signin_test.go prove CSP. TestFormTokenIsSingleUse in internal/broker/signin_test.go proves single-use tokens. TestParametersBeforeSignInIgnored and TestCrossSitePostWithoutTokenChangesNothing in internal/broker/signin_test.go prove cross-site protection. TestCorrectLabelAndCodePinKeyAndDiscardOtherPending, TestWrongCodeBindsNothing, TestExpiredCodeBindsNothing, TestFiveWrongCodesLockOut in internal/broker/signin_test.go prove binding and lockout. TestUnadmittedSignInRecordsPendingAdmission in internal/broker/signin_test.go proves pending admissions. TestPageNeverListsPendingLabels in internal/broker/signin_test.go proves the page never lists pending labels. TestSignInResolvesThroughIssuerPlusSub in internal/broker/signin_test.go proves sign-in resolution. TestOwnerBoundLabelJoinsOwnerScope in internal/broker/signin_test.go proves owner scope joining.
 
-Admin commands: internal/broker/pin.go AdminHandler serves admissions, admit, link, bindings, revoke-user, and cross-user on the admin socket. Approve output says it binds to the owner. Link refuses an issuer plus sub that already resolves. Revoke-user forgets all labels, removes admission, drops grants and delegations, and drops delegations to those labels. Bindings shows each user, their labels, and last-seen times. Cross-user command refuses when: no OIDC configured, listener neither loopback nor TLS, upgrade binding not run, or any label reported plain HTTP or never reported scheme. Tests: TestAdminSocketListsApprovesAndForgetsForTheBrokersOwnUser in internal/cli/node_pair_test.go proves approve says it binds to the owner. TestAdminSocketRefusesAPeerThatIsAnotherOSUser and TestAdminSocketNeedsAPrivateDirectory in internal/cli/node_pair_test.go prove admin socket security. TestLinkIssuerSubMapsToExistingUser in internal/broker/user_test.go proves link maps to existing user. TestLinkIssuerSubRefusesExistingMapping in internal/broker/user_test.go proves link refuses an issuer plus sub that already resolves. TestTheApprovalCommandsReachTheBrokerOnlyThroughItsAdminSocket in internal/cli/node_pair_test.go proves no admin command is reachable through any node route. TestSetCrossUserEnabledRefusals and TestSetCrossUserEnabledSuccess in internal/broker/crossuser_test.go prove cross-user enablement rules. TestRevokeUserForgetsLabelsRemovesAdmissionAndDropsGrants in internal/broker/m1_test.go proves revoke-user drops delegations to forgotten labels.
+Admin commands: internal/broker/pin.go AdminHandler serves admissions, admit, link, bindings, revoke-user, and cross-user on the admin socket. Approve binds the label to the broker owner's user ID through the same path the page's bind takes, so the label's leases move to the owner and a rebind from another user starts clean. An awaited fingerprint binds when its key arrives and pins, in the registration's own commit. Approving a pinned, unbound label again under its key binds it, and a label a coworker bound through the page is refused until it is forgotten. The store assigns the owner when it opens: a new store, and a 2.0 store with no owner, get one in the same load, under the store lock, persisted once. An upgraded store keeps the owner its migration assigned, and the open and the migration create the owner the same way. A store whose owner ID names no user record gets the owner's record back in the same load, under that same ID, since bindings point at it. So the broker has an owner whenever its store is open. Approve with no owner record would pin the key alone, and a running broker never reaches that state. The approve answer carries the owner's user label, and the approve output names the owner it binds to. Link refuses an issuer plus sub that already resolves. Revoke-user forgets all labels, removes admission, drops grants and delegations, and drops delegations to those labels. Bindings shows each user, their labels, and last-seen times. Cross-user command refuses when: no OIDC configured, listener neither loopback nor TLS, or any label reported plain HTTP or never reported scheme. Its refusal for an owner ID with no user record stays as a guard, names that state, and is never reached. Tests: the approval tests prove approve binds the label to the owner, moves its legacy lease to the owner, and leaves it accepted with cross-user features on. They prove an awaited approval binds when the key arrives, and a repeat approval binds an unbound label and refuses a coworker's. They prove approve on a fresh broker binds to the owner its store assigned, and approve on a store whose owner record went missing binds to the restored owner. The store's owner test proves a new store, a 2.0 store with no owner, an upgraded store, and a 2.0 store whose owner has no user record each have one owner after open. It also proves a store's existing owner ID is kept, and a restart neither replaces nor rewrites it. A CLI test proves the approve output names the owner the store assigned. The broker's admin socket tests prove admin socket security. TestLinkIssuerSubMapsToExistingUser in internal/broker/user_test.go proves link maps to existing user. TestLinkIssuerSubRefusesExistingMapping in internal/broker/user_test.go proves link refuses an issuer plus sub that already resolves. The same CLI test proves no admin command is reachable through any node route. TestSetCrossUserEnabledRefusals and TestSetCrossUserEnabledSuccess in internal/broker/crossuser_test.go prove cross-user enablement rules, and the success case runs on a fresh broker with the owner its store assigned. TestRevokeUserForgetsLabelsRemovesAdmissionAndDropsGrants in internal/broker/m1_test.go proves revoke-user drops delegations to forgotten labels.
 
 Node commands: `nitipan node pair` in internal/cli/broker_admin.go prints fingerprint and pairing code, sends hash to broker via wire.PathPair. `nitipan node rekey` in internal/cli/broker_admin.go generates new key. LoadKey and Rekey exist in internal/node/files.go. Tests: TestCorrectLabelAndCodePinKeyAndDiscardOtherPending in internal/broker/signin_test.go proves node pair works end-to-end.
 
-Request path: wire.PathPair added. handlePair stores pairing code hash. BindLabelToUser in internal/broker/user.go pins pending key, creates binding, bounces mail and drops delegations when user changes. SchemeReports populated from Register.HTTPS field. Wire.Registered carries HTTPS bool. substituteActingFor in internal/broker/grants.go rewrites acting_for to the label's bound user unless it already names that user. Tests: TestAuthedRefusesUnboundLabelWhenCrossUserEnabled, TestAuthedAllowsBoundLabelWhenCrossUserEnabled, TestAuthedAllowsUnboundLabelWhenCrossUserDisabled in internal/broker/crossuser_test.go prove every call needs the node credential. TestSubstituteActingForPreventsCrossUserClaiming in internal/broker/grants_test.go proves a label bound to U1 cannot claim in U2's scope. TestForwardedSessionRequestAttributedToBoundUser in internal/broker/m1_test.go proves forwarded session requests act as the label's bound user. TestRegisteredCarriesCrossUserFlag in internal/broker/crossuser_test.go proves nodes record the cross-user flag and refuse plain HTTP afterward. TestNodeRefusesPlainHTTPWhenCrossUserEnabled, TestNodeAllowsHTTPSWhenCrossUserEnabled, TestNodeRefusesPlainHTTPEvenWhenLaterRegisteredOmitsFlag, TestIsCrossUserEnabledFailsClosedOnUnreadableFile, TestIsCrossUserEnabledFailsClosedOnUnsearchableDir in internal/node/crossuser_test.go prove nodes refuse plain HTTP once cross-user features are on and fail closed on permission errors.
+Request path: wire.PathPair added. handlePair stores pairing code hash. BindLabelToUser in internal/broker/user.go pins pending key and creates binding. A binding to a different user than the label's last bounces every message the broker holds for the label, queued and sent but unacked alike, to its senders with its body, under "the recipient's machine was bound to a different user". It drops every bounce waiting for the label and every delegation to it. A binding to the same user bounces nothing. The bounce and the binding read the broker's injected clock, on the page as on the broker host. The page's pairing code expiry and sign-in action age read that clock too. A rebind needs an unpinned label, and only a forget unpins one. The forget marks each queued message unsent, and the broker sends nothing to an unpinned label, so a rebind never meets a message marked sent. A test proves mail sent and never acked before a forget, and mail queued after it, bounce to their senders on a rebind to another user, and the new user's node never receives either. Another proves a page rebind stamps its bounces and binding with the broker's clock. Another proves the page refuses to bind a pinned label straight to another user, and leaves its sent, unacked mail alone. Another proves a rebind to the same user bounces nothing. SchemeReports populated from Register.HTTPS field. Wire.Registered carries HTTPS bool. substituteActingFor in internal/broker/grants.go rewrites acting_for to the label's bound user unless it already names that user. Tests: TestAuthedRefusesUnboundLabelWhenCrossUserEnabled, TestAuthedAllowsBoundLabelWhenCrossUserEnabled, TestAuthedAllowsUnboundLabelWhenCrossUserDisabled in internal/broker/crossuser_test.go prove every call needs the node credential. TestSubstituteActingForPreventsCrossUserClaiming in internal/broker/grants_test.go proves a label bound to U1 cannot claim in U2's scope. TestForwardedSessionRequestAttributedToBoundUser in internal/broker/m1_test.go proves forwarded session requests act as the label's bound user. TestRegisteredCarriesCrossUserFlag in internal/broker/crossuser_test.go proves nodes record the cross-user flag and refuse plain HTTP afterward. TestNodeRefusesPlainHTTPWhenCrossUserEnabled, TestNodeAllowsHTTPSWhenCrossUserEnabled, TestNodeRefusesPlainHTTPEvenWhenLaterRegisteredOmitsFlag, TestIsCrossUserEnabledFailsClosedOnUnreadableFile, TestIsCrossUserEnabledFailsClosedOnUnsearchableDir in internal/node/crossuser_test.go prove nodes refuse plain HTTP once cross-user features are on and fail closed on permission errors.
 
 Whoami: wire.PathWhoAmI added. handoff.KindWhoAmI added with version 4. handleWhoAmI resolves label to user label. `nitipan who am-i` CLI command prints caller's user label. Tests: TestHandleWhoAmIReturnsBoundUser and TestHandleWhoAmIReturnsEmptyWhenUnbound in internal/broker/whoami_test.go prove whoami returns the bound user. TestSubmitUsesKindSince in internal/handoff/request_version_test.go proves KindWhoAmI uses version 4.
 
@@ -716,7 +728,7 @@ entries of 2026-11-10.
 
 ### M3: Cross-user mail
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - Mail from V to U is refused at send without U's grant. With it, a first message reaches only a session of U's that
   holds a live or lapsed `shared` lease
@@ -732,6 +744,53 @@ entries of 2026-11-10.
   nodes keeps `sender_verified` as NIT-007 sets it
 - An older recipient node gets no cross-user mail, and the sender is told "recipient node too old". An older sender
   node's cross-user send is refused at send. Both in tests
+
+**As built:**
+
+The page grants and revokes mail. Each action runs its own sign-in round trip, and the user types the sender's user
+label on the empty form that follows. The signer's admission is checked under the same lock as the change. A label no
+user has, and a grant to oneself, are refused. No node route grants or revokes one. M1's "revoke user" already dropped
+the grants naming the user in both directions. A user admitted again gets a new user ID, so V starts with no grants.
+
+Mail between two users carries the sender's user label in its own field, from the broker's record through the stream
+event to the stored message, and leaves the verified mark out. Mail between one user's labels keeps the mark. A label
+nobody bound counts as the broker owner's, as M1's scope rule does. `nitipan mail read` prints the sender's user on its
+own line, says the mail is not from one of the user's machines, and shows the reply command. A forged file that also
+carries the verified mark is framed as another user's. Neither the store nor the mailbox format changed version, since
+the new fields are additive and an older reader drops them. A stored message is never rewritten.
+
+The mail capability rose to 2. A node at level 1 still gets mail from its own user's machines. A cross-user send from
+a level-1 node is refused with its own code. A level-1 recipient makes the send fail with "recipient node too old",
+and mail queued for it bounces with the same reason when it comes back that old. Mail the broker never sent it bounces
+at once. Mail sent to it as a newer binary and never acked waits for that connection's complete report, which advances
+what the node stored, and bounces only if it is still queued then. So the broker never bounces a message the old
+binary may show its reader.
+
+A first message needs cross-user features on, the recipient user's grant to the sender's user, and a live or lapsed
+`shared` lease held by the session at the address. A `user` lease and a taken marker are not reach. The recipient's
+user comes from the address's label alone, so a shared agent's mail follows its own user's grants.
+
+A reply names the message it answers on request version 6, through `--reply-to`. An older node answers it "node too
+old", and a node whose broker did not say at registration that it reads replies answers "broker too old". The node
+reports pending reads before it forwards a reply. The broker accepts a reply only from the address the message was
+sent to, to that message's sender, after its read and within 7 days of it, while the conversation's grant stands. The
+conversation record is keyed by its first message. The broker keeps it while it holds any of its messages, and until
+7 days after its last read. The first message can be swept while the conversation's replies are held. A new message
+under that ID would rebind the conversation to another grant, and let a revoked sender's queued reply through. So a
+message whose ID already names a conversation the broker holds is refused at send. A repeat of a message the broker
+still holds gets its stored answer, as before.
+
+Before delivery, the broker re-checks the conversation's grant, and a first message's reach. It bounces with "sender
+no longer allowed" or "recipient holds no `shared` lease". It holds mail from another user, and re-checks none of it,
+until the connection's complete report arrives. The node sends that report on every reconnect, even when it holds
+nothing, and sends it again on the mail tick when it failed. The divergences are in the Decision Log entry of
+2026-11-10 for M3.
+
+A complete report vouches only for its own connection, which is one registration. A stream left over from an earlier
+registration never re-checks, even after its successor's report. The report also says nothing of mail sent after it.
+So the re-check skips mail from another user sent since the node last registered, until the node acks it or reports
+again on its next connection. A stream whose connection dropped without the broker noticing then cannot bounce a
+message the node stored. A broker test proves both, with the node's first stream still open on the broker throughout.
 
 ## Decision Log
 
@@ -904,6 +963,43 @@ entries of 2026-11-10.
   matches on `node`, as the running broker's binding does, and the test stores leases in the 1.x grant shape. A
   pinned label's lease with no `acting_for` now moves to the owner too, since "Node credential" moves every lease the
   label holds. The M1 check and the decisions are unchanged.
+  Approve on the broker host pinned the key and bound nothing, and its output named no owner. The As built said it
+  bound to the owner, and cited a test that checks neither. Once cross-user features were on, a label the owner
+  approved was refused on every call. Approve now binds the label to the owner through the page's bind path, an
+  awaited key binds when it pins, and the output names the owner. A rebind to a different user bounced only stored
+  mail. Forget had already reset queued mail to unsent, so the new user's node received it. The rebind now bounces
+  every message held for the label to its senders with its body. The As built also placed the admin socket tests in
+  internal/cli/node_pair_test.go, which holds none of them. The M1 checks are unchanged.
+  Only the 1.x migration created an owner, so a fresh broker pinned on approve, bound nothing, and could never turn
+  cross-user features on. "Identity mechanism" says the broker assigns the owner's ID when it is first configured. The
+  store now assigns it at open, for a new store and a 2.0 store with none, and the refusal no longer names a
+  nonexistent `nitipan broker upgrade-bindings` command.
+  A store whose owner ID named no user record also left the broker with no owner. The cross-user refusal told the
+  operator to restart, and a restart changed nothing. The store now writes the owner's record back under that same ID
+  at open, since bindings point at it. The refusal stays for a state a running broker never reaches, and names it.
+  The page's bind stamped its bounces and the binding with the process clock, not the broker's. The page now reads
+  the broker's clock for the bind, the pairing code's expiry, and the sign-in action's age.
+- 2026-11-10 (autonomous, run best guess): M1's milestone review amended "Node credential". The bullet said:
+  "Approving a label on the broker host binds it to the broker owner, and the approve output says so. A coworker's
+  machine is bound through the page instead." Approving a pinned label again under its key had done nothing. Once
+  approve binds, a repeat approval of a label a coworker bound through the page would take that label for the owner,
+  and bounce the coworker's mail. The bullet now adds that approve refuses such a label until it is forgotten.
+
+- 2026-11-10 (autonomous, run best guess): M3's implementation narrowed four texts.
+  1. "Cross-user mail authorization" said the reconnect report comes first, and nothing more. A failed report had only
+     logged a warning, and a node holding nothing sent none. The node now marks the report complete and sends it on
+     every reconnect, and again on its mail tick when it failed. The broker holds mail from another user until the
+     connection's complete report arrives, and re-checks it only then.
+  2. The reply window bullet did not say what happens before the read. A reply now needs the broker to have seen the
+     message read, and the node reports reads before it forwards one. The conversation bullet also says now that the
+     record stays while the broker holds any of its messages, since a conversation not yet read has no last read.
+  3. Nothing said whether mail crosses users while cross-user features are off, when the broker runs one scope for
+     leases. Carrying it then would stamp a coworker's mail as the user's own. It is now refused at send, and a queued
+     message of a conversation bounces with "sender no longer allowed".
+  4. "Version skew" said a new node reports "broker too old" for cross-user mail to an old broker. A node cannot tell
+     that a first message crosses users, and a broker from before this proposal binds no label to a second user. Only a
+     reply gets "broker too old" now. The broker says it reads replies with a flag at registration, as it does for
+     explicit `acting_for`.
 
 ## References
 

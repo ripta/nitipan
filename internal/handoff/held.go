@@ -476,11 +476,15 @@ const (
 
 // MailSendBody is the body of a mail-send request. The request ID is the message ID. FromSession is
 // the sender's session, which the node reports to the broker from the sender's registration.
+//
+// ReplyTo names the message this one answers. A send that names one rides request version ReplyToSince,
+// so a node that predates replies refuses it.
 type MailSendBody struct {
 	To          string `json:"to"`
 	Body        string `json:"body"`
 	FromAgent   string `json:"from_agent"`
 	FromSession string `json:"from_session"`
+	ReplyTo     string `json:"reply_to,omitempty"`
 }
 
 // MailStatusBody is the body of a mail-status request.

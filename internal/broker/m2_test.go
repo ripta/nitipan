@@ -645,11 +645,13 @@ type delegationProbe struct {
 // delegation call would plausibly live at.
 var delegationProbePaths = []string{
 	"/signin", "/bind", "/grant", "/revoke", "/callback", "/bind-submit", "/grant-submit", "/revoke-submit",
+	"/mail-grant", "/mail-revoke", "/mail-grant-submit", "/mail-revoke-submit",
 	wire.PathRegister, wire.PathStream, wire.PathAck, wire.PathSnapshot, wire.PathHeartbeat, wire.PathPing, wire.PathPair,
 	wire.PathClaim, wire.PathRenew, wire.PathRelease, wire.PathBreak, wire.PathList, wire.PathFence, wire.PathWhoHolds,
 	wire.PathWhoIs, wire.PathWhoAmI, wire.PathMailSend, wire.PathMailAck, wire.PathMailReport, wire.PathMailStatus,
 	wire.Prefix + "/grant", wire.Prefix + "/revoke", wire.Prefix + "/delegate", wire.Prefix + "/delegation",
 	wire.Prefix + "/delegations", wire.Prefix + "/grant-delegation", wire.Prefix + "/revoke-delegation",
+	wire.Prefix + "/mail/grant", wire.Prefix + "/mail/revoke", wire.Prefix + "/mail-grant", wire.Prefix + "/mail-revoke",
 }
 
 func delegationProbes() []delegationProbe {
@@ -714,12 +716,13 @@ func (h *harness) probe(p delegationProbe, n nodeID, fields map[string]string) {
 	_ = resp.Body.Close()
 }
 
-// TestNoNetworkRouteGrantsOrRevokesADelegationWithoutAnIdentityProof proves the broker's network
-// handler, sign-in page included, grants and revokes no delegation for a caller holding only a node key.
-// It catches a node route, or a page route that trusts a node key or a form field, that changes a
-// delegation without the user's identity proof. The page's own grant with a proof is proven by the
-// sign-in page tests.
-func TestNoNetworkRouteGrantsOrRevokesADelegationWithoutAnIdentityProof(t *testing.T) {
+// TestNoNetworkRouteChangesADelegationOrAMailGrantWithoutAnIdentityProof proves the broker's network
+// handler, sign-in page included, grants and revokes no delegation and no mail grant for a caller holding
+// only a node key. Every handoff kind reaches the broker through one of these node routes, so no request
+// through the handoff changes either. It catches a node route, or a page route that trusts a node key or
+// a form field, that changes a delegation or a mail grant without the user's identity proof. The page's
+// own actions with a proof are proven by the sign-in page tests.
+func TestNoNetworkRouteChangesADelegationOrAMailGrantWithoutAnIdentityProof(t *testing.T) {
 	h, _ := newSignInHarness(t)
 
 	now := time.Now()
@@ -749,12 +752,28 @@ func TestNoNetworkRouteGrantsOrRevokesADelegationWithoutAnIdentityProof(t *testi
 
 	h.delegate(t, u, labels[keptNode])
 
+	kept, err := h.b.CreateUser("kept@example.com", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := h.b.GrantMail(testDelegationIssuer, u.ID, kept.UserLabel, now); err != nil {
+		t.Fatal(err)
+	}
+
 	for _, p := range delegationProbes() {
 		for _, n := range []nodeID{uNode, vNode} {
 			for _, target := range []string{labels[vNode], labels[keptNode]} {
 				h.probe(p, n, map[string]string{
 					"user_id": u.ID, "user": u.UserLabel, "user_label": u.UserLabel, "email": "u@example.com",
 					"label": target, "token": "not-a-token", "action": "grant",
+				})
+			}
+
+			for _, sender := range []UserRecord{v, kept} {
+				h.probe(p, n, map[string]string{
+					"user_id": u.ID, "user": u.UserLabel, "user_label": sender.UserLabel, "sender": sender.UserLabel,
+					"email": "u@example.com", "token": "not-a-token", "action": actionMailGrant, "from": sender.ID, "to": u.ID,
 				})
 			}
 		}
@@ -771,6 +790,18 @@ func TestNoNetworkRouteGrantsOrRevokesADelegationWithoutAnIdentityProof(t *testi
 
 	if len(d.Delegations[v.ID]) != 0 {
 		t.Errorf("a node-key request granted a delegation from V: %v", d.Delegations)
+	}
+
+	if _, ok := d.MailGrants[u.ID][v.ID]; ok {
+		t.Errorf("a node-key request granted U's mail to V: %v", d.MailGrants)
+	}
+
+	if _, ok := d.MailGrants[u.ID][kept.ID]; !ok {
+		t.Errorf("a node-key request revoked U's mail grant to the kept user: %v", d.MailGrants)
+	}
+
+	if len(d.MailGrants[v.ID]) != 0 {
+		t.Errorf("a node-key request granted mail from V: %v", d.MailGrants)
 	}
 }
 

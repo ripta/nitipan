@@ -34,7 +34,14 @@ type mailWorld struct {
 func newMailWorld(t *testing.T) *mailWorld {
 	t.Helper()
 
-	f := newWideFixtureTLS(t)
+	return newMailWorldWith(t, nil)
+}
+
+// newMailWorldWith builds the world on a broker whose store prep edits first.
+func newMailWorldWith(t *testing.T, prep func(*broker.Data)) *mailWorld {
+	t.Helper()
+
+	f := newWideFixtureWith(t, true, prep)
 	mw := &mailWorld{f: f, m1: f.machine("m1"), m2: f.machine("m2")}
 
 	mw.c1 = mw.m1.w.claude(100, "s1")
@@ -578,8 +585,24 @@ func TestSetupClaudePrintsTheMailHooksWithTheWaiterAsAsyncRewake(t *testing.T) {
 	}
 }
 
+// storeOwner returns the broker owner the store assigned when it opened. It reads the store before the
+// broker starts, so it never races the broker's writes.
+func storeOwner(d *broker.Data) broker.UserRecord {
+	return d.Users[d.OwnerID]
+}
+
+// TestTheApprovalCommandsReachTheBrokerOnlyThroughItsAdminSocket proves the approval commands work over
+// the admin socket and only there, and that approve says it binds the label to the broker owner. It
+// catches an approve output that leaves the owner unnamed, so the owner cannot tell the label joined
+// their scope.
 func TestTheApprovalCommandsReachTheBrokerOnlyThroughItsAdminSocket(t *testing.T) {
-	mw := newMailWorld(t)
+	var owner broker.UserRecord
+
+	mw := newMailWorldWith(t, func(d *broker.Data) { owner = storeOwner(d) })
+
+	if owner.UserLabel == "" {
+		t.Fatalf("the store assigned no owner: %+v", owner)
+	}
 
 	dir, err := os.MkdirTemp("", "ns")
 	if err != nil {
@@ -650,7 +673,8 @@ func TestTheApprovalCommandsReachTheBrokerOnlyThroughItsAdminSocket(t *testing.T
 
 	early := run("broker", "approve", label, "0000-0000-0000-0000")
 	wantStatus(t, early, exitcode.OK)
-	wantContains(t, "stdout", early.Stdout, "no key with that fingerprint has reached the broker", "agent session runs as this OS")
+	wantContains(t, "stdout", early.Stdout, "no key with that fingerprint has reached the broker", "agent session runs as this OS",
+		"binds to the broker owner, "+owner.UserLabel)
 
 	malformed := run("broker", "approve", label, "not-a-fingerprint")
 	wantStatus(t, malformed, exitcode.Error)
@@ -658,7 +682,8 @@ func TestTheApprovalCommandsReachTheBrokerOnlyThroughItsAdminSocket(t *testing.T
 
 	approve := run("broker", "approve", label, fp)
 	wantStatus(t, approve, exitcode.OK)
-	wantContains(t, "stdout", approve.Stdout, "approved "+label, "no agent session runs as this OS", fp)
+	wantContains(t, "stdout", approve.Stdout, "approved "+label, "no agent session runs as this OS", fp,
+		"bound to the broker owner, "+owner.UserLabel)
 
 	again := run("broker", "approve", label, "1111-1111-1111-1111")
 	wantStatus(t, again, exitcode.Error)

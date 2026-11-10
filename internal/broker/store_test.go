@@ -366,3 +366,112 @@ func TestAFailedStoreWriteIsFatalAndNotVisibleOrAcked(t *testing.T) {
 		t.Error("the node became visible although its write failed")
 	}
 }
+
+// ownerStoreTest seeds the file a store opens, or leaves it missing, and names the owner it must keep.
+type ownerStoreTest struct {
+	Name string
+
+	// Seed writes the store file before the first open. A nil Seed leaves the file missing.
+	Seed func(t *testing.T, path string)
+
+	// KeepOwner is the owner ID the seeded store already holds, or empty when the open assigns one.
+	KeepOwner string
+}
+
+const keptOwnerID = "01JM00000000000000000OWNER"
+
+var ownerStoreTests = []ownerStoreTest{
+	{Name: "a fresh store"},
+	{
+		Name: "a 2.0 store with no owner",
+		Seed: func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte(`{"version":"2.0"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	},
+	{
+		Name: "a 1.x store the migration upgrades",
+		Seed: func(t *testing.T, path string) { seedMajorOne(t, path) },
+	},
+	{
+		Name: "a 2.0 store that has an owner",
+		Seed: func(t *testing.T, path string) {
+			raw := `{"version":"2.0","owner_id":"` + keptOwnerID + `","users":{"` + keptOwnerID + `":{"id":"` + keptOwnerID +
+				`","user_label":"` + DeriveUserLabel(keptOwnerID) + `","label_derivation":1}}}`
+
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		KeepOwner: keptOwnerID,
+	},
+	{
+		Name: "a 2.0 store whose owner has no user record",
+		Seed: func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte(`{"version":"2.0","owner_id":"`+keptOwnerID+`"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		KeepOwner: keptOwnerID,
+	},
+}
+
+// TestEveryStoreHasAnOwnerAfterOpenAndKeepsItAcrossARestart proves the store assigns the broker owner
+// once, when it is created or first opened without one, and that a restart neither replaces nor rewrites
+// it. An upgraded store keeps the owner its migration assigned. A store whose owner ID names no user gets
+// the owner's record back under that same ID. It catches a fresh broker that never gets an owner, so
+// approval binds nothing and cross-user features can never turn on, and an open that assigns a second
+// owner, which would orphan every binding to the first.
+func TestEveryStoreHasAnOwnerAfterOpenAndKeepsItAcrossARestart(t *testing.T) {
+	for _, test := range ownerStoreTests {
+		t.Run(test.Name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "broker.json")
+
+			if test.Seed != nil {
+				test.Seed(t, path)
+			}
+
+			opts := StoreOptions{Migrations: map[int]Migration{1: MigrateV1ToV2}}
+
+			s, err := openTest(t, path, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			d := s.Data()
+			owner, ok := d.Users[d.OwnerID]
+
+			switch {
+			case d.OwnerID == "" || !ok:
+				t.Fatalf("after open: owner %q, users %v, want an owner with a user record", d.OwnerID, d.Users)
+			case test.KeepOwner != "" && d.OwnerID != test.KeepOwner:
+				t.Fatalf("after open: owner %q, want the store's owner %q kept", d.OwnerID, test.KeepOwner)
+			case owner.UserLabel != DeriveUserLabel(owner.ID) || len(d.Users) != 1:
+				t.Fatalf("after open: owner %+v among %d users, want one user with the derived label", owner, len(d.Users))
+			}
+
+			_ = s.Close()
+
+			written, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			s2, err := openTest(t, path, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer s2.Close()
+
+			if got := s2.Data().OwnerID; got != d.OwnerID {
+				t.Errorf("after a restart: owner %q, want %q", got, d.OwnerID)
+			}
+
+			if again, err := os.ReadFile(path); err != nil || string(again) != string(written) {
+				t.Errorf("a restart rewrote the store: %v", err)
+			}
+		})
+	}
+}

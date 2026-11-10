@@ -166,23 +166,14 @@ func TestSetCrossUserEnabledRefusals(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "no OIDC configured",
-			setup: func(h *harness) {
-				h.store.Data().OwnerID = "owner"
-			},
+			name:    "no OIDC configured",
+			setup:   func(*harness) {},
 			wantErr: "no identity provider configured",
-		},
-		{
-			name: "no OwnerID",
-			setup: func(h *harness) {
-			},
-			wantErr: "upgrade binding has not run",
 		},
 		{
 			name: "label reported plain HTTP",
 			setup: func(h *harness) {
-				h.store.Data().OwnerID = "owner"
-				h.store.Data().Bindings["label1"] = BindingRecord{UserID: "owner"}
+				h.store.Data().Bindings["label1"] = BindingRecord{UserID: h.store.Data().OwnerID}
 				h.store.Data().SchemeReports["label1"] = "http"
 			},
 			wantErr: "reported plain HTTP",
@@ -190,25 +181,20 @@ func TestSetCrossUserEnabledRefusals(t *testing.T) {
 		{
 			name: "label never reported scheme",
 			setup: func(h *harness) {
-				h.store.Data().OwnerID = "owner"
-				h.store.Data().Bindings["label1"] = BindingRecord{UserID: "owner"}
+				h.store.Data().Bindings["label1"] = BindingRecord{UserID: h.store.Data().OwnerID}
 			},
 			wantErr: "never reported scheme",
 		},
 		{
-			name: "private listen without TLS",
-			setup: func(h *harness) {
-				h.store.Data().OwnerID = "owner"
-			},
+			name:    "private listen without TLS",
+			setup:   func(*harness) {},
 			listen:  "192.168.1.1:8080",
 			tls:     false,
 			wantErr: "requires TLS or a loopback address",
 		},
 		{
-			name: "public listen without TLS",
-			setup: func(h *harness) {
-				h.store.Data().OwnerID = "owner"
-			},
+			name:    "public listen without TLS",
+			setup:   func(*harness) {},
 			listen:  "0.0.0.0:8080",
 			tls:     false,
 			wantErr: "requires TLS or a loopback address",
@@ -247,7 +233,9 @@ func TestSetCrossUserEnabledRefusals(t *testing.T) {
 	}
 }
 
-// TestSetCrossUserEnabledSuccess tests successful enable with all conditions met (Item 10).
+// TestSetCrossUserEnabledSuccess tests successful enable with all conditions met (Item 10). The broker
+// is fresh, and its owner is the one its store assigned at open. It catches a fresh broker that can never
+// turn cross-user features on because only an upgrade created an owner.
 func TestSetCrossUserEnabledSuccess(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -272,8 +260,7 @@ func TestSetCrossUserEnabledSuccess(t *testing.T) {
 			}
 
 			h := newHarness(t, mutate)
-			h.store.Data().OwnerID = "owner"
-			h.store.Data().Bindings["label1"] = BindingRecord{UserID: "owner"}
+			h.store.Data().Bindings["label1"] = BindingRecord{UserID: h.store.Data().OwnerID}
 			h.store.Data().SchemeReports["label1"] = "https"
 
 			if err := h.b.SetCrossUserEnabled(true); err != nil {

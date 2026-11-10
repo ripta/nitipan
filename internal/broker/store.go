@@ -75,8 +75,9 @@ type Data struct {
 	// Mail holds the messages that are queued for a node, and the stage of each one it has sent on.
 	Mail map[string]MailRecord `json:"mail,omitempty"`
 
-	// OwnerID is the broker owner's stable user ID, assigned when the broker is first configured.
-	// Every label pinned under NIT-007 is bound to it on upgrade to store 2.0.
+	// OwnerID is the broker owner's stable user ID, assigned when the broker is first configured: when
+	// the store is created, upgraded from 1.x, or first opened at 2.0 without one. Every label pinned
+	// before the upgrade to store 2.0 is bound to it then.
 	OwnerID string `json:"owner_id,omitempty"`
 
 	// Users maps each user ID to their record. The owner is one of these.
@@ -101,7 +102,7 @@ type Data struct {
 	// keyed by sender user ID for fast lookup.
 	MailGrants map[string]map[string]time.Time `json:"mail_grants,omitempty"`
 
-	// Conversations holds cross-user mail conversation state for reply authorization.
+	// Conversations holds each conversation of mail across users, keyed by the ID of its first message.
 	Conversations map[string]ConversationRecord `json:"conversations,omitempty"`
 
 	// CrossUserEnabled is true once the owner turns cross-user features on. It stays false while no
@@ -158,6 +159,13 @@ type MailRecord struct {
 
 	Body     string `json:"body,omitempty"`
 	Verified bool   `json:"verified,omitempty"`
+
+	// SenderUser is the sender's user label, set only on mail from another user, which is never Verified.
+	// Conversation names the conversation whose grant admitted it. ReplyTo names the message it answers,
+	// and is empty on a conversation's first message.
+	SenderUser   string `json:"sender_user,omitempty"`
+	Conversation string `json:"conversation,omitempty"`
+	ReplyTo      string `json:"reply_to,omitempty"`
 
 	// Stage is queued, stored, or read. Sent is true once the broker wrote the message to a stream, and
 	// is what keeps a message the broker sent from bouncing as unsent.
@@ -245,14 +253,17 @@ type BindingRecord struct {
 	BoundAt time.Time `json:"bound_at"`
 }
 
-// ConversationRecord tracks one cross-user mail conversation for reply authorization.
+// ConversationRecord is one conversation of mail across users. SenderUser sent its first message and
+// RecipientUser's grant to SenderUser admitted it. Every message of the conversation, replies in both
+// directions included, rides that one grant, so revoking it stops them all.
+//
+// The broker keeps the record while any of its messages is held, and until 7 days after its last read.
 type ConversationRecord struct {
 	SenderUser    string `json:"sender_user"`
 	RecipientUser string `json:"recipient_user"`
 
-	// LastMessageRead is when the last message of the conversation was read. Replies are admitted for
-	// 7 days after this.
-	LastMessageRead time.Time `json:"last_message_read"`
+	CreatedAt       time.Time `json:"created_at"`
+	LastMessageRead time.Time `json:"last_message_read,omitzero"`
 }
 
 // PairingCodeRecord is one label's active pairing code.
@@ -478,10 +489,20 @@ func (s *Store) load() error {
 
 	raw, err := os.ReadFile(s.path)
 	if errors.Is(err, fs.ErrNotExist) {
-		s.data = newData()
-		s.data.Version = s.opts.Current
+		d := newData()
+		d.Version = s.opts.Current
 
-		return s.Persist(s.data)
+		if s.ownsUsers() {
+			assignOwner(d, time.Now())
+		}
+
+		if err := s.Persist(d); err != nil {
+			return err
+		}
+
+		s.data = d
+
+		return nil
 	}
 
 	if err != nil {
@@ -516,6 +537,46 @@ func (s *Store) load() error {
 		return fmt.Errorf("decoding the store %s: %w", s.path, err)
 	}
 
+	d.fillMaps()
+
+	s.data = &d
+
+	// A store of an older minor is stamped with this broker's version as it loads. The fields this
+	// binary adds are written from the first persist on, and an older broker must refuse the file then.
+	dirty := false
+
+	if head.Version.Major < cur.Major || head.Version.Minor < cur.Minor {
+		d.Version = cur
+		dirty = true
+	}
+
+	// A store created before owners were assigned on creation has none. Its owner is assigned here, once,
+	// and an upgraded store keeps the one its migration assigned.
+	//
+	// A store whose owner ID names no user gets the owner's record back under that ID, so the broker always
+	// has an owner once its store is open.
+	if s.ownsUsers() {
+		_, hasRecord := d.Users[d.OwnerID]
+
+		switch {
+		case d.OwnerID == "":
+			assignOwner(&d, time.Now())
+			dirty = true
+		case !hasRecord:
+			restoreOwner(&d, time.Now())
+			dirty = true
+		}
+	}
+
+	if dirty {
+		return s.Persist(&d)
+	}
+
+	return nil
+}
+
+// fillMaps gives every collection a store file left out an empty map, so callers never write to a nil one.
+func (d *Data) fillMaps() {
 	if d.Nodes == nil {
 		d.Nodes = map[string]NodeRecord{}
 	}
@@ -571,18 +632,12 @@ func (s *Store) load() error {
 	if d.PairingCodes == nil {
 		d.PairingCodes = map[string]PairingCodeRecord{}
 	}
+}
 
-	s.data = &d
-
-	// A store of an older minor is stamped with this broker's version as it loads. The fields this
-	// binary adds are written from the first persist on, and an older broker must refuse the file then.
-	if head.Version.Major < cur.Major || head.Version.Minor < cur.Minor {
-		d.Version = cur
-
-		return s.Persist(&d)
-	}
-
-	return nil
+// ownsUsers reports whether the store version this broker writes has users, and so a broker owner. A
+// store at major 1 predates them.
+func (s *Store) ownsUsers() bool {
+	return s.opts.Current.Major >= 2
 }
 
 // migrate keeps the previous file beside the store, then runs each migration from the store's major
@@ -641,7 +696,7 @@ func (s *Store) Swap(d *Data) {
 }
 
 // StripHashFromKeptFile removes the key hash for a label from the kept .v1 file, so a rollback
-// refuses it. The kept file holds the hashes of NIT-007 keys from before the migration to major 2.
+// refuses it. The kept file holds the hashes of the keys pinned before the migration to major 2.
 // It does what v1's Forget did: sets forgotten=true and deletes the node record.
 func (s *Store) StripHashFromKeptFile(label string) error {
 	keptPath := fmt.Sprintf("%s.v1", s.path)

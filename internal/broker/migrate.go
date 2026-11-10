@@ -32,9 +32,6 @@ func MigrateV1ToV2(old []byte) ([]byte, error) {
 		return nil, fmt.Errorf("decoding v1 store: %w", err)
 	}
 
-	ownerID := ulid.MustNew(ulid.Now(), rand.Reader).String()
-	ownerLabel := DeriveUserLabel(ownerID)
-
 	now := time.Now()
 
 	v2 := newData()
@@ -46,14 +43,9 @@ func MigrateV1ToV2(old []byte) ([]byte, error) {
 	v2.Mail = v1.Mail
 	v2.Outcomes = v1.Outcomes
 	v2.Counter = v1.Counter
-	v2.OwnerID = ownerID
 
-	v2.Users[ownerID] = UserRecord{
-		ID:              ownerID,
-		UserLabel:       ownerLabel,
-		LabelDerivation: UserLabelDerivation,
-		CreatedAt:       now,
-	}
+	owner := assignOwner(v2, now)
+	ownerID, ownerLabel := owner.ID, owner.UserLabel
 
 	pinnedLabels := map[string]bool{}
 
@@ -81,6 +73,29 @@ func MigrateV1ToV2(old []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(v2)
+}
+
+// assignOwner creates the broker owner's user and records its ID in d. The ID is assigned once, when the
+// store is first created or upgraded, and stays the owner's for the life of the store.
+func assignOwner(d *Data, now time.Time) UserRecord {
+	d.OwnerID = ulid.MustNew(ulid.Now(), rand.Reader).String()
+
+	return restoreOwner(d, now)
+}
+
+// restoreOwner writes the user record of the owner d names. Bindings and grants point at the owner's ID,
+// so a missing record comes back under that same ID, never a new one.
+func restoreOwner(d *Data, now time.Time) UserRecord {
+	owner := UserRecord{
+		ID:              d.OwnerID,
+		UserLabel:       DeriveUserLabel(d.OwnerID),
+		LabelDerivation: UserLabelDerivation,
+		CreatedAt:       now,
+	}
+
+	d.Users[d.OwnerID] = owner
+
+	return owner
 }
 
 // leaseHolderNode is the part of a stored lease the migration reads. Node is the label of the node that

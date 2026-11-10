@@ -39,7 +39,7 @@ const (
 // Versions this binary writes. A reader refuses a version it does not know, and a node keeps
 // answering every request version it ever accepted.
 const (
-	RequestVersion  = 5
+	RequestVersion  = 6
 	PresenceVersion = 1
 )
 
@@ -47,6 +47,11 @@ const (
 // CLI asks to claim for, never an OS user name for the broker to replace. An older node answers such a
 // claim "node too old", so it is never forwarded under a version whose acting_for the broker replaces.
 const ActingForSince = 5
+
+// ReplyToSince is the first mail-send request version that may name the message it answers. An older
+// node answers such a send "node too old", so a reply to another user is never forwarded as a first
+// message, which would need a grant and a `shared` lease the reply does not.
+const ReplyToSince = 6
 
 // MaxAge is how old a request may be when the node forwards it. The node judges by its own clock,
 // which is the clock the CLI used, since both run on one machine.

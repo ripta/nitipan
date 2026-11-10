@@ -17,7 +17,7 @@ user, scopes leases by user, and gates mail between users behind grants made on 
 |-----------|------------|---------|
 | NIT-006 M1 | DONE | `nitipan: bind node labels to users through an OIDC sign-in page` |
 | NIT-006 M2 | DONE | `nitipan: scope leases by user and let shared agents act under delegations` |
-| NIT-006 M3 | QUEUED | |
+| NIT-006 M3 | DONE | `nitipan: carry mail across users under the recipient's grant` |
 
 ## Approved plan and authorization
 
@@ -228,3 +228,89 @@ ADR candidates considered: "capabilities are advertised by a flag at registratio
 fails the "What Earns an ADR" bar, because it shapes only the broker and node contract. NIT-007's mail capability
 already follows the same pattern. The candidate "the cross-user rules apply only once the owner turns them on" is
 carried by NIT-006's settled text, so it needs no ADR.
+
+### NIT-006 M3: Cross-user mail
+
+One Opus implementer built M3 in a single run, test first. It proved each test by disabling the code it covers and
+watching the test fail: 45 mutations, 45 failures. `make ci` exited 0, in about 453 s, most of it `internal/cli`.
+
+Best guesses, each amended into the proposal:
+
+- Cross-user mail needs cross-user features on. Off, it is refused at send, and a queued message bounces at the
+  delivery re-check. Carrying it in the single scope would stamp a coworker's mail as verified.
+- Mail capability levels are split: level 1 is basic mail, level 2 is cross-user mail. Level-1 nodes keep same-user
+  mail.
+- A label nobody bound counts as the owner's for mail, as M2's scope rule does.
+- The node marks its reconnect report with a `complete` flag. The broker holds cross-user mail until that report
+  arrives, and the node retries a failed report on the slow mail tick. Same-user mail is never held.
+- A reply needs the broker to have seen the original read. It must come from the exact address that received the
+  message, and go to the original sender's address.
+- Replies ride request version 6. The broker advertises a `mail_replies` flag in its registration answer, as M2 did
+  for explicit `acting_for`.
+- A conversation is keyed by its first message's ID. It is dropped once none of its messages is held and its last
+  read is more than 7 days old.
+- Neither the store version nor the mailbox format version changes.
+
+The implementer also found two gaps in M1's committed code, both confirmed against M1's checks:
+
+- `Approve` pinned the key but created no owner binding. Once cross-user features were on, a label the owner
+  approved would be refused.
+- A rebind to a different user bounced only stored mail. Queued mail, which forget had kept, went to the new user.
+
+Both go to a fix round before M3's review.
+
+ADR candidate considered: "a broker re-check never runs before the node's complete reconnect report". It shapes only
+the broker and node contract, so it fails the bar.
+
+Before M3's review, a fix round closed both M1 gaps. It added a shared bind path, which approve, the page, and an
+awaited key all use. A rebind to a different user now bounces every message held for the label, with the new reason
+"the recipient's machine was bound to a different user". The same round fixed three more defects, each behind a test
+that failed first:
+
+- An M3 node test closed a stream before it was open. The test lacked a completion signal. It was not a product bug.
+- A flaky broker test exposed a real race: a stale or half-open stream could re-check and bounce mail the node may
+  have stored. The re-check now trusts only the current registration's report. It also skips cross-user mail sent
+  since that report. The flake reproduced in 2 of 300 runs before the fix and in 0 of 300 after it.
+- A fresh broker never got an owner, because only the 1.x migration created one. That would have kept cross-user
+  features off forever on a new install. The store now assigns its owner when it opens.
+
+M3 milestone review. The `adr-impact` agent found M3 consistent with ADR-01, ADR-04, ADR-05, ADR-06, ADR-07, and
+ADR-08. It named three uncovered decisions: mail capability levels, the complete-report gate, and the 7-day window.
+None passes the ADR bar. The first two shape only the broker and node contract. The 7-day window is NIT-007's retention
+rule.
+
+The reviewer, run on Opus, reported 13 findings. One is a confirmed hole. A client could reuse a surviving
+conversation's ID for a new first message. That rebound the conversation to another grant, so a revoked sender's
+queued reply got through.
+
+The remaining findings:
+
+- An operator error that told the operator to restart, which cannot fix the state it reports.
+- The page's bind used the wall clock, not the broker's clock.
+- A plausible early bounce of a downgraded node's sent-but-unacked mail.
+- A test gap: a rebind with an unacked sent message.
+- A test helper that orphaned the store's owner.
+- Text and comment fixes.
+
+Finding 7 was dismissed. A 2.0 store with users but no owner exists only from unshipped code, and no 2.0 store has
+shipped.
+
+Fix round results. The fixes for all 12 kept findings landed. Each code fix has a regression test that failed first.
+Finding 8 is the exception: its test pins a property, so it passed with no code change.
+
+- A new message whose ID already names a held conversation is refused. A repeat of a held message still gets its
+  stored answer.
+- The store's owner can no longer be missing. At open, an owner ID with no user record gets its record back under the
+  same ID. The refusal stays only as a guard.
+- The page, pairing, admission, and grant paths read the broker's injected clock.
+- Finding 6 is confirmed. A node that came back too old had its sent-but-unacked cross-user mail bounced before its
+  report. That mail could then be both bounced and read. Sent mail now waits for the connection's complete report.
+  Cross-user mail goes out only to a node that is cross-user capable as well as reported.
+- A rebind never meets sent mail. A pinned label cannot be rebound, and only a forget unpins a label, which resets
+  `Sent`. A test pins this.
+
+Best guesses: the reused-ID refusal covers every send, not only cross-user first messages. Sent mail that a complete
+report leaves queued bounces "node too old" at once, without waiting for the expiry report.
+
+Checks: `make ci` exited 0. The broker and node tests passed three runs in a row. `proposals.py check` reported only
+the row-finish findings. `freeze` returned no findings. The coordinator reran `make ci` before committing.

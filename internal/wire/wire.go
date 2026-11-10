@@ -149,6 +149,10 @@ type Registered struct {
 	// ActingForExplicit is true when the broker reads a claim's acting_for_explicit field. A broker
 	// that predates it omits it, and the node then answers a claim for another user "broker too old".
 	ActingForExplicit bool `json:"acting_for_explicit,omitempty"`
+
+	// MailReplies is true when the broker reads a mail send's reply_to field. A broker that predates it
+	// omits it, and the node then answers a reply "broker too old".
+	MailReplies bool `json:"mail_replies,omitempty"`
 }
 
 // MirroredLease is one lease of the machine's state directory, as the node saw it. A record the node

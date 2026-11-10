@@ -19,6 +19,13 @@ import (
 
 // Errors for user operations.
 var (
+	// ErrUnknownUserLabel means no user has the user label a page action named.
+	ErrUnknownUserLabel = errors.New("no user has that user label")
+
+	// ErrSelfGrant means a user named themselves in a mail grant. Mail between one user's own machines
+	// needs no grant.
+	ErrSelfGrant = errors.New("mail between your own machines needs no grant")
+
 	// ErrUserLabelCollision means two users derive the same user label.
 	ErrUserLabelCollision = errors.New("two users derive the same user label")
 
@@ -258,13 +265,13 @@ func (b *Broker) ClearPairingCode(label string) error {
 }
 
 // BindLabelToUser binds a label to a user by pinning its pending key and creating a binding record.
-// If the label is bound to a different user than before, it bounces queued mail and drops delegations.
+// If the label is bound to a different user than before, it bounces the mail held for the label and
+// drops delegations.
 func (b *Broker) BindLabelToUser(label, userID string, now time.Time) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	labelRec, labelExists := b.store.Data().Labels[label]
-	if !labelExists {
+	if _, labelExists := b.store.Data().Labels[label]; !labelExists {
 		return fmt.Errorf("label %q not found", label)
 	}
 
@@ -289,42 +296,23 @@ func (b *Broker) BindLabelToUser(label, userID string, now time.Time) error {
 		return fmt.Errorf("user %q: %w", userID, ErrUnknownUser)
 	}
 
-	nk := NodeKey{MachineID: labelRec.MachineID, UID: labelRec.UID}
+	return b.bindLocked(label, user, hash, now)
+}
 
-	existingBinding := b.store.Data().Bindings[label]
-	lastBoundUser := userID
-	if existingBinding.UserID != "" {
-		lastBoundUser = existingBinding.LastBoundUser
-	}
-
-	userChanged := existingBinding.UserID != "" && existingBinding.UserID != userID
-
-	if userChanged {
-		if err := b.bounceMailForLabel(label); err != nil {
-			return fmt.Errorf("bouncing mail for rebound label: %w", err)
-		}
-
-		b.dropDelegationsToLabel(label)
-	}
+// bindLocked pins a key to a label and binds the label to a user in one commit, as approval and the
+// page's bind both do. It makes the key the node's key, closes a stream opened under another, and wakes
+// the label and the senders of any mail the binding bounced.
+func (b *Broker) bindLocked(label string, user UserRecord, hash string, now time.Time) error {
+	row := b.store.Data().Labels[label]
+	nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
+	prev := b.store.Data().Nodes[nk.String()].KeyHash
 
 	next := b.g.clone()
 
+	var senders []string
+
 	err := b.commit(func(d *Data) error {
-		d.Pins[label] = PinRecord{PinnedHash: hash}
-
-		if rec, ok := d.Nodes[nk.String()]; ok {
-			rec.KeyHash = hash
-			d.Nodes[nk.String()] = rec
-		}
-
-		d.Bindings[label] = BindingRecord{
-			UserID:            userID,
-			LastBoundUser:     lastBoundUser,
-			DerivationVersion: UserLabelDerivation,
-			BoundAt:           now,
-		}
-
-		moveLeasesToBoundUser(next, d, label, user.UserLabel)
+		senders = b.bindInto(d, next, label, user, hash, now)
 
 		return next.encode(d)
 	})
@@ -334,7 +322,63 @@ func (b *Broker) BindLabelToUser(label, userID string, now time.Time) error {
 
 	b.g = next
 
+	if ns, ok := b.nodes[nk]; ok && ns.stream != nil && prev != hash {
+		ns.stream.cancel()
+	}
+
+	b.wakeLabelLocked(label)
+
+	for _, l := range senders {
+		b.wakeSendersLocked(l)
+	}
+
 	return nil
+}
+
+// bindInto pins a key to a label and binds the label to a user. It runs inside a commit, and moves the
+// label's leases in s, which the caller encodes into d. It returns the labels whose senders the binding
+// bounced mail to.
+//
+// A label bound to a different user than before starts clean: every message held for it bounces, and
+// every delegation to it is dropped. Forget keeps the label's last binding, so a reissued machine whose
+// label repeats is caught here.
+func (b *Broker) bindInto(d *Data, s *gstate, label string, user UserRecord, hash string, now time.Time) []string {
+	row := d.Labels[label]
+	nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
+
+	existing := d.Bindings[label]
+	lastBoundUser := user.ID
+	if existing.UserID != "" {
+		lastBoundUser = existing.LastBoundUser
+	}
+
+	var senders []string
+
+	if existing.UserID != "" && existing.UserID != user.ID {
+		senders = b.bounceHeldMailInto(d, label, now)
+
+		for _, delegations := range d.Delegations {
+			delete(delegations, label)
+		}
+	}
+
+	d.Pins[label] = PinRecord{PinnedHash: hash}
+
+	if rec, ok := d.Nodes[nk.String()]; ok {
+		rec.KeyHash = hash
+		d.Nodes[nk.String()] = rec
+	}
+
+	d.Bindings[label] = BindingRecord{
+		UserID:            user.ID,
+		LastBoundUser:     lastBoundUser,
+		DerivationVersion: UserLabelDerivation,
+		BoundAt:           now,
+	}
+
+	moveLeasesToBoundUser(s, d, label, user.UserLabel)
+
+	return senders
 }
 
 // moveLeasesToBoundUser sets acting_for on every lease label holds to the label's newly bound user. A
@@ -367,22 +411,42 @@ func moveLeasesToBoundUser(s *gstate, d *Data, label, userLabel string) {
 	}
 }
 
-func (b *Broker) bounceMailForLabel(label string) error {
-	now := time.Now()
+// bounceHeldMailInto bounces every message the broker holds for a label that is bound to a different
+// user, and drops every bounce waiting for it, so the new user receives none of the old user's mail. It
+// runs inside a commit and returns the sender labels to wake.
+//
+// Queued mail bounces with its body, whether or not the broker sent it, since the broker still holds the
+// body. A message stored on the old machine and never read bounces without one. Forget has already
+// bounced those, so this catches only one stored since.
+//
+// Mail one of the label's own sessions sent to another bounces back to the label. That bounce is the old
+// user's too, so the last pass drops it with the rest.
+func (b *Broker) bounceHeldMailInto(d *Data, label string, now time.Time) []string {
+	var held []MailRecord
 
-	return b.commit(func(d *Data) error {
-		for _, m := range d.Mail {
-			if m.ToLabel != label || m.Bounced {
-				continue
-			}
-
-			if m.Stage == "stored" && m.Kind == "mail" {
-				b.bounceInto(d, m, "recipient user changed", false, now)
-			}
+	for _, m := range d.Mail {
+		if m.ToLabel == label && m.Kind == wire.EventMail && !m.Bounced && m.Stage != wire.StageRead {
+			held = append(held, m)
 		}
+	}
 
-		return nil
-	})
+	var senders []string
+
+	for _, m := range held {
+		b.bounceInto(d, m, wire.ReasonRebound, m.Stage == wire.StageQueued, now)
+
+		if m.FromLabel != label {
+			senders = append(senders, m.FromLabel)
+		}
+	}
+
+	for id, m := range d.Mail {
+		if m.ToLabel == label && m.Kind == wire.EventBounce {
+			delete(d.Mail, id)
+		}
+	}
+
+	return senders
 }
 
 func (b *Broker) dropDelegationsToLabel(label string) {
@@ -477,9 +541,9 @@ func (b *Broker) RevokeUser(userID string) error {
 }
 
 // SetCrossUserEnabled turns cross-user features on or off. It refuses when: no OIDC provider is
-// configured, the upgrade binding has not run (no OwnerID), the broker's own listen address is
-// neither loopback nor served with TLS, any bound label reported plain HTTP, or any bound label
-// never reported its scheme. It lists unbound labels before acting.
+// configured, the owner ID names no user record, the broker's own listen address is neither loopback nor
+// served with TLS, any bound label reported plain HTTP, or any bound label never reported its scheme. It
+// lists unbound labels before acting.
 func (b *Broker) SetCrossUserEnabled(enable bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -493,9 +557,10 @@ func (b *Broker) SetCrossUserEnabled(enable bool) error {
 				"See the broker configuration section in README.md")
 		}
 
-		if d.OwnerID == "" {
-			return fmt.Errorf("cannot enable cross-user features: the upgrade binding has not run. " +
-				"Run the migration with 'nitipan broker upgrade-bindings' on the broker host, then retry")
+		// Opening the store assigns the owner or restores its record, so a running broker never lands here.
+		if _, ok := b.ownerLocked(); !ok {
+			return fmt.Errorf("cannot enable cross-user features: the store's owner ID %q names no user record. "+
+				"The broker restores the owner's record when it opens its store, so restart the broker, then retry", d.OwnerID)
 		}
 
 		if b.cfg.Listen != "" {
@@ -648,4 +713,79 @@ func (b *Broker) RevokeDelegation(issuer, sub, label string) (UserRecord, error)
 	})
 
 	return user, err
+}
+
+// userByLabelLocked finds the user whose user label is userLabel.
+func (b *Broker) userByLabelLocked(userLabel string) (UserRecord, error) {
+	for _, u := range b.store.Data().Users {
+		if u.UserLabel == userLabel {
+			return u, nil
+		}
+	}
+
+	return UserRecord{}, fmt.Errorf("%q: %w", userLabel, ErrUnknownUserLabel)
+}
+
+// GrantMail lets the user admitted under issuer plus sub receive mail from the user whose user label is
+// senderLabel. It returns the granting user and the sender. Only the sign-in page calls it, after an
+// identity proof, so no request through a node can grant one.
+func (b *Broker) GrantMail(issuer, sub, senderLabel string, now time.Time) (granter, sender UserRecord, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	granter, err = b.admittedLocked(issuer, sub)
+	if err != nil {
+		return UserRecord{}, UserRecord{}, err
+	}
+
+	sender, err = b.userByLabelLocked(senderLabel)
+	if err != nil {
+		return UserRecord{}, UserRecord{}, err
+	}
+
+	if sender.ID == granter.ID {
+		return UserRecord{}, UserRecord{}, ErrSelfGrant
+	}
+
+	err = b.commit(func(d *Data) error {
+		if d.MailGrants[granter.ID] == nil {
+			d.MailGrants[granter.ID] = map[string]time.Time{}
+		}
+
+		d.MailGrants[granter.ID][sender.ID] = now
+
+		return nil
+	})
+
+	return granter, sender, err
+}
+
+// RevokeMail withdraws the mail grant from the user admitted under issuer plus sub to the user whose
+// user label is senderLabel. Every later message of the conversations the grant admitted, replies
+// included, bounces when the broker re-checks it before delivery.
+func (b *Broker) RevokeMail(issuer, sub, senderLabel string) (granter, sender UserRecord, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	granter, err = b.admittedLocked(issuer, sub)
+	if err != nil {
+		return UserRecord{}, UserRecord{}, err
+	}
+
+	sender, err = b.userByLabelLocked(senderLabel)
+	if err != nil {
+		return UserRecord{}, UserRecord{}, err
+	}
+
+	err = b.commit(func(d *Data) error {
+		delete(d.MailGrants[granter.ID], sender.ID)
+
+		if len(d.MailGrants[granter.ID]) == 0 {
+			delete(d.MailGrants, granter.ID)
+		}
+
+		return nil
+	})
+
+	return granter, sender, err
 }

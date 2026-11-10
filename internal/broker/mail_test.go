@@ -389,7 +389,7 @@ func TestApproveByFingerprintPinsThatKeyAndDiscardsTheOthers(t *testing.T) {
 
 	want := wire.Fingerprint(wire.KeyHash(alice.Key))
 
-	if pinned, err := h.b.Approve(label, strings.ToUpper(want)); err != nil || !pinned {
+	if ans, err := h.b.Approve(label, strings.ToUpper(want)); err != nil || !ans.Pinned {
 		t.Fatalf("approve by fingerprint: %v", err)
 	}
 
@@ -434,9 +434,9 @@ func TestAFloodOfFreshKeysCannotEvictTheRealKeyFromAnApprovalItNeverGets(t *test
 		t.Fatal("the real key registered while the hostile stream was live")
 	}
 
-	pinned, err := h.b.Approve(label, wire.Fingerprint(wire.KeyHash(real.Key)))
-	if err != nil || pinned {
-		t.Fatalf("approve of a key that never became pending = %v, %v, want it recorded as awaited", pinned, err)
+	ans, err := h.b.Approve(label, wire.Fingerprint(wire.KeyHash(real.Key)))
+	if err != nil || ans.Pinned {
+		t.Fatalf("approve of a key that never became pending = %+v, %v, want it recorded as awaited", ans, err)
 	}
 
 	if got := h.data().Pins[label]; got.PinnedHash != "" || got.Awaiting == "" {

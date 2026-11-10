@@ -124,42 +124,53 @@ var fingerprintPattern = regexp.MustCompile(`^[0-9a-f]{4}(-[0-9a-f]{4}){3}$`)
 
 // Approve pins the pending key of a label that has the fingerprint, and discards every other pending
 // key for the label, so a host that submits a key of its own cannot block the approval. It reports
-// whether a key was pinned.
+// whether a key was pinned, and the owner it binds the label to.
 //
 // A fingerprint no pending key has is recorded as awaited, and the label pins the first key that
 // presents it. A bounded list of pending keys can be flooded off by a host that registers fresh keys
 // while the real machine sleeps, and approval must not depend on that list. The fingerprint is a 64-bit
 // prefix of the key's hash, so a host cannot present a key that matches without the user's own.
 //
+// Approval binds the label to the broker owner, since a command on the broker host is the owner's. An
+// awaited key binds when it pins. With no owner record, approval pins the key alone.
+//
+// Approving a label again under its pinned key binds it, so a label pinned but left unbound has a way
+// back.
+//
+// A label a coworker bound through the page is refused until it is forgotten. Taking it for the owner
+// would bounce the coworker's mail.
+//
 // It is reachable only through the admin socket and by a caller in this process. No HTTP route and no
 // request handoff kind calls it, since a session can reach both.
-func (b *Broker) Approve(label, fingerprint string) (pinned bool, err error) {
+func (b *Broker) Approve(label, fingerprint string) (AdminApproved, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	fingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
 	if !fingerprintPattern.MatchString(fingerprint) {
-		return false, fmt.Errorf("%q: %w", fingerprint, ErrBadFingerprint)
+		return AdminApproved{}, fmt.Errorf("%q: %w", fingerprint, ErrBadFingerprint)
 	}
 
 	row, ok := b.store.Data().Labels[label]
 	if !ok {
-		return false, fmt.Errorf("label %q: %w", label, ErrUnknownLabel)
+		return AdminApproved{}, fmt.Errorf("label %q: %w", label, ErrUnknownLabel)
 	}
 
-	if pin := b.store.Data().Pins[label]; pin.PinnedHash != "" {
-		if fingerprintMatches(pin.PinnedHash, fingerprint) {
-			return true, nil
-		}
-
-		return false, fmt.Errorf("label %q is already approved with another key: %w", label, ErrAlreadyPinned)
-	}
+	owner, hasOwner := b.ownerLocked()
+	pin := b.store.Data().Pins[label]
 
 	var hash string
 
-	for h := range b.store.Data().Pins[label].Pending {
-		if fingerprintMatches(h, fingerprint) {
-			hash = h
+	switch {
+	case pin.PinnedHash != "" && !fingerprintMatches(pin.PinnedHash, fingerprint):
+		return AdminApproved{}, fmt.Errorf("label %q is already approved with another key: %w", label, ErrAlreadyPinned)
+	case pin.PinnedHash != "":
+		hash = pin.PinnedHash
+	default:
+		for h := range pin.Pending {
+			if fingerprintMatches(h, fingerprint) {
+				hash = h
+			}
 		}
 	}
 
@@ -172,12 +183,37 @@ func (b *Broker) Approve(label, fingerprint string) (pinned bool, err error) {
 			return nil
 		})
 
-		return false, err
+		return AdminApproved{Owner: owner.UserLabel}, err
 	}
 
-	nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
+	bound := b.store.Data().Bindings[label].UserID
 
-	return true, b.pinLocked(label, nk, hash)
+	switch {
+	case !hasOwner && pin.PinnedHash != "":
+		return AdminApproved{Pinned: true}, nil
+	case !hasOwner:
+		return AdminApproved{Pinned: true}, b.pinLocked(label, NodeKey{MachineID: row.MachineID, UID: row.UID}, hash)
+	case pin.PinnedHash != "" && bound == owner.ID:
+		return AdminApproved{Pinned: true, Owner: owner.UserLabel}, nil
+	case pin.PinnedHash != "" && bound != "":
+		return AdminApproved{}, fmt.Errorf("label %q is bound to the user %s: %w",
+			label, b.store.Data().Users[bound].UserLabel, ErrAlreadyPinned)
+	}
+
+	return AdminApproved{Pinned: true, Owner: owner.UserLabel}, b.bindLocked(label, owner, hash, b.cfg.Now())
+}
+
+// ownerLocked returns the broker owner's user record, and false when the broker has none.
+func (b *Broker) ownerLocked() (UserRecord, bool) {
+	d := b.store.Data()
+
+	if d.OwnerID == "" {
+		return UserRecord{}, false
+	}
+
+	owner, ok := d.Users[d.OwnerID]
+
+	return owner, ok
 }
 
 // pinLocked pins a key to a label, makes it the node's key, and closes a stream opened under another.
@@ -327,6 +363,10 @@ type adminForget struct {
 // AdminApproved answers the approve command. Pinned is false when the fingerprint is awaited.
 type AdminApproved struct {
 	Pinned bool `json:"pinned"`
+
+	// Owner is the user label of the broker owner the label is bound to, or binds to once an awaited key
+	// pins. It is empty when the store's owner record is missing, and nothing is bound.
+	Owner string `json:"owner,omitempty"`
 }
 
 // AdminPending answers the pending command.
@@ -379,14 +419,14 @@ func (b *Broker) handleAdminApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pinned, err := b.Approve(req.Label, req.Fingerprint)
+	ans, err := b.Approve(req.Label, req.Fingerprint)
 	if err != nil {
 		b.adminResult(w, err)
 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, AdminApproved{Pinned: pinned})
+	writeJSON(w, http.StatusOK, ans)
 }
 
 func (b *Broker) handleAdminForget(w http.ResponseWriter, r *http.Request) {
@@ -437,7 +477,7 @@ func (b *Broker) handleAdminAdmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := b.AdmitUser(req.Issuer, req.Sub, req.Email, time.Now())
+	user, err := b.AdmitUser(req.Issuer, req.Sub, req.Email, b.cfg.Now())
 	if err != nil {
 		b.adminResult(w, err)
 

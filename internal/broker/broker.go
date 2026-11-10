@@ -161,6 +161,23 @@ type nodeState struct {
 
 	// liveSessions is the set of session IDs the node's last snapshot reported as live.
 	liveSessions map[string]bool
+
+	// conn counts the node's registrations. A node registers, sends its complete mail report, and only
+	// then opens its stream, so a registration is one connection. A stream belongs to the registration it
+	// opened under, and a stream from an earlier one was left behind by the node.
+	conn int
+
+	// mailReported is true once the node's complete mail report arrived since it last registered. Mail
+	// from another user is re-checked and sent only after it, and only on a stream of that registration.
+	mailReported bool
+
+	// sentSinceReport holds the mail from another user sent to the node since it last registered.
+	//
+	// The broker sends such mail only after the complete report, so the report cannot say whether the
+	// node stored it. The re-check skips it until the node acks it or reports again on its next
+	// connection. A stream whose connection is gone, which the broker has not noticed yet, then cannot
+	// bounce mail the node may hold.
+	sentSinceReport map[string]bool
 }
 
 type queued struct {
@@ -175,6 +192,9 @@ type streamState struct {
 	// keyHash is the hash of the key the stream opened with. Mail goes only to a stream whose key is the
 	// one the label is pinned to, so a stream left over from an earlier key never receives it.
 	keyHash string
+
+	// conn is the node's registration count when the stream opened.
+	conn int
 }
 
 // New builds a broker over an opened store.
@@ -338,10 +358,14 @@ func (b *Broker) Handler() http.Handler {
 		mux.HandleFunc("POST /bind", b.handleBindLabel)
 		mux.HandleFunc("POST /grant", b.handleGrantDelegation)
 		mux.HandleFunc("POST /revoke", b.handleRevokeDelegation)
+		mux.HandleFunc("POST /mail-grant", b.handleStartMailGrant)
+		mux.HandleFunc("POST /mail-revoke", b.handleStartMailRevoke)
 		mux.HandleFunc("GET /callback", b.handleCallback)
 		mux.HandleFunc("POST /bind-submit", b.handleBindSubmit)
 		mux.HandleFunc("POST /grant-submit", b.handleGrantSubmit)
 		mux.HandleFunc("POST /revoke-submit", b.handleRevokeSubmit)
+		mux.HandleFunc("POST /mail-grant-submit", b.handleMailGrantSubmit)
+		mux.HandleFunc("POST /mail-revoke-submit", b.handleMailRevokeSubmit)
 	}
 
 	return mux
@@ -504,37 +528,16 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		ns.stream.cancel()
 	}
 
-	err = b.commit(func(d *Data) error {
-		d.Nodes[nk.String()] = NodeRecord{KeyHash: hash, Label: label, MailCap: req.MailCapability, HTTPS: req.HTTPS}
-		notePending(d, label, hash, b.cfg.Now())
-
-		if awaited {
-			d.Pins[label] = PinRecord{PinnedHash: hash}
-		}
-		d.Labels[label] = LabelRecord{
-			MachineID:  req.MachineID,
-			UID:        req.UID,
-			Host:       req.Host,
-			User:       req.User,
-			Derivation: LabelDerivation,
-			LastSeen:   b.cfg.Now(),
-		}
-
-		if req.HTTPS {
-			d.SchemeReports[label] = "https"
-		} else {
-			d.SchemeReports[label] = "http"
-		}
-
-		return nil
-	})
-	if err != nil {
+	if err := b.recordRegistrationLocked(req, label, hash, awaited); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, wire.CodeUnavailable, err.Error())
 
 		return
 	}
 
 	ns.user, ns.host = req.User, req.Host
+	ns.conn++
+	ns.mailReported = false
+	ns.sentSinceReport = nil
 	b.beat(ns)
 
 	b.cfg.Logger.Info("node registered", "label", label, "uid", req.UID, "node_version", req.NodeVersion, "https", req.HTTPS)
@@ -551,7 +554,69 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		CrossUser:       crossUserEnabled,
 
 		ActingForExplicit: true,
+		MailReplies:       true,
 	})
+}
+
+// recordRegistrationLocked stores a node's registration under its label. An awaited key was approved on
+// the broker host, so it pins and binds to the owner in the same commit. A store whose owner record is
+// missing pins it alone.
+func (b *Broker) recordRegistrationLocked(req wire.Register, label, hash string, awaited bool) error {
+	nk := NodeKey{MachineID: req.MachineID, UID: req.UID}
+	owner, hasOwner := b.ownerLocked()
+
+	var (
+		next    *gstate
+		senders []string
+	)
+
+	if awaited && hasOwner {
+		next = b.g.clone()
+	}
+
+	err := b.commit(func(d *Data) error {
+		d.Nodes[nk.String()] = NodeRecord{KeyHash: hash, Label: label, MailCap: req.MailCapability, HTTPS: req.HTTPS}
+		notePending(d, label, hash, b.cfg.Now())
+
+		d.Labels[label] = LabelRecord{
+			MachineID:  req.MachineID,
+			UID:        req.UID,
+			Host:       req.Host,
+			User:       req.User,
+			Derivation: LabelDerivation,
+			LastSeen:   b.cfg.Now(),
+		}
+
+		if req.HTTPS {
+			d.SchemeReports[label] = "https"
+		} else {
+			d.SchemeReports[label] = "http"
+		}
+
+		switch {
+		case next != nil:
+			senders = b.bindInto(d, next, label, owner, hash, b.cfg.Now())
+
+			return next.encode(d)
+		case awaited:
+			d.Pins[label] = PinRecord{PinnedHash: hash}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	if next != nil {
+		b.g = next
+	}
+
+	for _, l := range senders {
+		b.wakeSendersLocked(l)
+	}
+
+	return nil
 }
 
 func sameKey(rec NodeRecord, hash string) bool {
@@ -666,7 +731,7 @@ func (b *Broker) handlePair(w http.ResponseWriter, r *http.Request, key NodeKey)
 	label := b.store.Data().Nodes[key.String()].Label
 	b.mu.Unlock()
 
-	if err := b.StorePairingCode(label, req.PairingHash, time.Now().Add(PairingCodeExpiry)); err != nil {
+	if err := b.StorePairingCode(label, req.PairingHash, b.cfg.Now().Add(PairingCodeExpiry)); err != nil {
 		writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
 
 		return
@@ -695,6 +760,7 @@ func (b *Broker) handleStream(w http.ResponseWriter, r *http.Request, key NodeKe
 		ns.stream.cancel()
 	}
 
+	st.conn = ns.conn
 	ns.stream = st
 	b.beat(ns)
 
@@ -734,7 +800,7 @@ func (b *Broker) handleStream(w http.ResponseWriter, r *http.Request, key NodeKe
 			return
 		}
 
-		if err := b.flushMail(w, key, st.keyHash, sentMail); err != nil {
+		if err := b.flushMail(w, key, st, sentMail); err != nil {
 			return
 		}
 

@@ -573,7 +573,7 @@ func TestOldNodeSnapshotWithNoAckedFieldStillWorks(t *testing.T) {
 }
 
 // TestSubstituteActingForPreventsCrossUserClaiming tests that a label bound to U1 cannot claim
-// in U2's scope by naming U2's label in acting_for. M1 has no delegations, so substitute
+// in U2's scope by naming U2's label in acting_for. No user delegated to the label, so substitute
 // everything except the label's own bound user's label.
 func TestSubstituteActingForPreventsCrossUserClaiming(t *testing.T) {
 	h := newHarness(t, nil)

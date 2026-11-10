@@ -56,7 +56,7 @@ func (sm *SignInManager) cleanupExpired() {
 
 	for range ticker.C {
 		sm.mu.Lock()
-		now := time.Now()
+		now := sm.broker.cfg.Now()
 
 		for id, pa := range sm.pending {
 			if now.Sub(pa.createdAt) > actionExpiry {
@@ -80,7 +80,7 @@ func (sm *SignInManager) StartAction(action string) (authURL string, err error) 
 		state:     state,
 		nonce:     nonce,
 		verifier:  verifier,
-		createdAt: time.Now(),
+		createdAt: sm.broker.cfg.Now(),
 	}
 	sm.mu.Unlock()
 
@@ -131,7 +131,7 @@ func (sm *SignInManager) ConsumeToken(token string) (action string, claims *oidc
 
 	for state, pa := range sm.pending {
 		if pa.token != "" && subtle.ConstantTimeCompare([]byte(pa.token), []byte(token)) == 1 {
-			if time.Since(pa.createdAt) > actionExpiry {
+			if sm.broker.cfg.Now().Sub(pa.createdAt) > actionExpiry {
 				delete(sm.pending, state)
 
 				return "", nil, errors.New("token expired")
@@ -238,7 +238,7 @@ func (b *Broker) handleCallback(w http.ResponseWriter, r *http.Request) {
 	b.mu.Unlock()
 
 	if !admitted {
-		if err := b.RecordPendingAdmission(claims.Issuer, claims.Subject, claims.Email, time.Now()); err != nil {
+		if err := b.RecordPendingAdmission(claims.Issuer, claims.Subject, claims.Email, b.cfg.Now()); err != nil {
 			http.Error(w, "Failed to record pending admission", http.StatusInternalServerError)
 
 			return
@@ -329,7 +329,7 @@ func (b *Broker) handleBindSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ok, err := b.CheckPairingCode(label, code, userID, time.Now())
+	ok, err := b.CheckPairingCode(label, code, userID, b.cfg.Now())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Pairing code check failed: %v", err), http.StatusInternalServerError)
 
@@ -342,7 +342,7 @@ func (b *Broker) handleBindSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := b.BindLabelToUser(label, userID, time.Now()); err != nil {
+	if err := b.BindLabelToUser(label, userID, b.cfg.Now()); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to bind label: %v", err), http.StatusInternalServerError)
 
 		return
@@ -458,7 +458,7 @@ func (b *Broker) handleGrantSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := b.GrantDelegation(claims.Issuer, claims.Subject, label, time.Now())
+	user, err := b.GrantDelegation(claims.Issuer, claims.Subject, label, b.cfg.Now())
 	if errors.Is(err, ErrNotAdmitted) {
 		http.Error(w, "User not admitted", http.StatusForbidden)
 
@@ -553,6 +553,131 @@ func (b *Broker) handleRevokeSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Page actions for mail grants. Each runs its own OIDC round trip, as a delegation does.
+const (
+	actionMailGrant  = "mail-grant"
+	actionMailRevoke = "mail-revoke"
+)
+
+func (b *Broker) handleStartMailGrant(w http.ResponseWriter, r *http.Request) {
+	b.startAction(w, r, actionMailGrant)
+}
+
+func (b *Broker) handleStartMailRevoke(w http.ResponseWriter, r *http.Request) {
+	b.startAction(w, r, actionMailRevoke)
+}
+
+// startAction begins an action's OIDC round trip. The parameters of the action are never read here, so
+// nothing sent before the sign-in is acted on, shown, or prefilled.
+func (b *Broker) startAction(w http.ResponseWriter, r *http.Request, action string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+
+		return
+	}
+
+	if b.signInMgr == nil {
+		http.Error(w, "OIDC not configured", http.StatusServiceUnavailable)
+
+		return
+	}
+
+	authURL, err := b.signInMgr.StartAction(action)
+	if err != nil {
+		http.Error(w, "Failed to start sign-in", http.StatusInternalServerError)
+
+		return
+	}
+
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+func (b *Broker) handleMailGrantSubmit(w http.ResponseWriter, r *http.Request) {
+	b.mailGrantSubmit(w, r, actionMailGrant, b.GrantMail, mailGrantSuccessHTML)
+}
+
+func (b *Broker) handleMailRevokeSubmit(w http.ResponseWriter, r *http.Request) {
+	revoke := func(issuer, sub, label string, _ time.Time) (UserRecord, UserRecord, error) {
+		return b.RevokeMail(issuer, sub, label)
+	}
+
+	b.mailGrantSubmit(w, r, actionMailRevoke, revoke, mailRevokeSuccessHTML)
+}
+
+// mailGrantSubmit takes the form rendered after an action's callback. The single-use token ties it to
+// that round trip, and the signer's admission is checked under the change's own lock.
+func (b *Broker) mailGrantSubmit(w http.ResponseWriter, r *http.Request, want string,
+	change func(issuer, sub, senderLabel string, now time.Time) (UserRecord, UserRecord, error), page string,
+) {
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form", http.StatusBadRequest)
+
+		return
+	}
+
+	token := r.FormValue("token")
+	userLabel := r.FormValue("user_label")
+
+	if token == "" || userLabel == "" {
+		http.Error(w, "Missing required fields", http.StatusBadRequest)
+
+		return
+	}
+
+	action, claims, err := b.signInMgr.ConsumeToken(token)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid token: %v", err), http.StatusUnauthorized)
+
+		return
+	}
+
+	if action != want {
+		http.Error(w, "Token not for this action", http.StatusBadRequest)
+
+		return
+	}
+
+	granter, sender, err := change(claims.Issuer, claims.Subject, userLabel, b.cfg.Now())
+
+	switch {
+	case errors.Is(err, ErrNotAdmitted):
+		http.Error(w, "User not admitted", http.StatusForbidden)
+
+		return
+	case errors.Is(err, ErrUnknownUserLabel), errors.Is(err, ErrSelfGrant):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	case err != nil:
+		http.Error(w, fmt.Sprintf("Failed to change the mail grant: %v", err), http.StatusInternalServerError)
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	tmpl := template.Must(template.New("mail-grant-success").Parse(page))
+	data := struct {
+		Sender string
+		Email  string
+	}{
+		Sender: sender.UserLabel,
+		Email:  granter.Email,
+	}
+
+	if err := tmpl.Execute(w, data); err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+	}
+}
+
 const signInPageHTML = `<!DOCTYPE html>
 <html>
 <head>
@@ -574,13 +699,19 @@ const signInPageHTML = `<!DOCTYPE html>
     <form method="POST" action="/revoke">
         <button type="submit">Revoke Delegation</button>
     </form>
+    <form method="POST" action="/mail-grant">
+        <button type="submit">Grant Mail From a User</button>
+    </form>
+    <form method="POST" action="/mail-revoke">
+        <button type="submit">Revoke Mail From a User</button>
+    </form>
 </body>
 </html>`
 
 const actionFormHTML = `<!DOCTYPE html>
 <html>
 <head>
-    <title>{{if eq .Action "bind"}}Bind Label{{else if eq .Action "grant"}}Grant Delegation{{else if eq .Action "revoke"}}Revoke Delegation{{end}}</title>
+    <title>{{if eq .Action "bind"}}Bind Label{{else if eq .Action "grant"}}Grant Delegation{{else if eq .Action "revoke"}}Revoke Delegation{{else if eq .Action "mail-grant"}}Grant Mail{{else if eq .Action "mail-revoke"}}Revoke Mail{{end}}</title>
     <style>
         body { font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
         input { padding: 8px; margin: 5px 0; width: 100%; box-sizing: border-box; }
@@ -589,7 +720,7 @@ const actionFormHTML = `<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <h1>{{if eq .Action "bind"}}Bind Label{{else if eq .Action "grant"}}Grant Delegation{{else if eq .Action "revoke"}}Revoke Delegation{{end}}</h1>
+    <h1>{{if eq .Action "bind"}}Bind Label{{else if eq .Action "grant"}}Grant Delegation{{else if eq .Action "revoke"}}Revoke Delegation{{else if eq .Action "mail-grant"}}Grant Mail{{else if eq .Action "mail-revoke"}}Revoke Mail{{end}}</h1>
     <div class="info">
         <p>Signed in as: {{.Email}}</p>
         <p>User ID: {{.UserID}}</p>
@@ -621,6 +752,24 @@ const actionFormHTML = `<!DOCTYPE html>
         <label>Label:</label>
         <input type="text" name="label" placeholder="e.g. alpha-bravo-charlie-delta" required>
         <p><strong>You are revoking this label's permission to act in your scope. Its leases held for you will be ended.</strong></p>
+        <button type="submit">Confirm Revoke</button>
+    </form>
+    {{else if eq .Action "mail-grant"}}
+    <p>Enter the user label of the user whose mail you accept:</p>
+    <form method="POST" action="/mail-grant-submit">
+        <input type="hidden" name="token" value="{{.Token}}">
+        <label>User label:</label>
+        <input type="text" name="user_label" placeholder="e.g. word-word-word-word" required>
+        <p><strong>You are letting this user's sessions mail yours. A first message reaches only a session of yours that holds a shared lease. Replies within its conversation reach the session that sent you mail.</strong></p>
+        <button type="submit">Confirm Grant</button>
+    </form>
+    {{else if eq .Action "mail-revoke"}}
+    <p>Enter the user label of the user whose mail you no longer accept:</p>
+    <form method="POST" action="/mail-revoke-submit">
+        <input type="hidden" name="token" value="{{.Token}}">
+        <label>User label:</label>
+        <input type="text" name="user_label" placeholder="e.g. word-word-word-word" required>
+        <p><strong>You are revoking this user's mail grant. Every later message of its conversations, replies included, comes back to its sender.</strong></p>
         <button type="submit">Confirm Revoke</button>
     </form>
     {{end}}
@@ -680,5 +829,33 @@ const revokeSuccessHTML = `<!DOCTYPE html>
 <body>
     <h1>Success</h1>
     <p>Delegation revoked from {{.Label}} for {{.Email}}.</p>
+</body>
+</html>`
+
+const mailGrantSuccessHTML = `<!DOCTYPE html>
+<html>
+<head>
+    <title>Success</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Success</h1>
+    <p>{{.Email}} now accepts mail from user {{.Sender}}.</p>
+</body>
+</html>`
+
+const mailRevokeSuccessHTML = `<!DOCTYPE html>
+<html>
+<head>
+    <title>Success</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Success</h1>
+    <p>{{.Email}} no longer accepts mail from user {{.Sender}}.</p>
 </body>
 </html>`

@@ -38,7 +38,7 @@ approve it.`,
 
 	approve := &cobra.Command{
 		Use:   "approve <label> <fingerprint>",
-		Short: "Pin the key with the fingerprint to the label, and discard its other pending keys",
+		Short: "Pin the key with the fingerprint to the label, bind the label to the broker owner, and discard its other pending keys",
 		Args:  cobra.ExactArgs(2),
 		RunE:  func(cmd *cobra.Command, args []string) error { return a.runBrokerApprove(cmd, args[0], args[1]) },
 	}
@@ -60,7 +60,7 @@ senders without its body.`,
 		Use:   "confirm-upgrade",
 		Short: "Delete the kept previous store file, making a rollback impossible",
 		Long: `Delete the broker.json.v1 file kept beside the store after the migration to store 2.0. After this runs,
-a rollback to a pre-NIT-006 broker is impossible. The pre-upgrade keys and every key forgotten since the
+a rollback to a broker that reads only store 1.x is impossible. The pre-upgrade keys and every key forgotten since the
 upgrade are refused after a rollback.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -195,14 +195,24 @@ func (a *app) runBrokerApprove(cmd *cobra.Command, label, fingerprint string) er
 	out := cmd.OutOrStdout()
 
 	if ans.Pinned {
-		_, err = fmt.Fprintf(out, "approved %s with key %s.\n\n%s\n", label, fingerprint, approvalWarning)
+		bound := ""
+		if ans.Owner != "" {
+			bound = fmt.Sprintf(" It is bound to the broker owner, %s.", ans.Owner)
+		}
+
+		_, err = fmt.Fprintf(out, "approved %s with key %s.%s\n\n%s\n", label, fingerprint, bound, approvalWarning)
 
 		return err
 	}
 
+	binds := ""
+	if ans.Owner != "" {
+		binds = fmt.Sprintf(", and binds to the broker owner, %s", ans.Owner)
+	}
+
 	_, err = fmt.Fprintf(out, "recorded the approval of key %[2]s for %[1]s, but no key with that fingerprint has reached the broker.\n"+
-		"The label pins the first key that presents it. Nothing is pinned until then. If you mistyped the fingerprint,\n"+
-		"check it against the machine's own: nitipan node fingerprint\n\n%[3]s\n", label, fingerprint, approvalWarning)
+		"The label pins the first key that presents it%[4]s. Nothing is pinned until then. If you mistyped the fingerprint,\n"+
+		"check it against the machine's own: nitipan node fingerprint\n\n%[3]s\n", label, fingerprint, approvalWarning, binds)
 
 	return err
 }

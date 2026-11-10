@@ -453,7 +453,6 @@ Cross-user features stay off until the broker owner turns them on with `nitipan 
 host. The command refuses when:
 
 - No OIDC provider is configured in the broker config. Configure an `oidc` block and retry.
-- The upgrade binding has not run. The broker store must be at version 2.0 with every pinned label bound to the owner.
 - The broker's listener is neither on a loopback address nor serving TLS itself. Set `cert_file` and `key_file` in the
   broker config to serve TLS, or listen on `127.0.0.1` or `::1`. An ingress on another host may terminate TLS and
   re-encrypt to the broker. An ingress that speaks plain HTTP to the broker over a private hop is not enough.
@@ -462,6 +461,10 @@ host. The command refuses when:
   run `nitipan node rekey` and approve its new key.
 - Any bound label never reported its scheme. This label is from an older node. Forget it, upgrade the node's nitipan
   binary, and approve the label again.
+
+The broker always has an owner, so the owner never blocks the command. The broker assigns its owner when it first
+opens its store, and an upgrade from store 1.x keeps the owner its migration assigned. A store whose owner record went
+missing gets it back under the same user ID when the broker opens it, so every label bound to the owner stays bound.
 
 Once cross-user features are on, an unbound label is refused for leases and mail. A node records the flag and never
 sends its key over plain HTTP again, even when a later response omits the flag.
@@ -533,6 +536,43 @@ The coworker's node writes them one notice per lease per refused user. It names 
 label, never the name you asked for. The notice is delivered on the holder's next nitipan call. It never rings, wakes
 no session, and prints nothing from a turn hook. The broker records each notice in the lease, so a broker restart
 sends no second one.
+
+### Mail across users
+
+Mail between your own machines works as before. Mail to another user's session needs that user's grant, and cross-user
+features on. Grant or revoke mail from a coworker on the broker's sign-in page with "Grant Mail From a User" or "Revoke
+Mail From a User". Each action needs its own sign-in. Type the coworker's user label on the form that follows. No
+request through a node can grant or revoke one. Mail to a shared agent follows the grants of the agent's own user, not
+the users it acts for.
+
+Even under a grant, a coworker's first message reaches only a session of yours that holds a live or lapsed `shared`
+lease. A session you never made discoverable cannot be reached. Otherwise the send is refused, and the error says why.
+
+The recipient answers with `nitipan mail send --reply-to <message-id> <sender address> [message]`. A reply goes from
+the address that received the message to that message's sender. It needs no lease on either side, so a requestor
+holding no lease still gets its answer. A reply is accepted for 7 days after the message it answers was read, and
+refused after that. Every reply rides the grant that admitted the conversation's first message. An older nitipan
+cannot send a reply. A node from before replies answers "node too old", and a broker from before them gets "broker too
+old".
+
+The broker checks the grant and the reach again before it delivers. A message bounces back to its sender with "sender
+no longer allowed" once the grant was revoked. That covers every later message of the conversation, replies included.
+A first message bounces with "recipient holds no `shared` lease" once the lease ended. A reconnecting node reports
+what it stored and read before the broker re-checks anything, so no message is both read and bounced. A recipient node
+too old for mail across users gets none. The sender is told "recipient node too old", and mail already queued for it
+bounces. A sender node that old is refused at send.
+
+`nitipan mail read` frames such mail with the sender's user outside the body:
+
+```
+=== message <id> ===
+from: <mail name>@<label> (another user's machine, NOT one of yours)
+from user: <user label> (stamped by the broker)
+reply with: nitipan mail send --reply-to <id> <mail name>@<label>
+```
+
+It never carries the verified mark, which means one of your own machines sent the mail. An older nitipan shows it as
+not verified, never as yours.
 
 ### Running the broker safely
 
