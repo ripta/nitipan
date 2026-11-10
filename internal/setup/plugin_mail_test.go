@@ -14,6 +14,17 @@ var pluginMailDiscoveryScenarios = []string{"initial-failure", "later-page"}
 // The SDK fixture drives the installed plugin with a manual clock. It proves discovery recovery and
 // paging without booting opencode; the live harness owns the real session.prompt wake/read contract.
 func TestOpencodeMailDiscoveryRecoversAndReachesLaterPages(t *testing.T) {
+	runPluginMailScenarios(t, pluginMailDiscoveryScenarios)
+}
+
+var pluginMailFailureScenarios = []string{"batch-failure", "rollback-failure", "rollback-fairness"}
+
+func TestOpencodeMailFailuresDoNotStarveOtherRecipients(t *testing.T) {
+	runPluginMailScenarios(t, pluginMailFailureScenarios)
+}
+
+func runPluginMailScenarios(t *testing.T, scenarios []string) {
+	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("opencode plugin discovery fixture requires Node with TypeScript stripping")
@@ -30,7 +41,7 @@ func TestOpencodeMailDiscoveryRecoversAndReachesLaterPages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, scenario := range pluginMailDiscoveryScenarios {
+	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
 			cmd := exec.Command(node, "--experimental-vm-modules", "--input-type=module", "-", filepath.Join(dir, "nitipan", "index.ts"), scenario)
 			cmd.Stdin = bytes.NewReader(script)

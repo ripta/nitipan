@@ -679,7 +679,8 @@ Check to test, by the bullet order above:
   with the reason in status output. Failed queue commands return their ring claims for a later attempt.
 - The opencode server plugin watches the inbox and publishes presence while polling its known sessions. The Go helper
   owns version checks and ring claims; the plugin sends only the ring through the installed API's text field. A
-  refused prompt returns the claim. Status reports missing or stale plugin presence. Codex turn hooks and the
+  refused prompt returns the claim; a failed rollback is retained and retried after healthy recipients are serviced.
+  Status reports missing or stale plugin presence. Codex turn hooks and the
   opencode plugin provide reminders without consuming message content. The opencode context hook repeats unread
   reminders in later model steps, including after a tool result, without touching the waking ledger or adding a turn.
 - Scripted trials on macOS 26.6.2 with Codex 0.167.0 and opencode 2.2.6 woke idle sessions and ran explicit mail reads,
@@ -700,6 +701,11 @@ Check to test, by the bullet order above:
   failed lookup, and starts again after the last page. Known sessions keep being polled during lookup failures. An
   injected-clock regression reproduces both failures before the fix and reaches the idle recipient without a session
   event afterward.
+- Final review found that an unusable registration could stop a mailbox batch, and a failed rollback could strand
+  other already-claimed rings. Per-recipient errors now leave healthy recipients running and are reported separately.
+  A rejected helper batch does not skip later batches. Failed rollback work stays queued, with one attempt after each
+  poll and a failed recipient rotated behind others. Deterministic CLI and plugin-boundary regressions reproduced
+  both failures before repair and verify healthy delivery, recovery, bounded retries, and unchanged unusable files.
 - The Codex live harness needed a macOS Python fallback for non-reaping child exit observation. It uses the operating
   system's waitid through libc when Python exposes no os.waitid, so cleanup still owns each process group until reap.
 - The opencode probe's tabs check failed with tabs disabled on the installed CLI. The committed harness and committed
@@ -896,6 +902,13 @@ Check to test, by the bullet order above:
   the one-time recent-session snapshot, which could never recover a failed lookup or reach an idle recipient beyond
   its first 200 entries. Existing sessions still poll while discovery is unavailable; a page limits lookup work rather
   than the set of recipients the plugin can watch.
+
+- 2026-11-09 (run best guess): Correction of fact in M2's As built block. The text "A refused prompt returns the
+  claim." did not cover a failed rollback helper. A failed prompt and rollback could stop the batch after other
+  recipients' keys were already claimed. Failed rollbacks now stay queued for a later poll, after healthy delivery,
+  with at most one helper attempt per poll and failed recipients rotated behind others. Per-recipient errors are
+  reported without aborting healthy recipients, and a rejected helper batch no longer skips later batches. These
+  repairs honor the settled idle-delivery and ring-only rules; the design is unchanged.
 
 ## References
 

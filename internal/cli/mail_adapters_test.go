@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -87,4 +89,48 @@ func TestCodexMailTurnRemindsWithoutConsumingOrClaimingAndStatusExplainsHomeMism
 	read := w.run(shell, "mail", "read")
 	wantStatus(t, read, exitcode.OK)
 	wantContains(t, "stdout", read.Stdout, "private")
+}
+
+type unusableMailRegistrationTest struct {
+	Name string
+	Data string
+}
+
+var unusableMailRegistrationTests = []unusableMailRegistrationTest{
+	{Name: "undecodable", Data: "not-json"},
+	{Name: "higher-major", Data: `{"version":"2.0"}`},
+}
+
+func TestOpencodeMailPollIsolatesAnUnusableRecipient(t *testing.T) {
+	for _, test := range unusableMailRegistrationTests {
+		t.Run(test.Name, func(t *testing.T) {
+			w := newWorld(t)
+			_, tui, server := opencodeSetup(t, w)
+			wantStatus(t, w.hook(tui, "presence", "ses_1", present(true)), exitcode.OK)
+			badPath := filepath.Join(w.state, mailbox.RegDir, mailbox.RegistrationKey("opencode", 500, startOf(500), "ses_bad")+".json")
+			if err := os.MkdirAll(filepath.Dir(badPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(badPath, []byte(test.Data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			id := state.NewID()
+			if err := mailbox.Store(w.state, mailbox.Message{ID: id, ToSession: "ses_1", Kind: mailbox.KindMail, Body: "healthy-session-content"}); err != nil {
+				t.Fatal(err)
+			}
+			result := w.hook(server, "mail-poll", "ses_bad", map[string]any{"sessions": []string{"ses_bad", "ses_1"}})
+			wantStatus(t, result, exitcode.OK)
+			wantContains(t, "stderr", result.Stderr, "ses_bad")
+			wantContains(t, "stdout", result.Stdout, "ses_1", mailbox.MailKey(id))
+			wantAbsent(t, "stdout", result.Stdout, "healthy-session-content")
+			data, err := os.ReadFile(badPath)
+			if err != nil || string(data) != test.Data {
+				t.Fatalf("unusable registration changed: %q, %v", data, err)
+			}
+			pending, _, err := mailbox.Pending(w.state, []string{"ses_1"})
+			if err != nil || len(pending) != 1 {
+				t.Fatalf("healthy pending mail=%v, %v", pending, err)
+			}
+		})
+	}
 }

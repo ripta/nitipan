@@ -268,3 +268,51 @@ The discovery fix landed as `nitipan: rediscover idle opencode mail recipients`.
 no unresolved trace or new ADR candidate remains. On 2026-11-09 the coordinator marked NIT-007 implemented, updated
 its index row, and moved NIT-007 M2 to the end of history with its cells unchanged. The other queue rows are outside
 this next-one run and remain scheduled. Final whole-run code and ADR review follows the completion commit.
+
+## Final review findings
+
+Final ADR-impact found no conflicts or uncovered decisions across ADR-01, 04, 05, 06, 07, and 08. Final code review
+confirmed prior liveness, context-reminder, and discovery repairs. No ADR file changed, so final ADR-file review had
+no additions or edits to assess. Freeze returned no findings.
+
+The final code reviewer found two confirmed correctness issues:
+
+1. internal/cli/hook_plugin_mail.go:61: a session with an unusable registration causes the helper to return before
+   healthy recipients; the plugin's outer catch also skips later batches. Stable iteration can starve idle recipients.
+   Disposition: fix with per-recipient failure isolation, visible errors, and progress for healthy sessions.
+2. plugins/opencode/nitipan/index.ts:242: if a prompt fails and its rollback helper also fails, the outer catch prevents
+   later already-claimed rings from being attempted. Their ledger claims then suppress future wakes. Disposition: fix
+   by continuing independent rings and retaining rollback work for retry.
+
+A fresh final-review implementer is repairing both within the approved delivery contract, with pre-fix regression
+proofs. The proposal is implemented; any As built correction follows frozen-proposal correction-of-fact rules.
+No design change or new ADR is authorized by these findings.
+
+## Final fix 1 results
+
+Both final findings are fixed. Before repair, CLI tests for undecodable and higher-major registrations exited 1
+before healthy recipients were reached. Production-plugin regressions also failed for a rejected first batch and for
+a prompt failure followed by failed rollback. After repair, per-recipient diagnostics no longer suppress healthy
+rings. The plugin isolates batch and prompt failures and retains failed rollback keys. Healthy deliveries run first;
+one rollback helper is attempted per poll, with failed recipients rotating behind others. An additional fairness
+fixture proves a permanently failing recipient cannot starve another recoverable recipient.
+
+`make test TEST_PKGS='./internal/cli ./internal/setup' TEST_ARGS='-run Mail -count=1'` passed: CLI 6.170 seconds,
+setup 1.400 seconds. Focused per-recipient and production-plugin regressions passed. Lint reported zero issues.
+Final CI session 7518 passed formatting, lint, Linux vet, race tests, and build: CLI 427.019 seconds, setup 11.029
+seconds. Diff check, proposal check, and freeze all passed with no findings. Every command finished before handoff;
+the implementer's six-file list matched git status apart from this coordinator-owned report.
+
+```sh
+make live-opencode 'LIVE_OPENCODE_ARGS=--only mail,mail-reminder --results /tmp/nitipan-opencode-batch-final.md'
+```
+
+Run 46f6a85b on 2026-11-09 (opencode 2.2.6, macOS 26.6.2), inspected directly by the coordinator, passed 14 checks
+with no failures/errors/skips and zero real model turns. Later turn and post-tool requests both carried the reminder,
+no extra wake was enqueued, and only explicit read consumed mail. Owned server/TUI PIDs 88846, 88966, and 89356 were
+confirmed absent. Initial attempt e9653b3b stopped before installation on a sandbox Go-cache denial; it launched no
+test server. The successful trial used the command approval mechanism.
+
+The implemented proposal received an As built correction with a Decision Log quoting the prior claim. No settled
+design changed. Newer/unusable files remain untouched. No new ADR candidate, unresolved trace, unrelated edit, or
+blocker remains. No finding was dismissed. Final ADR review found no conflict; no ADR file was added or edited.

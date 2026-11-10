@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/space-armada/nitipan/internal/adapter"
+	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/mailbox"
 	"github.com/space-armada/nitipan/internal/session"
 )
@@ -38,11 +39,6 @@ func (a *app) pluginMail(in hookInput, host adapter.Holder, args []string, actio
 	if len(ids) > 256 {
 		return errors.New("mail poll accepts at most 256 sessions")
 	}
-	for _, id := range ids {
-		if !session.ValidSession(id) {
-			return errors.New("mail poll has an invalid session ID")
-		}
-	}
 	out := make([]pluginRing, 0, len(ids))
 	emitted := false
 	defer func() {
@@ -56,62 +52,77 @@ func (a *app) pluginMail(in hookInput, host adapter.Holder, args []string, actio
 			_ = mailbox.Unclaim(root, mailbox.RegistrationKey(host.Adapter.Name, host.PID, host.Start, ring.SessionID), ring.Keys)
 		}
 	}()
+	var recipientErrors []error
 	for _, id := range ids {
 		host.SessionID = id
-		r, err := a.registerMail(root, host)
+		ring, err := a.pluginMailRecipient(root, host, in, action, e.Checker)
 		if err != nil {
-			return err
-		}
-		w := mailbox.WaiterPresence{Identity: r.Identity, PID: host.PID, Start: host.Start, Machine: r.Machine, ArmedAt: a.deps.Now()}
-		switch action {
-		case "stop":
-			mailbox.Disarm(root, w)
-			continue
-		case "retry":
-			if err := mailbox.Unclaim(root, r.Identity, in.Keys); err != nil {
-				return err
-			}
+			err = fmt.Errorf("mail for session %s: %w", id, err)
+			fmt.Fprintln(a.deps.Stderr, err)
+			recipientErrors = append(recipientErrors, err)
 			continue
 		}
-		if err := mailbox.Arm(root, w); err != nil {
-			return err
-		}
-		if !mailbox.Live(r, e.Checker) {
-			continue
-		}
-		msgs, unknown, err := mailbox.Pending(root, r.SessionIDs)
-		if err != nil {
-			return err
-		}
-		if text := mailbox.UnknownText(unknown); text != "" {
-			fmt.Fprintln(a.deps.Stderr, text)
-		}
-		if action == "reminder" {
-			if len(msgs) > 0 {
-				out = append(out, pluginRing{SessionID: id, Ring: mailbox.RingText(len(msgs))})
-			}
-			continue
-		}
-		keys := make([]string, len(msgs))
-		for i, m := range msgs {
-			keys[i] = mailbox.MailKey(m.ID)
-		}
-		fresh, err := mailbox.Claim(root, r.Identity, keys, a.deps.Now())
-		if err != nil {
-			return err
-		}
-		if len(fresh) > 0 {
-			out = append(out, pluginRing{SessionID: id, Keys: fresh, Ring: mailbox.RingText(len(fresh))})
+		if ring.Ring != "" {
+			out = append(out, ring)
 		}
 	}
 	if action != "poll" && action != "reminder" {
-		return nil
+		return errors.Join(recipientErrors...)
 	}
 	if err := json.NewEncoder(a.deps.Stdout).Encode(out); err != nil {
 		return err
 	}
 	emitted = true
 	return nil
+}
+
+func (a *app) pluginMailRecipient(root string, host adapter.Holder, in hookInput, action string, checker *liveness.Checker) (pluginRing, error) {
+	if !session.ValidSession(host.SessionID) {
+		return pluginRing{}, errors.New("mail poll has an invalid session ID")
+	}
+	r, err := a.registerMail(root, host)
+	if err != nil {
+		return pluginRing{}, err
+	}
+	w := mailbox.WaiterPresence{Identity: r.Identity, PID: host.PID, Start: host.Start, Machine: r.Machine, ArmedAt: a.deps.Now()}
+	switch action {
+	case "stop":
+		mailbox.Disarm(root, w)
+		return pluginRing{}, nil
+	case "retry":
+		return pluginRing{}, mailbox.Unclaim(root, r.Identity, in.Keys)
+	}
+	if err := mailbox.Arm(root, w); err != nil {
+		return pluginRing{}, err
+	}
+	if !mailbox.Live(r, checker) {
+		return pluginRing{}, nil
+	}
+	msgs, unknown, err := mailbox.Pending(root, r.SessionIDs)
+	if err != nil {
+		return pluginRing{}, err
+	}
+	if text := mailbox.UnknownText(unknown); text != "" {
+		fmt.Fprintln(a.deps.Stderr, text)
+	}
+	if action == "reminder" {
+		if len(msgs) == 0 {
+			return pluginRing{}, nil
+		}
+		return pluginRing{SessionID: host.SessionID, Ring: mailbox.RingText(len(msgs))}, nil
+	}
+	keys := make([]string, len(msgs))
+	for i, m := range msgs {
+		keys[i] = mailbox.MailKey(m.ID)
+	}
+	fresh, err := mailbox.Claim(root, r.Identity, keys, a.deps.Now())
+	if err != nil {
+		return pluginRing{}, err
+	}
+	if len(fresh) == 0 {
+		return pluginRing{}, nil
+	}
+	return pluginRing{SessionID: host.SessionID, Keys: fresh, Ring: mailbox.RingText(len(fresh))}, nil
 }
 
 func (a *app) runCodexMailTurn(in hookInput, host adapter.Holder, _ []string) error {

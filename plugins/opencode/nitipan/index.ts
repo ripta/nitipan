@@ -223,6 +223,19 @@ export default {
       } catch (e) { note(`mail context reminder failed: ${e}`) }
     })
 
+    const pendingRetries = new Map<string, Set<string>>()
+    const retryMail = async (id: string) => {
+      const keys = pendingRetries.get(id)
+      if (!keys) return
+      try {
+        await mailCall("mail-retry", { session_id: id, keys: [...keys] })
+        pendingRetries.delete(id)
+      } catch (e) {
+        pendingRetries.delete(id)
+        pendingRetries.set(id, keys)
+        note(`mail ring rollback for ${id} failed: ${e}`)
+      }
+    }
     const pollMail = async () => {
       if (controller.signal.aborted || !mailSessions.size) return
       if (mailBusy) { mailAgain = true; return }
@@ -233,18 +246,27 @@ export default {
           const sessions = [...mailSessions]
           for (let offset = 0; offset < sessions.length; offset += SCAN_LIMIT) {
             const ids = sessions.slice(offset, offset + SCAN_LIMIT)
-            const rings = await mailCall("mail-poll", { session_id: ids[0], sessions: ids })
+            let rings: any[]
+            try {
+              rings = await mailCall("mail-poll", { session_id: ids[0], sessions: ids })
+            } catch (e) { note(`mail batch failed: ${e}`); continue }
             for (const ring of rings ?? []) {
               try {
                 if (controller.signal.aborted) throw new Error("plugin stopped before prompt")
                 await ctx.session.prompt({ sessionID: ring.session_id, delivery: "queue", text: ring.ring })
               } catch (e) {
-                await mailCall("mail-retry", { session_id: ring.session_id, keys: ring.keys })
+                const keys = pendingRetries.get(ring.session_id) ?? new Set<string>()
+                for (const key of ring.keys) keys.add(key)
+                pendingRetries.set(ring.session_id, keys)
                 note(`mail ring for ${ring.session_id} failed: ${e}`)
               }
             }
           }
         } while (mailAgain && !controller.signal.aborted)
+        // Rollbacks follow healthy delivery, one per poll. A failure rotates to the end so another
+        // broken recipient cannot monopolize retries or delay every new ring by a helper timeout.
+        const retryID = pendingRetries.keys().next().value
+        if (retryID !== undefined) await retryMail(retryID)
       } catch (e) { note(`mail watcher failed: ${e}`) }
       finally { mailBusy = false }
     }
