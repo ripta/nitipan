@@ -8,7 +8,7 @@ recall a sub-lease with a deadline. Every reader enforces the deadline from a `r
 
 ## Run state
 
-- Run: default `next 1`, the row NIT-008 M1-M4. Code and specs share this repository, on `main`.
+- Run: default `next 1`, the row NIT-008 M1-M4. Code and specs share this repository, on `main`. Finished.
 - Run base and row base commit subject: `spec: mark broker auth implemented and move its queue row to history`.
 - Dependencies: NIT-005 M1, NIT-007 M2, and NIT-004 M3, all DONE. No `live_after` entries. No skipped, held, or
   blocked rows.
@@ -322,3 +322,51 @@ Checks: `make fmt` clean, `make ci` passes (`internal/cli` 431s). The known `wid
 The accepted proposal moved the deadline into a side record to satisfy the field rule, and it states this older-binary
 gap in "How the deadline is enforced" and Risks. It is listed for the user's review. `adr-impact` also named the ring
 ledger's skew rule as a weak candidate, and it fails the Architecture test as a format detail.
+
+Row finish commit: `spec: mark sub-lease recall implemented and move its queue row to history`. NIT-008 is
+`implemented`, the index says so, and its row is at the end of `history.md`.
+
+## Final review and ADR review
+
+Commit: `spec: put NIT-008's deadline-decision marker on the decision`.
+
+The final review covered the run's whole range with an ADR review. It found no code defect. The range adds and edits
+no ADR file. ADR-04, ADR-06, and ADR-07 hold. The reviewer traced the row-review refactor. It found no behavior change
+beyond removing a file-order dependence, plus one unusable-reason wording change for a non-unusable decode error.
+
+Findings:
+
+- The "How the deadline is enforced" decision's one marker sat inside the readers bullet, while the Decision Log said
+  it was on the decision. Fixed as a correction of fact, with a Decision Log entry that quotes both removed passages.
+  `proposals.py freeze` and `check` return `[]` after it.
+- The ADR-04 tension (PLAUSIBLE, disposition user). The reviewer agrees with the dismissal on the rule's letter. No
+  field was added, and no existing guarantee weakened. It notes that the proposal's case against the rejected
+  child-field option proves too much. That option's older-reader "covered" answer is the same gap the chosen design
+  keeps. The rejection still stands on the other ground: a new major would make the child unusable to older binaries.
+  No edit, since frozen text that changes nothing a reader acts on stays. Left for the user.
+- The two `Undecided` ADR candidates (disposition user). Neither is ready to write:
+  - The "no free wake" boundary fails the Record test as worded. "Costs nothing" has no settled line. A pending
+    request also lets another party ring the holder, and whether a live requester's wait counts as a cost is not
+    decided. It also overlaps NIT-006's mail-grant rule.
+  - The "every wake signal only signals" candidate passes Architecture and Decision. It widens ADR-06's scope, so
+    writing it means a new ADR that supersedes ADR-06.
+
+## Run summary
+
+Every milestone in the row is DONE, and no row is held or blocked. There are no stashes. The run made no push and no
+branch change. It touched no edit it did not make: every freeze hunk had origin `row`, and no finding had disposition
+`user` for another session's edit.
+
+Best guesses that most deserve review:
+
+- The inclusive deadline, the dead sub-lessee left to normal clearing, and recall's exit codes, 9 for an unusable
+  record and 8 for a cancel with no recall.
+- The `--wait` waitable refresh, and the printed wait of time-to-deadline plus 10 seconds.
+- The node's deadline check on its 250ms tick rather than a computed timer.
+- Reverting the NIT-007 edit to a References line. Extensions stay in the extending proposal.
+
+Open items:
+
+- The unowned `wide_test.go` flake, recorded under M4. Its root cause is not found.
+- The ADR-04 note and the two `Undecided` ADR candidates, for the next `/proposal-reviewer` run.
+- The socket ring path and a node with no liveness checker have no test, as recorded in M3's As built.
