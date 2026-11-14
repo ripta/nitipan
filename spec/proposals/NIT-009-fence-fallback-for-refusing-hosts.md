@@ -1,6 +1,6 @@
 # NIT-009: Fence Fallback for Hosts That Refuse Fence Refs
 
-**Status:** draft
+**Status:** designing
 **Created:** 2026-11-14
 **Updated:** 2026-11-14
 
@@ -28,7 +28,8 @@ A remote's fence mode becomes one git config key, `nitipan.<remote>.fence`, with
 - `true`: always fence. A host refusal is an error
 - `false`: never try the fence. Every push gets the lease check
 
-The pusher classifies a failed push from `git push --porcelain`, not from the wording of git's stderr. Only a host
+The pusher classifies a failed push from `git push --porcelain`, not from the wording of a host's stderr. The one
+stderr line it matches is git's own client message for a remote without atomic push. Only a host
 refusal of `--atomic` or of a fence ref can cause a fallback. A lost lease, contention, a branch rejection, and a network
 or auth failure never do. The pre-push hook learns to accept the fallback push that `nitipan push` sanctions, and still
 runs its own lease check on it.
@@ -72,6 +73,16 @@ otherwise, does not drive a design change.
 A change that reverses a settled principle of an implemented proposal goes to the user as a question. No review
 decides it on its own.
 
+### nitipan honors its user's configuration
+
+Every app must honor its user's configuration, and nitipan does too. A value the user sets, in any scope git reads, is
+the user's decision. nitipan never ignores it, overrides it, or treats it as an accident to guard against. No agent
+second-guesses it either.
+
+If a value is unsafe, nitipan does not offer it. Every value nitipan does offer is legitimate, and setting it needs no
+justification. A short, non-intrusive warning about a legitimate value is acceptable, such as one stderr line saying
+what the value does.
+
 ### Three states on one key
 
 `nitipan.<remote>.fence` is read with `git config --bool --get`, in every scope git reads. Its states:
@@ -86,24 +97,33 @@ nitipan never writes the key. Unset is the default for every clone, and only the
 unset state retries the fence on every push. So a one-off refusal costs one push, and a host that gains atomic push or
 starts accepting fence refs is fenced again on its next push, with nothing to clear.
 
-An invalid value, such as `fence = maybe`, is an error that names the key and its file. Treating it as unset would
-guess at the user's intent, and the guess could pick the weaker mode.
+An invalid value, such as `fence = maybe`, is an error that names the key and its file. An invalid value is not one
+the user could have meant, so nitipan does not guess at it.
 
-When `false` is in effect, the lease-check message names the file the value came from, read with `--show-origin`. A
-`false` in `~/.gitconfig` then cannot quietly switch off fencing for every clone with a remote of that name.
+A value in any scope is the user's choice, and nitipan honors it the same way. A `false` in `~/.gitconfig` applies to
+every clone with a remote of that name, as the user set it. Under `false`, a lease-check message says the push got a
+lease check because `nitipan.<remote>.fence` is `false`. A successful push stays silent, as it does under
+`atomic=false` today.
 
 ### Replacing `nitipan.<remote>.atomic`
 
 The old key named one cause, and the new key covers two. The name changes.
 
-A clone's own `nitipan.<remote>.atomic=false` was written by nitipan. The new binary reads it when `fence` is unset,
-treats it as `fence=false`, and migrates it in place: it writes `nitipan.<remote>.fence=false` with `--local` and unsets
-the old key. An `atomic` entry in any other scope was written by the user. It is honored the same way, never rewritten,
-and every push that uses it says to rename it. An `atomic=true` means nothing today, since no code reads it, and stays
-ignored.
+When `fence` is unset, `nitipan push` and the hook both read `nitipan.<remote>.atomic=false`, in any scope, as
+`fence=false`. nitipan never rewrites or unsets it. An `atomic=true` means nothing today, since no code reads it, and
+stays ignored.
 
-The migration preserves behavior. A clone on the lease check stays on the lease check under the new name. The user
-can then unset the new key to get the default.
+Who wrote the old key cannot be told. Today's pusher writes it with `--local`, and a user's hand-set `git config` writes
+the same scope. Leaving it in place also keeps every mix of binaries working, since old and new binaries read it the
+same way. See "Version skew".
+
+Every push that the old key affects prints one stderr line. It says the old key acts as `fence=false`, names its file,
+and says it can be renamed to `fence=false` or unset after `nitipan setup git --install`. It gives no advice on which
+to pick. An older hook binary reads only the old key, which is why the reinstall comes first. The line also prints
+when `fence` is set beside a leftover `atomic`, because an older hook still obeys the old key.
+
+nitipan does not clear a record it wrote earlier. The clone stays on the lease check until the user changes it. The
+legacy read also stays, and removing it later needs its own skew analysis.
 
 ### What can cause a fallback
 
@@ -120,15 +140,20 @@ decides:
 2. Git refuses `--atomic` before sending any ref, because the remote did not advertise it. This is git's own
    client-side message, not a host's. It is a host refusal of atomic push
 3. A fence ref's line is `!` with `[remote rejected]` and a reason of its own. A reason git gives only because another
-   ref in the atomic push failed, such as `atomic push failure`, is not its own. M1 pins the exact strings git's client
-   and receive-pack use for this, with a test per side. This is a host refusal of the fence ref. It holds whether the host refused only the fence ref, as with a ruleset or an update hook,
-   or refused every ref, as with a pre-receive hook or a read-only repository
+   ref in the atomic push failed, such as `atomic push failure`, is not its own. Nor is `atomic transaction failed`, which
+git puts on every line when the transaction fails to commit, whichever ref caused it. Such a push gets rule 4. M1 pins the exact strings git's client
+   and receive-pack use for this, with a test per side. This is a host refusal of the fence ref. It holds when the
+   host refused only the fence ref, as with a ruleset or an update hook. It also holds when the host refused every ref
+   with the same reason of its own, as with a pre-receive hook or a read-only repository. An update hook that refuses
+   every ref one by one leaves a collateral reason on the fence line, so that push falls to rule 4
 4. Anything else: a branch line rejected, a local `[rejected]` such as a non-fast-forward, a fatal error with no ref
    lines such as a network or auth failure, or output the pusher cannot parse. The push fails with git's output and no
    fallback
 
-A refusal by token is not on this list, because it never reaches git. The pusher refuses before it pushes when a fence
-ref holds a higher token than its own. That stays a refusal in every state of the key.
+A refusal by token is not on this list, because it never reaches git. In the unset and `true` states, the pusher
+refuses before its fenced attempt when a fence ref holds a higher token than its own. A fallback push follows only that
+check. Under `false` there is no fenced attempt, and the push relies on the lease check alone, as a remote marked
+`atomic=false` does today.
 
 Rule 3 includes refusals of the whole push by the user's choice. Such a refusal usually refuses the fallback push too,
 so it fails anyway. The cases where the fallback lands are a host that refuses only the fence ref, and a transient
@@ -174,11 +199,14 @@ The units are two nitipan binaries that serve one clone. The hook script runs th
 - New pusher, old hook: the old hook does not know `NITIPAN_FENCE_FALLBACK`. It refuses the fence-less fallback push
   into fenced paths on a remote with no record. The push fails closed, with the old hook's message. Reinstalling the
   hook fixes it
-- Old pusher, new hook: the old pusher behaves as shipped. On a host without atomic push it writes `atomic=false`, which
-  the new binary migrates on its next read. On a host that refuses fence refs it fails, as shipped
-- New binary migrates, old binary reads: the old binary no longer sees `atomic=false`. It tries the fence, and on a
-  host without atomic push it writes `atomic=false` again. On a host that refuses fence refs it fails. Both fail closed
-  or loud, and neither lets an unchecked push through
+- New pusher, old hook, with `atomic=false`: both binaries read the old key as the lease-check mode. The new pusher's
+  fence-less push passes the old hook's lease-check branch, as it does today
+- New pusher, old hook, with `fence=false` set by the user: the old hook does not read it, takes its fenced branch, and
+  refuses the fence-less push. It fails closed. The notice says to reinstall the hook before renaming
+- Old pusher, new hook: the old pusher behaves as shipped. On a host without atomic push it writes `atomic=false`, and
+  the new hook honors it. On a host that refuses fence refs it fails, as shipped. Under a user's `fence=false`, the old
+  pusher's fenced push meets a new hook that refuses fence refs, and fails closed
+- Old binary after new: the new binary writes nothing, so the old binary sees the config as it left it
 
 No direction lets a fence-less push land without a lease check.
 
@@ -192,8 +220,11 @@ None.
   A lease-check push does not write the new holder's token to the fence refs. Suppose a transient refusal sends the new
   holder's push to the fallback, and the host then accepts fence refs again. A stale holder's fenced push from another
   clone is checked against the older token and can land. NIT-005 already accepts this shape: "A stale push that lands
-  before the new holder's first push succeeds". Here it means before the new holder's first fenced push. Accepted: the
-  unset state retries the fence on the next push, so the window closes at the new holder's next push. The warning names
+  before the new holder's first push succeeds". Here it means before the new holder's first fenced push. The unset
+  state retries the fence on the next push, so after a transient refusal the window closes at the new holder's next
+  push. A host that fast-forwards existing fence refs but refuses new ones keeps the window open. Every push that also
+  needs a new fence falls back, so an existing key's fence stays at its old token for as long as the rule stands.
+  Accepted: fencing is coordination, and a lease check in place of fencing is graceful degradation. The warning names
   `fence=true` for a user who wants a refusal to stop the push.
 - **A host that refuses fence refs pays two pushes** — likelihood: medium, impact: low.
   In the unset state, every push to such a host uploads its pack, is refused, and uploads again without fence refs. A
@@ -203,7 +234,8 @@ None.
   lease check instead of fencing. Accepted: this is the trust model NIT-005 shipped for `atomic=false`, under the risk
   "Hooks are bypassable". The hook's own lease check still runs on every such push.
 - **Renaming the key is a one-way door** — likelihood: low, impact: low.
-  Clones carry `nitipan.<remote>.atomic=false` today. Mitigation: the new binary reads and migrates the old key, and
+  Clones carry `nitipan.<remote>.atomic=false` today. Mitigation: the new binary reads the old key and never rewrites
+  it, and
   "Version skew" shows every mix of old and new binaries fails closed or loud.
 - **A host words a fence refusal as a branch refusal** — likelihood: low, impact: low.
   Rule 3 needs the fence ref's own porcelain line to carry a reason of its own. A host that blames
@@ -222,7 +254,16 @@ None.
   hook that declines every ref, `receive.advertiseAtomic=false`, a non-fast-forward branch, a lost compare-and-swap, and
   an unreachable remote
 - Each kind maps to the outcome the rules name, and an unparseable output fails with git's output and no fallback
-- A refusal by a higher token is still refused before git runs, with the key in each of its three states
+- A refusal by a higher token is still refused before git runs, with the key unset or `true`. Under `false` the push
+  gets the lease check alone
+- `atomic push failure` and `atomic transaction failed` both count as collateral reasons. A test holds a lock on the
+  fence ref and requires rule 4
+- When rule 1 cannot re-read the remote, the push fails by rule 4, not rule 3
+- The classifier reads porcelain from stdout, and the user still sees git's per-ref result
+- The fenced push sends branch refspecs before fence refspecs. A test with an update hook that refuses every ref
+  reaches rule 4
+- A fence ref that fails at transaction commit, such as on a directory/file conflict, gets rule 4, and the user sees
+  the remote's `error:` line
 
 ### M2: Fence modes and the sanctioned fallback
 
@@ -234,13 +275,26 @@ None.
   next push tries the fence again
 - With `true`, the same refusals fail with an error that names the key
 - An invalid value fails with an error that names the key and its file
-- A `false` from outside the clone's own config is named by file in the message
-- A local `atomic=false` is migrated to `fence=false` on first read, and one in another scope is honored and named
+- A `false` in any scope, `~/.gitconfig` included, is honored the same way. Lease-check messages under `false` name the
+  key, and a successful push prints nothing about it
+- With `fence` unset, an `atomic=false` in any scope is read as `fence=false` by both the pusher and the hook, and is
+  never rewritten or unset. Its notice names its file and says to run `nitipan setup git --install` before renaming
+  or unsetting it
+- With `fence` set beside a leftover `atomic`, `fence` wins and the notice still fires
 - The hook accepts a fence-less push into fenced paths only under the three conditions in "The hook accepts a sanctioned
   fallback", and runs its own lease check on it
 - The hook refuses a fence-less agent push when `NITIPAN_FENCE_FALLBACK` names another remote, or when the mode is
   `true`
 - A test runs a new pusher against an old hook script and shows the fallback push fails closed
+- An invalid value exits non-zero in both the pusher and the hook, and the message names the file
+- Lease-check messages and `push --help` name the actual cause, not only "cannot take an atomic push"
+- When a whole-push refusal is followed by a lease check that cannot run, the error leads with the host's reason
+- Only the fallback git call carries `NITIPAN_FENCE_FALLBACK`, even when the caller's environment already exports it
+- When the hook refuses the fallback push, the pusher's error names `nitipan setup git --install` as a likely cause
+- The e2e tests that assert today's `atomic=false` write assert that nothing is written
+- A test pins what an invalid `atomic` value does, in both the pusher and the hook
+- When a user's `fence=false` meets an old hook that refuses the fence-less push, the pusher's error names
+  `nitipan setup git --install`
 
 ### M3: Docs, probe, and NIT-005 markers
 
@@ -248,11 +302,13 @@ None.
 
 - `docs/reference/pushing.md` describes the three states in place of "Hosts without atomic push"
 - `docs/operations/troubleshooting.md` replaces "The host refuses fence refs" and "The remote is marked as unable to
-  take an atomic push" with entries for the fallback warning, the `true` error, the invalid value, and the migration
+  take an atomic push" with entries for the fallback warning, the `true` error, the invalid value, and the legacy `atomic` key
 - `docs/architecture.md` says that git guarantees the repo's data, and that the broker, leases, and fence refs are
   coordination layers on top of it. It says a run with no broker has no fencing, and that a lease check in place of
   fencing is graceful degradation
-- `make live-fence-hosts` reports each host's porcelain lines for a refused fence ref
+- `docs/architecture.md` says that nitipan honors its user's configuration in every scope, that it does not offer an
+  unsafe value, and that any warning about a legitimate value is short and non-intrusive
+- `make live-fence-hosts` pushes with `--porcelain` and reports each host's porcelain lines for a refused fence ref
 - NIT-005's "What enforces the token", "Token scope", and its atomic-push risk carry "Superseded in part by NIT-009; see
   Decision Log" markers, and its Decision Log records the supersession of the `atomic` key
 
@@ -277,6 +333,9 @@ None.
   hook must change. The variable grants no more than `fence=false` does.
 - 2026-11-14 (autonomous): An invalid value is an error, not unset. `false` names its source file. A local `atomic=false`
   is migrated, and one from another scope is honored but not rewritten, since nitipan did not write it.
+  Wrong, and superseded on 2026-11-14. The drafting session decided without asking that a `false` names its source
+  file, so a value in `~/.gitconfig` could not "quietly switch off fencing". That treated the user's own configuration
+  as a hazard. nitipan honors its user's configuration in every scope. See "nitipan honors its user's configuration".
 - 2026-11-14 (autonomous): ADR candidate (cuts across the system): who may set a remote's fence mode, which every
   `nitipan push` and pre-push hook obeys. Declined: the user kept NIT-005's shipped trust model, so the choice adds no
   new principle. The adr-impact check found no conflict. ADR-07 holds, since neither the key nor the variable reaches
@@ -288,9 +347,55 @@ None.
   coordination gap under correctness. It patched edge cases before weighing each component's purpose. It grew the
   design instead of settling it. The user set "Fencing is coordination, not correctness" as a settled decision, and
   asked for it in nitipan's own docs, so other agents learn it. M3 carries that to `docs/architecture.md`.
+- 2026-11-14: Review start: 3 milestones, 7 settled decisions, 5 risks, no `**Live after:**` lines or row gates; no
+  out-of-scope statements. Baseline commit "spec: settle that fencing in NIT-009 is coordination, not correctness".
+  The user asked for a new autonomous review after rejecting the last one, with no open questions left.
+- 2026-11-14 (autonomous): Corrected text the coherence review found overclaimed, and added no mechanism. The higher-token
+  refusal before git runs holds in the unset and `true` states. Under `false` the push relies on the lease check alone,
+  as `atomic=false` does today. The Summary now says rule 2 matches git's own client message on stderr. Rule 3 names
+  `atomic transaction failed` as collateral, and says when an every-ref refusal counts as the fence's own. The risk "A
+  fallback push leaves the fence unraised" now covers a host that refuses only new fence refs, and stays accepted.
+- 2026-11-14 (autonomous): Routed the coherence review's implementation findings to milestone checks. M1 got the
+  collateral strings, rule 1 failing to rule 4 when it cannot re-read the remote, porcelain read from stdout, and the
+  narrowed higher-token check. M2 got the invalid-value exit, lease-check messages that name their cause, a host's
+  reason leading the error when the lease check cannot run, the variable on the fallback call only, a reinstall hint
+  when the hook refuses the fallback, and the e2e tests that assert the old write. M3 got porcelain in the probe.
+- 2026-11-14 (autonomous): Reopened the local migration of `atomic=false` as a weak decision. An `atomic=false` in any
+  scope is now read as `fence=false`, by the pusher and the hook, and never rewritten. The migration locked out a clone
+  that works today when its hook ran an older binary. It also contradicted "nitipan never writes the key". Its premise,
+  that nitipan wrote every local value, was false. Ignoring the old key or dropping a local one breaks old hooks too. A
+  rename at `setup git --install` was weighed and not taken: it adds a config write to setup, and read-only honoring
+  already works with every mix of binaries. Converged in 1 pass. Rewrote "Version skew" to match.
+- 2026-11-14 (autonomous): The proposal loop converged on its second pass, with no design-level finding. Rule 3 now says
+  `atomic transaction failed` covers a commit failure of any ref, the fence ref included, and gets rule 4. Routed to M1:
+  branch refspecs before fence refspecs, and a fence ref failing at commit. Routed to M2: an invalid `atomic` value, and
+  the reinstall hint when a user's `fence=false` meets an old hook.
+- 2026-11-14 (autonomous): Risk review. Every risk carries a likelihood, an impact, and a mitigation or an acceptance.
+  None is high likelihood and high impact. The one-way door is the key rename, listed and defused by read-only
+  honoring. NIT-005 is implemented, so no in-flight design can shift under a mitigation. Its marker edits fall under
+  the frozen-proposal allowances.
+- 2026-11-14: Review gate: reopened naming the origin of a `false` value. Kept everything else, including the earlier
+  run's autonomous entries.
+- 2026-11-14: The user set that nitipan must respect a value in `~/.gitconfig`, like a value in any other scope. Messages
+  under `false` name the key, not the file, and no scope is treated as suspect. This replaces the autonomous decision
+  that a `false` names its source file so a global value "cannot quietly switch off fencing". A global value is the
+  user's choice, not an accident to guard against. A notice on every push under `false` was weighed and not taken.
+- 2026-11-14: The user set "nitipan honors its user's configuration" as a settled decision. Every app must honor its
+  user's configuration, and no agent may treat the user as unable to choose. An unsafe value is not offered. A
+  non-intrusive warning about a legitimate value is acceptable. The drafting session's autonomous entry that a `false`
+  names its source file is marked wrong. M3 carries the principle to `docs/architecture.md`.
+- 2026-11-14: The user approved three rewordings from an audit of the drafting session's decisions. The invalid-value
+  rationale no longer warns of a weaker mode. The legacy notice is one stderr line with no advice on whether to rename
+  or unset. The leftover record is stated as a fact, not a complaint. The audit found no distrust of the user's
+  configuration in the key name, the four fallback rules, or `NITIPAN_FENCE_FALLBACK`.
+- 2026-11-14: ADR candidate (cuts across the system): the broker, leases, and fences are coordination, not correctness,
+  and the fenced push stays receiver-enforced and broker-free. Written as ADR-09.
+- 2026-11-14: ADR candidate (cuts across the system): nitipan honors its user's configuration in every scope. Declined:
+  honoring a user's configuration is the default for every app, not something particular to nitipan.
 
 ## References
 
 - NIT-005: fencing tokens, fence refs, and the lease check this proposal reuses
 - ADR-05, ADR-07, ADR-08: checked by adr-impact. No conflict
+- ADR-09: fencing is coordination, not correctness
 - `git-push(1)`, "OUTPUT", for the porcelain format
