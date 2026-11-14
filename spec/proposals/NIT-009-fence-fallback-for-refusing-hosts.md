@@ -393,6 +393,7 @@ None.
 - 2026-11-14: ADR candidate (cuts across the system): nitipan honors its user's configuration in every scope. Declined:
   honoring a user's configuration is the default for every app, not something particular to nitipan.
 - 2026-11-14: The user accepted the proposal. ADR-09 stays proposed, since the user accepted only the proposal.
+- 2026-11-14: Scheduled as M1-M3 in queue.md.
 
 ## References
 
