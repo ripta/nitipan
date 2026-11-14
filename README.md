@@ -6,7 +6,8 @@ it. Other sessions use the leases to find each other and to avoid stepping on ea
 
 On one machine, nitipan needs no daemon. Leases live in a state directory under `~/.local/state/nitipan/`, and a lock
 decides between claims. Across machines, a self-hosted broker grants wider leases, and a node on each machine connects
-out to it. A local claim works the same with or without a broker.
+out to it. A local claim works the same with or without a broker. [Architecture](docs/architecture.md) shows how the
+CLI, the agent harnesses, git, the node, and the broker talk to each other.
 
 ## Supported agents
 
@@ -62,6 +63,8 @@ Every proposal listed below is implemented:
 [Your first leases on one machine](docs/getting-started/local-leases.md) walk through each step.
 
 ## Documentation
+
+[Architecture](docs/architecture.md) has a diagram of every component and how each one connects.
 
 Getting started:
 
