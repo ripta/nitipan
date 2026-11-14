@@ -18,7 +18,7 @@ recall a sub-lease with a deadline. Every reader enforces the deadline from a `r
 |-----------|------------|---------|
 | NIT-008 M1 | DONE | `nitipan: recall a sub-lease with a deadline` |
 | NIT-008 M2 | DONE | `nitipan: refuse a recalled sub-lessee's commits in the git hook` |
-| NIT-008 M3 | QUEUED | |
+| NIT-008 M3 | DONE | `nitipan: ring wake paths for pending lease notices and requests` |
 | NIT-008 M4 | QUEUED | |
 
 ## Approved plan and authorization
@@ -163,3 +163,74 @@ Review findings:
 - `adr-impact`: ADR-03, ADR-04, ADR-06, and ADR-07 consistent. No conflict.
 
 ADR candidates: none new. The lock-free recall rule is the candidate the user declined on 2026-10-24.
+
+### NIT-008 M3: Rings for pending notices and requests
+
+DONE. Commit: `nitipan: ring wake paths for pending lease notices and requests`, which carries both proposals and this
+report.
+
+Checks: `make fmt` clean, `make ci` passes (lint 0 issues; `internal/cli` about 444s under `-race`). `proposals.py
+check` and `proposals.py freeze` with both earlier row commits return `[]`. No unowned failures.
+
+Live checks, run with the sandbox disabled through the permission prompt:
+
+- `make live-codex LIVE_CODEX_ARGS=--selftest`: ok.
+- `env -u CODEX_THREAD_ID -u CODEX_SESSION_ID make live-codex 'LIVE_CODEX_ARGS=--only mail,mail-embedded,notice-ring
+  --results <scratchpad>/codex-notice-ring.md'`: all PASS, with no real model calls.
+- `make live-opencode 'LIVE_OPENCODE_ARGS=--only mail,mail-reminder,notice-ring --results
+  <scratchpad>/opencode-notice-ring.md'`: all PASS, with no real model turns.
+
+The new `notice-ring` scenario plants a notice for the session. It checks that the wake path rings and names `nitipan
+list`, and that `nitipan list` then delivers and removes the notice. The review round changed no live-check script, so
+the live runs were not repeated.
+
+Test cost: the first round's new CLI tests ran in 3.8s alone under `-race`. The node notice test ran in 1.06s. The
+review round replaced the waiter test's real 300ms and 5s waits with a direct call and a single waiter run.
+
+Implementer best guesses:
+
+- The node maps a registration to a holder through its current session ID, not its raw envelope. Notices are addressed
+  to the session the holder resolves to now. If wrong, the node would ring for notices `nitipan list` cannot deliver.
+- A `recalled` notice for a sub-lease past its deadline does not ring. The unlocked read counts the sub-lease as ended,
+  and the sub-lessee learns from the tombstone, which NIT-008 gives no ring.
+- A request whose requester is dead does not ring, since a locked call removes it. The proposal is silent.
+- A node built with no liveness checker rings no notices or requests. The real node always has a checker.
+- The live harnesses plant notices only. A pending request needs a lease. The CLI and node tests cover requests.
+- The Claude waiter has no live check. A CLI test covers it, and its socket ring shares the node path.
+- `leaseRings` skips a multi-session holder with no session ID and an invalid ID. A single-session adapter with an
+  empty ID still rings, because `pendingFor`'s blanket skip would drop its notice rings.
+
+Deviations: none from NIT-008. The implementer first edited four NIT-007 passages as a correction of fact. Review
+reverted that edit. NIT-007 now carries only a References line linking NIT-008.
+
+Review findings:
+
+- The NIT-007 edit was not a correction of fact (plan best guess, reviewer finding). The old text described what NIT-007
+  shipped correctly. NIT-008 is the proposal that extends it, and its Impacts already records the change. The four
+  hunks and their Decision Log entry were reverted, and NIT-007 gained one References line to NIT-008. The plan's best
+  guess about amending frozen proposals was too broad here. Extensions stay in the extending proposal.
+- The waiter test used real waits where a direct call proves the contract (CONFIRMED). Fixed: `ringUnrung` is called
+  directly for the once-per-key and replaced-notice contract, and one waiter run checks its exit status.
+- The node's idle early return was gone, and leases loaded once per registration (PLAUSIBLE). Confirmed. Fixed: the node
+  returns early unless the inbox, `notices/`, or `requests/` holds a file. It reads leases once per tick and judges each
+  registration against that view.
+- The turn hook built the engine before its cheap empty check (PLAUSIBLE). Fixed: the check runs first, and holders that
+  cannot hold a lease return early.
+- The refused-claim control matched on the test name, and a PID offset was unexplained (CONFIRMED). Fixed with a table
+  field and a named helper.
+- Test gaps. Added a row for a past-deadline `recalled` notice and a node test for the request ring. The socket ring and
+  a no-checker node stay untested, as recorded in As built.
+- The live fake model could run `nitipan list` in another scenario (PLAUSIBLE). Not confirmed: notices are addressed to
+  each scenario's own fresh session, and the sweep removes planted files. No change.
+- Two doc comments repeated or packed ideas. Fixed.
+- `adr-impact`: ADR-04, ADR-06, and ADR-07 consistent. No conflict.
+
+ADR candidates, recorded as `Undecided` in NIT-008's Decision Log:
+
+- No wake path lets a party wake a session's agent through an act that costs it nothing and that the session never
+  granted. Cuts across the system: every future ring path must honor it, and it is a security boundary.
+- Every wake signal, for mail, lease notices, or requests, only signals, and only a read consumes. ADR-06 states this
+  for mail alone. Cuts across the system: a later path could read ADR-06 as mail-only.
+
+One candidate was dismissed. `adr-impact` named wake paths judging from an unlocked, best-effort read, and that is an
+implementation tradeoff, not an invariant.

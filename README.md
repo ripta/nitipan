@@ -396,6 +396,13 @@ and `mail status` reports missing or stale presence. Restart the service after r
 on one shared host keep separate mailboxes and ring ledgers. Every wake path only signals; the session runs
 `nitipan mail read` to consume its mail.
 
+Every wake path rings for more than mail. It also rings for a notice addressed to the session that a locked nitipan call
+would deliver now, such as the `recalled` notice of a recall. It rings for a pending request on a lease the session
+holds too, since the requester waits on it. Those rings say to run `nitipan list`, which delivers the notices and shows
+the requests. A notice that waits on a repair, or that delivery would drop, never rings. Neither does the refused-claim
+notice below. A waiting path rings once per notice or request with no node running. A notice rewritten in place rings
+again. The turn hooks and the identified-holder reminders do not wake anything, so they may repeat.
+
 ## Broker authentication
 
 The broker authenticates users whose machines call it. Each node keeps a pinned bearer key. The broker binds each key's

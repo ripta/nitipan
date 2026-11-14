@@ -15,6 +15,7 @@ import (
 
 	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/handoff"
+	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/mailbox"
 	"github.com/space-armada/nitipan/internal/peercred"
@@ -465,7 +466,7 @@ func (n *Node) pendingRings() []pendingRing {
 
 	root := n.opts.StateDir
 
-	if names, err := state.ListNames(root, mailbox.InboxDir); err != nil || len(names) == 0 {
+	if !anyFile(root, mailbox.InboxDir, state.NoticesDir, state.RequestsDir) {
 		return nil
 	}
 
@@ -475,9 +476,7 @@ func (n *Node) pendingRings() []pendingRing {
 	}
 
 	msgs, _ := mailbox.All(root)
-	if len(msgs) == 0 {
-		return nil
-	}
+	view := n.ringView()
 
 	var out []pendingRing
 
@@ -496,12 +495,74 @@ func (n *Node) pendingRings() []pendingRing {
 			}
 		}
 
+		keys = append(keys, n.leaseRingKeys(view, r)...)
+
 		if len(keys) > 0 {
 			out = append(out, pendingRing{ad: ad, reg: r, keys: keys})
 		}
 	}
 
 	return out
+}
+
+// anyFile reports whether any of the directories under the state directory holds a file. An idle node
+// rings nothing, and this spares each tick from decoding the registrations.
+func anyFile(root string, dirs ...string) bool {
+	for _, dir := range dirs {
+		names, err := state.ListNames(root, dir)
+		if err != nil || len(names) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ringView reads the leases once for the tick, and judges notices and requests over them. It takes no
+// lease lock, and reads the state directory as it does when it mirrors the leases. It returns nil when nothing is
+// pending, when the node has no liveness checker to judge holders with, or when the directory cannot be read.
+func (n *Node) ringView() *lease.RingView {
+	if n.checker() == nil {
+		return nil
+	}
+
+	dir, err := state.OpenRead(n.opts.StateDir, state.Options{UID: n.opts.UID})
+	if err != nil {
+		return nil
+	}
+
+	e := lease.NewEngine(dir, n.checker(), n.opts.Machine, n.opts.Finder)
+	e.Now = n.opts.Now
+
+	view, err := e.ReadRings()
+	if err != nil {
+		n.warn(fmt.Sprintf("reading the notices and requests: %v", err))
+
+		return nil
+	}
+
+	return view
+}
+
+// leaseRingKeys lists the ring keys of the notices and requests for the holder a registration stands for.
+func (n *Node) leaseRingKeys(view *lease.RingView, r mailbox.Registration) []string {
+	if view == nil {
+		return nil
+	}
+
+	h, ok := r.Holder()
+	if !ok {
+		return nil
+	}
+
+	rings, err := view.For(h)
+	if err != nil {
+		n.warn(fmt.Sprintf("reading the notices and requests of the %s session %s: %v", r.Agent, r.Current, err))
+
+		return nil
+	}
+
+	return lease.RingKeys(rings)
 }
 
 func (n *Node) waiterLive(r mailbox.Registration) bool {
@@ -559,10 +620,13 @@ func (n *Node) ringSocket(ad adapter.Adapter, r mailbox.Registration, keys []str
 	}
 
 	var ringErr error
+
+	text := mailbox.RingTextForKeys(fresh)
+
 	if ad.Delivery.Push == adapter.PushCodexQueue {
-		ringErr = n.queueRing(r, len(fresh))
+		ringErr = n.queueRing(r, text)
 	} else {
-		ringErr = ringDialer(r, len(fresh))
+		ringErr = ringDialer(r, text)
 	}
 	if err := ringErr; err != nil {
 		_ = mailbox.Unclaim(n.opts.StateDir, r.Identity, fresh)
@@ -591,7 +655,7 @@ type ringLine struct {
 // dialRing writes one ring to a session's inbox socket, only after the kernel names the registered PID
 // as the socket's peer. A registration lives in a directory every sandbox can write, so its socket path
 // is not trusted. The ring carries no content.
-func dialRing(r mailbox.Registration, count int) error {
+func dialRing(r mailbox.Registration, text string) error {
 	conn, err := (&net.Dialer{Timeout: ringDeadline}).Dial("unix", r.Endpoint.Socket)
 	if err != nil {
 		return fmt.Errorf("connecting to the inbox socket: %w", err)
@@ -610,7 +674,7 @@ func dialRing(r mailbox.Registration, count int) error {
 	}
 
 	line, err := json.Marshal(ringLine{
-		Type: "user", Content: mailbox.RingText(count), Sender: "nitipan", MessageID: fmt.Sprintf("nitipan-ring-%d", time.Now().UnixNano()),
+		Type: "user", Content: text, Sender: "nitipan", MessageID: fmt.Sprintf("nitipan-ring-%d", time.Now().UnixNano()),
 	})
 	if err != nil {
 		return fmt.Errorf("encoding the ring: %w", err)
@@ -691,10 +755,10 @@ func (n *Node) forwardMailStatus(ctx context.Context, req handoff.Request) (json
 
 // queueRing executes only the path and configuration launchd supplied. Its environment is built from
 // fixed system paths and trusted home data, not the host process or a session registration.
-func (n *Node) queueRing(r mailbox.Registration, count int) error {
+func (n *Node) queueRing(r mailbox.Registration, text string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, n.opts.CodexPath, "queue", "--thread", r.Current, "--message", mailbox.RingText(count))
+	cmd := exec.CommandContext(ctx, n.opts.CodexPath, "queue", "--thread", r.Current, "--message", text)
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "CODEX_HOME=" + n.opts.CodexHome, "HOME=" + n.opts.Home}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("codex queue: %w: %s", err, strings.TrimSpace(string(out)))

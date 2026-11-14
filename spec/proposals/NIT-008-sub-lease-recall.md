@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-11-08
+**Updated:** 2026-11-14
 
 ## Dependencies
 
@@ -387,7 +387,7 @@ new. No test reaches git's own calling of the hook.
 
 ### M3: Rings for pending notices and requests
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - Every NIT-007 wake path rings for a notice that delivery would deliver now, and for a pending request on a lease the
   session holds, naming `nitipan list`
@@ -395,6 +395,43 @@ new. No test reaches git's own calling of the hook.
   Amended 2026-11-10; see Decision Log
 - A waking path rings once per notice or request with no node running. A re-armed waiter does not ring again for an
   ignored one, and a replaced `recalled` notice rings again
+
+**As built:**
+
+The Claude Code waiter and the opencode plugin ran against the real opencode, and the Codex turn hook and `codex queue`
+against the real Codex, with the fake model. The node's socket and queue rings ran only against a fixture executable.
+The live checks cannot start a node, since the node rings only over an HTTPS broker. The Claude Code waiter and socket
+ring have no live check, as before.
+
+- One function, `Engine.PendingRings`, decides what rings. It reads `recalls/` and then the leases without the lock, as
+  the git hook does, and hides a sub-lease past its recall deadline. It then calls delivery's own `dueNotices` and keeps
+  the notices it would deliver, minus the cause `shared-claim-refused`. It adds each pending request whose target
+  lease the holder holds. Every wake path calls it
+- A request whose requester is dead is left out, since a locked call removes it. A notice that waits on a repair rings
+  once a locked call has run the repair. A `recalled` notice for a sub-lease past its deadline does not ring, because
+  the unlocked read counts the sub-lease as ended
+- A registration stands for the holder with its process and its current session ID. A session ID held before a /clear
+  gets no notice ring, because `nitipan list` would not deliver for it. The node builds that holder from the
+  registration fields `Registration.Envelope()` uses, through a method on the registration
+- The ledger keys are `notice:<id>@<write time>` and `request:<id>@<write time>` beside `mail:<id>`. The ledger version
+  did not change. A key's prefix picks the words of the ring, which name `nitipan list` for notices and requests and
+  `nitipan mail read` for mail. One ring names both when both are pending
+- Turn hooks, the identified-holder reminder, and the opencode reminder read the same verdict and claim nothing. The
+  waiter, the opencode poll, and the node claim the keys first. A ring path that reads nothing pending skips the leases
+  when notices/ and requests/ are empty, so a ring on every tool call stays cheap
+- The node reads the state directory with `OpenRead` and takes no lease lock. A test holds the lock for the whole ring.
+  A node with no liveness checker rings no notices or requests. A real node always has one
+- The node's socket and queue rings now pass the ring text, not a count, so a ring for a notice does not say mail
+- The live checks gained a `notice-ring` scenario in each harness. Codex plants a notice, checks that the turn hook puts
+  the ring in the model's context and leaves the notice, then queues the hook's own ring text to the idle thread and
+  checks that `nitipan list` delivers it. opencode plants a notice and checks that the plugin wakes the idle session. No
+  harness plants a pending request. That path is covered by the CLI tests
+- The node's codex-queue ring is tested for a notice and for a pending request. Its socket ring shares the same
+  decision code and has no test of its own, and a node with no liveness checker is untested
+- The node reads the leases once per tick through `ReadRings`, and returns early when the inbox, `notices/`, and
+  `requests/` are all empty, so an idle node reads no registrations
+- A ring path for a holder that cannot hold a lease rings nothing. That is a multi-session agent with no session ID, or
+  an invalid one
 
 ### M4: Recall in the node's mirror
 
@@ -461,6 +498,10 @@ new. No test reaches git's own calling of the hook.
   deadline is now inclusive, since a wait whose last attempt runs at its own timeout must see the child ended. A child
   whose own holder is dead is left for the clearing that removes it, as the parent-gone repair leaves it, because
   nobody can receive its tombstone. The marker on the decision moved from 2026-10-24 to this entry.
+- 2026-11-14: ADR candidate (cuts across the system): no wake path lets a party wake a session's agent by an act that
+  costs it nothing and that the session never granted, such as a refused claim. Undecided. Found in M3.
+- 2026-11-14: ADR candidate (cuts across the system): every wake signal, for mail, lease notices, or requests, only
+  signals, and only a read consumes. ADR-06 states this for mail alone. Undecided. Found in M3.
 
 ## References
 

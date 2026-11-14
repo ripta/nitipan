@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/atomicfile"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/record"
@@ -74,6 +75,20 @@ func (r Registration) Envelope() record.Envelope {
 	return record.Envelope{
 		Liveness: kind, Machine: r.Machine, Holder: record.Holder{Agent: r.Agent, PID: r.PID, Start: r.Start, SessionID: r.Current},
 	}
+}
+
+// Holder returns the holder the registration stands for, as a nitipan command it runs would resolve
+// it: the process, and the session ID it holds now. It reports false for an agent this binary does not
+// know.
+//
+// Notices and requests are addressed to this holder. A session ID it held before a /clear is not one.
+func (r Registration) Holder() (adapter.Holder, bool) {
+	ad, ok := adapter.ByName(r.Agent)
+	if !ok {
+		return adapter.Holder{}, false
+	}
+
+	return adapter.Holder{Adapter: ad, PID: r.PID, Start: r.Start, SessionID: r.Current}, true
 }
 
 // Holds reports whether the registration ever held the session ID.

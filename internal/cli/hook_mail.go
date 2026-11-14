@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/space-armada/nitipan/internal/exitcode"
+	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/mailbox"
 	"github.com/space-armada/nitipan/internal/session"
 )
@@ -182,6 +183,9 @@ func (a *app) ringUnrung(root string, reg mailbox.Registration) (bool, error) {
 		keys[i] = mailbox.MailKey(m.ID)
 	}
 
+	rings := a.registrationRings(reg)
+	keys = append(keys, lease.RingKeys(rings)...)
+
 	// A ledger that cannot be rewritten still returns the keys it does not show as rung. A repeated ring
 	// loses nothing.
 	fresh, err := mailbox.Claim(root, reg.Identity, keys, a.deps.Now())
@@ -193,9 +197,19 @@ func (a *app) ringUnrung(root string, reg mailbox.Registration) (bool, error) {
 		return false, nil
 	}
 
-	fmt.Fprintln(a.deps.Stderr, mailbox.RingText(len(fresh)))
+	fmt.Fprintln(a.deps.Stderr, mailbox.RingTextForKeys(fresh))
 
 	return true, nil
+}
+
+// registrationRings lists the notice and request rings for the holder a registration stands for.
+func (a *app) registrationRings(reg mailbox.Registration) []lease.Ring {
+	h, ok := reg.Holder()
+	if !ok {
+		return nil
+	}
+
+	return a.leaseRings(h)
 }
 
 // runMailRing is the UserPromptSubmit and PostToolUse hook. It tells a busy session that mail is
@@ -219,7 +233,9 @@ func (a *app) runMailRing(event string) error {
 	}
 
 	n, _ := a.pendingFor(root, h)
-	if n == 0 {
+	notices, requests := lease.CountRings(a.leaseRings(h))
+
+	if n+notices+requests == 0 {
 		return nil
 	}
 
@@ -230,7 +246,7 @@ func (a *app) runMailRing(event string) error {
 		} `json:"hookSpecificOutput"`
 	}{}
 
-	out.Specific.Event, out.Specific.Context = event, mailbox.RingText(n)
+	out.Specific.Event, out.Specific.Context = event, mailbox.PendingRingText(n, notices, requests)
 
 	return json.NewEncoder(a.deps.Stdout).Encode(out)
 }

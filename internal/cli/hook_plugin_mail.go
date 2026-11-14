@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/space-armada/nitipan/internal/adapter"
+	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/mailbox"
 	"github.com/space-armada/nitipan/internal/session"
@@ -105,16 +106,19 @@ func (a *app) pluginMailRecipient(root string, host adapter.Holder, in hookInput
 	if text := mailbox.UnknownText(unknown); text != "" {
 		fmt.Fprintln(a.deps.Stderr, text)
 	}
+	rings := a.leaseRings(host)
 	if action == "reminder" {
-		if len(msgs) == 0 {
+		notices, requests := lease.CountRings(rings)
+		if len(msgs)+notices+requests == 0 {
 			return pluginRing{}, nil
 		}
-		return pluginRing{SessionID: host.SessionID, Ring: mailbox.RingText(len(msgs))}, nil
+		return pluginRing{SessionID: host.SessionID, Ring: mailbox.PendingRingText(len(msgs), notices, requests)}, nil
 	}
 	keys := make([]string, len(msgs))
 	for i, m := range msgs {
 		keys[i] = mailbox.MailKey(m.ID)
 	}
+	keys = append(keys, lease.RingKeys(rings)...)
 	fresh, err := mailbox.Claim(root, r.Identity, keys, a.deps.Now())
 	if err != nil {
 		return pluginRing{}, err
@@ -122,7 +126,7 @@ func (a *app) pluginMailRecipient(root string, host adapter.Holder, in hookInput
 	if len(fresh) == 0 {
 		return pluginRing{}, nil
 	}
-	return pluginRing{SessionID: host.SessionID, Keys: fresh, Ring: mailbox.RingText(len(fresh))}, nil
+	return pluginRing{SessionID: host.SessionID, Keys: fresh, Ring: mailbox.RingTextForKeys(fresh)}, nil
 }
 
 func (a *app) runCodexMailTurn(in hookInput, host adapter.Holder, _ []string) error {
@@ -138,13 +142,11 @@ func (a *app) runCodexMailTurn(in hookInput, host adapter.Holder, _ []string) er
 		return err
 	}
 	n, unknown := a.pendingFor(root, host)
-	if n == 0 && len(unknown) == 0 {
+	notices, requests := lease.CountRings(a.leaseRings(host))
+	if n+notices+requests == 0 && len(unknown) == 0 {
 		return nil
 	}
-	text := mailbox.RingText(n)
-	if n == 0 {
-		text = ""
-	}
+	text := mailbox.PendingRingText(n, notices, requests)
 	text += mailbox.UnknownText(unknown)
 	return json.NewEncoder(a.deps.Stdout).Encode(mailHookOutput{Specific: mailHookContext{Event: in.Event, Context: text}})
 }

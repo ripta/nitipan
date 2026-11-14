@@ -420,12 +420,17 @@ class FakeServer:
 MAIL_FILES: set[Path] = set()
 
 
+def new_id() -> str:
+    """A random 26-character ID in the alphabet nitipan's IDs use."""
+    value = uuid.uuid4().int
+    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    return "".join(alphabet[(value >> (5 * i)) & 31] for i in reversed(range(26)))
+
+
 def store_mail(session: str, body: str) -> Path:
     """Publish synthetic mail at the node's durable-output boundary, with an owned random ID."""
     from datetime import datetime, timezone
-    value = uuid.uuid4().int
-    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-    message = "".join(alphabet[(value >> (5 * i)) & 31] for i in reversed(range(26)))
+    message = new_id()
     inbox = STATE / "mail/inbox"
     inbox.mkdir(parents=True, exist_ok=True)
     path = inbox / f"{session}.{message}.json"
@@ -434,6 +439,46 @@ def store_mail(session: str, body: str) -> Path:
              "body": body, "stored_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
     temp = inbox / f".harness-{RUNID}-{message}"
     MAIL_FILES.update((path, temp, STATE / "mail/read" / f"{message}.json"))
+    temp.write_text(json.dumps(value))
+    temp.chmod(0o600)
+    temp.replace(path)
+    return path
+
+
+NOTICE_FILES: set[Path] = set()
+
+
+def store_notice(session: str, detail: str) -> Path:
+    """Publish a synthetic request-granted notice addressed to a registered session.
+
+    The notice is one `nitipan list` would deliver, so a wake path must ring for it. Its holder is
+    copied from the session's registration, as a lease the session held would carry it. The file is
+    owned by this run and removed by the sweep if the run ends early.
+    """
+    from datetime import datetime, timezone
+    reg = None
+    for path in (STATE / "mail/reg").glob("*.json"):
+        try:
+            found = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if found.get("current") == session and found.get("version") == "1.0":
+            reg = found
+            break
+    if reg is None:
+        raise RuntimeError(f"no mail registration for session {session}")
+    target = new_id()
+    name = f"{target}-request-granted"
+    value = {"version": "1.2", "id": name, "footprint": "none", "clear_when_dead": True, "liveness": "session",
+             "machine": reg["machine"],
+             "holder": {"agent": reg["agent"], "session_id": session, "pid": reg["pid"], "start": reg["start"]},
+             "cause": "request-granted", "target": target, "detail": detail,
+             "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+    notices = STATE / "notices"
+    notices.mkdir(parents=True, exist_ok=True)
+    path = notices / f"{name}.json"
+    temp = notices / f".harness-{RUNID}-{target}"
+    NOTICE_FILES.update((path, temp))
     temp.write_text(json.dumps(value))
     temp.chmod(0o600)
     temp.replace(path)
@@ -459,5 +504,5 @@ def sweep_mail() -> None:
                     MAIL_FILES.add(sibling)
         except (OSError, ValueError, KeyError):
             continue
-    for path in MAIL_FILES:
+    for path in MAIL_FILES | NOTICE_FILES:
         path.unlink(missing_ok=True)

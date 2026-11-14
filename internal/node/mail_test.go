@@ -630,7 +630,7 @@ func TestASocketRingThatNeverReturnsDoesNotStallTheNodesOtherMailCalls(t *testin
 
 	old := ringDialer
 
-	ringDialer = func(mailbox.Registration, int) error {
+	ringDialer = func(mailbox.Registration, string) error {
 		select {
 		case started <- struct{}{}:
 		default:
@@ -684,7 +684,7 @@ func TestARingForARegistrationReapedAfterItWasPickedWritesNoLedger(t *testing.T)
 
 	old := ringDialer
 
-	ringDialer = func(mailbox.Registration, int) error {
+	ringDialer = func(mailbox.Registration, string) error {
 		dials.Add(1)
 
 		return nil

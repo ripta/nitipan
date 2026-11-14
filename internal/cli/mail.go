@@ -14,6 +14,7 @@ import (
 	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/exitcode"
 	"github.com/space-armada/nitipan/internal/handoff"
+	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/mailbox"
 	"github.com/space-armada/nitipan/internal/session"
 	"github.com/space-armada/nitipan/internal/state"
@@ -472,6 +473,37 @@ func (a *app) pendingFor(root string, h adapter.Holder) (int, []mailbox.Unknown)
 	return len(msgs), unknown
 }
 
+// leaseRings lists the notices and pending requests a wake path rings a holder for. A ring is best
+// effort, so a state directory it cannot read rings nothing, as an unreadable mailbox does. The read takes
+// no lock, and it warns of nothing so that a hook's output stays its own.
+//
+// A holder that cannot hold a lease has nothing to be told. That is a multi-session agent with no session
+// ID, or an ID that is not valid.
+func (a *app) leaseRings(h adapter.Holder) []lease.Ring {
+	if h.MissingSession() || (h.SessionID != "" && !session.ValidSession(h.SessionID)) {
+		return nil
+	}
+
+	root, err := a.deps.StateDir()
+	if err != nil || !lease.RingsPossible(root) {
+		return nil
+	}
+
+	e, err := a.readEngine()
+	if err != nil {
+		return nil
+	}
+
+	e.Notify.Warn = nil
+
+	rings, err := e.PendingRings(h)
+	if err != nil {
+		return nil
+	}
+
+	return rings
+}
+
 // ringIdentified tells the caller of an identified-holder command about its pending mail, and about
 // the stage of mail it sent. It goes to standard error, beside the notices, and it rings without waking
 // anything: it removes nothing and records nothing in the ring ledger, so it may repeat.
@@ -486,8 +518,10 @@ func (a *app) ringIdentified() {
 	}
 
 	n, unknown := a.pendingFor(root, *a.callerHolder)
-	if n > 0 {
-		fmt.Fprintln(a.deps.Stderr, mailbox.RingText(n))
+	notices, requests := lease.CountRings(a.leaseRings(*a.callerHolder))
+
+	if n+notices+requests > 0 {
+		fmt.Fprintln(a.deps.Stderr, mailbox.PendingRingText(n, notices, requests))
 	}
 
 	if text := mailbox.UnknownText(unknown); text != "" {
