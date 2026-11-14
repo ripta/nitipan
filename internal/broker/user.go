@@ -466,8 +466,8 @@ func (b *Broker) SetCrossUserEnabled(enable bool) ([]string, error) {
 
 	if b.cfg.OIDCConfig == nil {
 		return nil, fmt.Errorf("cannot enable cross-user features: no identity provider configured. " +
-			"Configure an OIDC issuer in the broker config, then retry. " +
-			"See the broker configuration section in README.md")
+			"Add an \"oidc\" block to ~/.config/nitipan/broker.json, then retry. " +
+			"See \"The oidc block\" in docs/operations/broker.md")
 	}
 
 	// Opening the store assigns the owner or restores its record, so a running broker never lands here.
