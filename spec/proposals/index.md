@@ -9,4 +9,4 @@
 | [NIT-005](NIT-005-fencing-tokens.md) | Fencing tokens issued per grant and checked by the receiving side | implemented |
 | [NIT-006](NIT-006-broker-auth.md) | Self-hosted user auth for the broker: label bindings, delegations, and cross-user mail grants | implemented |
 | [NIT-007](NIT-007-session-mailbox.md) | Per-session mailboxes on the broker for cross-machine messaging | implemented |
-| [NIT-008](NIT-008-sub-lease-recall.md) | Recall a sub-lease with a deadline every reader enforces | accepted |
+| [NIT-008](NIT-008-sub-lease-recall.md) | Recall a sub-lease with a deadline every reader enforces | implemented |
