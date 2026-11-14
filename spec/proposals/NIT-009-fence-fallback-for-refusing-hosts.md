@@ -48,6 +48,30 @@ rejection without the namespace or the word "rejected" falls through to a bare "
 
 ## Design Decisions (Settled)
 
+### Fencing is coordination, not correctness
+
+Git guarantees the repo's data. A non-fast-forward push is rejected, and an atomic push applies all its refs or none.
+The broker, leases, and fence refs sit on top of that as coordination. The broker orders grants across machines. A
+lease says which session should work in a domain, and it expires when its holder goes quiet. The fence makes the
+remote enforce that lease against a holder that lost it without knowing. Each layer makes collisions between agents
+rarer. None of them guards against data loss.
+
+A run with no broker has no fencing at all, and that is a supported setup. Sessions on different machines then meet
+only at git's fast-forward rule. So a lease check in place of fencing is graceful degradation. It is strictly better
+than the no-broker baseline, and it needs no extra machinery to be acceptable. A gap in fencing weakens coordination.
+It is never a correctness defect, and it never justifies a correctness-grade fix.
+
+The fence exists so the remote enforces the lease and the holder never needs the broker at push time. That is
+NIT-005's "Receiver enforces" and its broker-free fenced push. A change here is weighed against that purpose before
+any edge case is patched. A change that puts the broker in every fenced push defeats the fence. It does not harden it.
+
+A threat that shapes the design must match how nitipan is used. One user's agents push to that user's remotes as that
+user. A host that refuses fence refs refuses them for every pusher. A threat no probe has shown, and that assumes
+otherwise, does not drive a design change.
+
+A change that reverses a settled principle of an implemented proposal goes to the user as a question. No review
+decides it on its own.
+
 ### Three states on one key
 
 `nitipan.<remote>.fence` is read with `git config --bool --get`, in every scope git reads. Its states:
@@ -225,6 +249,9 @@ None.
 - `docs/reference/pushing.md` describes the three states in place of "Hosts without atomic push"
 - `docs/operations/troubleshooting.md` replaces "The host refuses fence refs" and "The remote is marked as unable to
   take an atomic push" with entries for the fallback warning, the `true` error, the invalid value, and the migration
+- `docs/architecture.md` says that git guarantees the repo's data, and that the broker, leases, and fence refs are
+  coordination layers on top of it. It says a run with no broker has no fencing, and that a lease check in place of
+  fencing is graceful degradation
 - `make live-fence-hosts` reports each host's porcelain lines for a refused fence ref
 - NIT-005's "What enforces the token", "Token scope", and its atomic-push risk carry "Superseded in part by NIT-009; see
   Decision Log" markers, and its Decision Log records the supersession of the `atomic` key
@@ -254,6 +281,13 @@ None.
   `nitipan push` and pre-push hook obeys. Declined: the user kept NIT-005's shipped trust model, so the choice adds no
   new principle. The adr-impact check found no conflict. ADR-07 holds, since neither the key nor the variable reaches
   the node. ADR-05 holds, since the key stays clone-local and is never an identity.
+- 2026-11-14: The user rejected an autonomous review of this proposal. The commit "spec: record the rejected
+  autonomous review of NIT-009" keeps it, and its revert gives the reasons. The review had every fenced push renew its
+  leases with the broker. It did that to close a hole on hosts that refuse fence refs from some pushers only. That
+  reversed NIT-005's broker-free fenced push, without asking, for a threat no probe showed. The review filed a
+  coordination gap under correctness. It patched edge cases before weighing each component's purpose. It grew the
+  design instead of settling it. The user set "Fencing is coordination, not correctness" as a settled decision, and
+  asked for it in nitipan's own docs, so other agents learn it. M3 carries that to `docs/architecture.md`.
 
 ## References
 
