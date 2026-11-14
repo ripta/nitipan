@@ -121,6 +121,7 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 		}
 
 		c = &call{e: e, entries: entries}
+		res.Warnings = append(res.Warnings, c.hideEndedRecalls()...)
 	}
 
 	if req.Emit == nil {
@@ -239,6 +240,7 @@ func (c *call) output(filter record.Footprint, filtered bool, cfg *SlotConfig) l
 
 	shared := c.sharedNames()
 	views := c.slotViews(cfg)
+	recalls := c.pendingRecalls()
 	query := queryKeys(filter, filtered)
 	haveQuery := len(query) > 0
 
@@ -256,6 +258,11 @@ func (c *call) output(filter record.Footprint, filtered bool, cfg *SlotConfig) l
 		lease := listing.FromRecord(en.Rec, en.Live)
 		c.annotate(&lease, en, query, haveQuery)
 		lease.Hint = en.Hint
+
+		if rc := recalls[en.ID]; rc != nil {
+			lease.Recall = &listing.Recall{Parent: rc.Parent, Deadline: rc.Deadline.UTC()}
+		}
+
 		lease.Remote = en.Rec.Domain.Kind == record.KindResource && !liveness.SameMachine(c.e.Machine, en.Rec.Machine)
 		lease.NameShared = shared[en.Rec.Holder.Name] && en.Rec.Holder.Name != ""
 

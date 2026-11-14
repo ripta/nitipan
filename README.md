@@ -26,6 +26,7 @@ The first version runs on one machine, with no daemon. It has ten commands:
 - `grant` hands a requested part to the requester as a sub-lease
 - `decline` refuses a request, or withdraws one
 - `revoke` ends a sub-lease at once, and only the holder of its parent can run it
+- `recall` gives a sub-lease a deadline to finish, commit, and release, and only the holder of its parent can run it
 - `setup` prints the sandbox allowance, hooks, and plugins an agent needs, and installs the git hooks with
   `setup git --install <checkout>`
 
@@ -146,6 +147,18 @@ When a sub-lease or its parent ends:
 - The parent's holder can run `nitipan revoke <lease-id>` to end a sub-lease at once. The sub-lessee gets a tombstone
   that names the parent's holder, with the cause `revoked`. Anyone else is refused, and the error names the parent.
   Subagents share their parent's holder, so any subagent of the holder can revoke.
+- The parent's holder can run `nitipan recall <lease-id> --deadline <duration>` to give a sub-lease time to finish. The
+  duration is required and has no default. The sub-lessee gets a notice with the deadline on its next nitipan call. The
+  output names the sub-lessee's handle and agent name and the absolute deadline. Tell the sub-lessee out of band, for
+  example through SendMessage or mail. The output also prints an `acquire --wait` command on the parent's whole key set.
+  There is no timer. The first locked nitipan call by anyone after the deadline ends the sub-lease as a `revoke` would,
+  with a tombstone of the cause `recalled` and a "sub-lease ended" notice to the parent. A sub-lessee that releases
+  first returns its keys as usual. A second `recall` replaces the deadline. `nitipan recall <lease-id> --cancel` takes
+  the recall back and tells the sub-lessee. A recall ends when its parent dies, is released, or is broken, and the
+  sub-lease then stands alone. A recall whose parent record this nitipan cannot read ends nothing, and is reported.
+  The holder's `acquire --wait` on exactly its own keys waits while a delegation is under a recall, and exits 11 without
+  `--wait`, listing the deadline. An older nitipan never reads `recalls/`, so it keeps answering the sub-lessee as
+  covered past the deadline until a newer binary takes the lock.
 - A sub-lessee's `release`, a forced `break` of the sub-lease, and a dead sub-lessee that nitipan clears each return the
   keys to the parent. The parent's record does not change. The parent gets a notice with the sub-lease's ID, its keys,
   and how it ended. The output of a `break` says the keys went back.
@@ -163,7 +176,7 @@ When a sub-lease or its parent ends:
 the lease it asks to share. A sub-lease whose parent is dead or gone prints at the top level, with its stored `parent`
 link, until a locked call repairs it. A `list` that reads without the lock prints it that way too.
 
-`list --json` has schema version 1.3, an additive change over 1.2 that adds the `marks` array. The sub-lease fields
+`list --json` has schema version 1.6, an additive change over 1.2 that adds the `marks` array. The sub-lease fields
 below came in with 1.2, an additive change over 1.1. Consumers ignore fields they do not know. Every lease stays a
 top-level entry in `leases`, so a consumer of the earlier schema still sees all of them.
 
@@ -179,14 +192,18 @@ top-level entry in `leases`, so a consumer of the earlier schema still sees all 
 - `requests` lists the pending requests, each with its `id`, `parent` lease ID, `requester` holder (which carries the
   handle), `liveness`, `keys`, `description` when the requester gave one, and `requested_at`. A request that `grant`
   is already working on is not pending. A filtered `list` keeps the requests whose keys overlap the filter.
+- `recall` is on a sub-lease whose parent recalled it and whose recall is still pending, as
+  `{"parent": ..., "deadline": ...}`. Schema version 1.6 adds it. A `list` that reads without the lock treats a
+  sub-lease past its deadline as ended, so the parent reads as the owner, and warns on stderr.
 - `notices` lists the notices this call delivered, each with its `cause`, `target`, `paths`, `at`, and a `summary`
   sentence. Delivery removes a notice, so read this array when stderr is not captured.
 
 `requests`, `notices`, and `tombstones` are always arrays, never null.
 
 A sub-lease is its own record in `leases/`, with a `parent` field that names the lease it came from. The parent's record
-does not change. Records that use `parent`, and requests and notices, carry record version 1.2. Fence marks carry 1.3. A
-lease that uses none of them keeps version 1.0 and stays writable by older binaries.
+does not change. Records that use `parent`, and requests and notices, carry record version 1.2. Fence marks carry 1.3.
+Recalls, in `recalls/`, carry 1.4 with the `recalled` and `recall-cancelled` notices and the `recalled` tombstone cause.
+A lease that uses none of them keeps version 1.0 and stays writable by older binaries.
 
 ## Git hook and fence marks
 

@@ -157,7 +157,7 @@ var breakTests = []breakTest{
 		WantRefusal: []string{"owner", "newer nitipan"},
 	},
 	{
-		Name: "dead holder with a record of a higher minor", Plant: plantSpec{PID: 77, Name: "owner", Version: "1.4"},
+		Name: "dead holder with a record of a higher minor", Plant: plantSpec{PID: 77, Name: "owner", Version: "1.5"},
 		WantRefusal: []string{"owner", "newer nitipan"},
 	},
 	{
@@ -672,7 +672,7 @@ func TestReleaseOfAnotherHoldersRecordOfANewerMinorIsNotYours(t *testing.T) {
 	w := newWorld(t)
 	w.liveHolder()
 
-	id := w.plant(plantSpec{PID: 77, Paths: []string{w.dir("repo")}, Version: "1.4", Name: "owner"})
+	id := w.plant(plantSpec{PID: 77, Paths: []string{w.dir("repo")}, Version: "1.5", Name: "owner"})
 
 	res := w.run(w.claude(200, "s1"), "release", id)
 	wantStatus(t, res, exitcode.NotYours)
@@ -703,7 +703,7 @@ var errorPathTests = []errorPathTest{
 		return w.run(w.terminal(900), "break", id)
 	}},
 	{Name: "break of a record of a higher minor", Run: func(w *world) result {
-		id := w.plant(plantSpec{PID: 77, Version: "1.4", Paths: []string{w.dir("repo")}})
+		id := w.plant(plantSpec{PID: 77, Version: "1.5", Paths: []string{w.dir("repo")}})
 
 		return w.run(w.terminal(900), "break", id)
 	}},

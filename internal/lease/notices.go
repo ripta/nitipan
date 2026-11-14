@@ -93,6 +93,9 @@ const (
 // A "sub-lease ended" notice is due once the sub-lease is gone, and only while the addressee still
 // holds a lease that covers its keys, since the notice says the keys are the addressee's again. A
 // parent that was released since has no keys to get back.
+//
+// A recalled notice is due while its recall binds the sub-lease, and a recall-cancelled notice is due
+// unless a recall is in force again.
 func (c *call) lossVerdict(n *record.Notice) noticeVerdict {
 	kid := c.entryByID(n.Target)
 
@@ -115,6 +118,10 @@ func (c *call) lossVerdict(n *record.Notice) noticeVerdict {
 		}
 
 		return dropNotice
+	case record.CauseRecalled:
+		return c.recalledVerdict(n)
+	case record.CauseRecallCancelled:
+		return c.cancelledVerdict(n)
 	}
 
 	return deliverNotice

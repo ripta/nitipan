@@ -426,6 +426,12 @@ func (c *call) removeFile(sub, id string) error {
 // newTombstone builds the notice for a broken holder.
 func (c *call) newTombstone(en *entry, req BreakRequest) *record.Tombstone {
 	by, anonymous := c.breaker(req.Caller)
+
+	return c.tombstoneBy(en, by, anonymous)
+}
+
+// tombstoneBy builds the tombstone for a lease that the named breaker ended.
+func (c *call) tombstoneBy(en *entry, by record.Holder, anonymous bool) *record.Tombstone {
 	rec := en.Rec
 
 	var paths []string

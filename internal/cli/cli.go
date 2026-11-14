@@ -250,6 +250,7 @@ func newRoot(a *app) *cobra.Command {
 		a.grantCmd(),
 		a.declineCmd(),
 		a.revokeCmd(),
+		a.recallCmd(),
 		a.setupCmd(),
 		a.hookCmd(),
 		a.nodeCmd(),

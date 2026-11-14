@@ -3,6 +3,7 @@ package lease
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -75,10 +76,30 @@ func indent(s string) string {
 	return "  " + strings.ReplaceAll(s, "\n", "\n  ")
 }
 
+// recalledRefusal turns a refresh that succeeded while a delegation is under a recall into a refusal a
+// wait retries. Each retry is a locked call, so the expiry runs once the deadline passes.
+func recalledRefusal(res *AcquireResult) error {
+	ids := make([]string, 0, len(res.Recalled))
+	for id := range res.Recalled {
+		ids = append(ids, id)
+	}
+
+	slices.Sort(ids)
+
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprintf("sub-lease %s, recalled until %s", id, res.Recalled[id].UTC().Format(time.RFC3339))
+	}
+
+	return waitablef("you hold %s, but %s of it %s delegated under a recall: %s", res.Lease.ID,
+		Plural(len(ids), "part", "parts"), Plural(len(ids), "is", "are"), strings.Join(parts, "; "))
+}
+
 // AcquireWait is Acquire with a bounded wait. It tries again after a refusal that a later attempt can
 // see lifted, until the timeout passes.
 //
-// Only three outcomes are waited on: a live holder overlaps, a slot is full, or the lock is busy.
+// Only four outcomes are waited on: a live holder overlaps, a slot is full, the lock is busy, or an
+// equal-key refresh finds a delegation under a recall in force.
 // The lock is held only inside each attempt. Every other error returns at once, with its own status.
 // The last attempt runs at the deadline, so a holder that released just before it is still seen.
 func (e *Engine) AcquireWait(req AcquireRequest, timeout time.Duration) (*AcquireResult, error) {
@@ -96,8 +117,12 @@ func (e *Engine) AcquireWait(req AcquireRequest, timeout time.Duration) (*Acquir
 		budget := min(max(deadline.Sub(e.Now()), 0), e.Dir.LockBudget())
 
 		res, err := e.acquire(req, func() (*state.Locked, error) { return e.Dir.LockWithin(budget) })
-		if err == nil {
+		if err == nil && len(res.Recalled) == 0 {
 			return res, nil
+		}
+
+		if err == nil {
+			err = recalledRefusal(res)
 		}
 
 		switch {

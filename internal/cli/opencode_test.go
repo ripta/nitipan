@@ -379,8 +379,8 @@ func TestOpencodeMarksOfAHigherMinorSurviveTheSweep(t *testing.T) {
 	presence := presenceName(600)
 	execution := "opencode.ses_1.500." + startOf(500).String() + ".json"
 
-	w.rewriteSessionFile("presence", presence, map[string]any{"version": "1.4"})
-	w.rewriteSessionFile("executing", execution, map[string]any{"version": "1.4"})
+	w.rewriteSessionFile("presence", presence, map[string]any{"version": "1.5"})
+	w.rewriteSessionFile("executing", execution, map[string]any{"version": "1.5"})
 
 	w.kill(500)
 	w.kill(600)

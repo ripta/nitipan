@@ -5,6 +5,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/space-armada/nitipan/internal/record"
 )
@@ -213,6 +214,11 @@ func leaseText(l Lease, underParent bool) string {
 
 	if l.Parent != "" && !underParent {
 		fmt.Fprintf(&b, "  parent link: %s\n", l.Parent)
+	}
+
+	if l.Recall != nil {
+		fmt.Fprintf(&b, "  recalled by the holder of %s: ends at %s unless it is released first\n", l.Recall.Parent,
+			l.Recall.Deadline.UTC().Format(time.RFC3339))
 	}
 
 	if l.Owner != nil {

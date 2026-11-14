@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -195,7 +196,7 @@ the breaker. Its keys go back to your lease. The tombstone carries the cause "re
 nitipan reports as a plain break.
 
 Subagents share their parent's holder, so any subagent of yours can revoke. Revoking cuts off a live
-session, so name the sub-lease you mean.`,
+session, so name the sub-lease you mean. To give the sub-lessee time to finish, use recall instead.`,
 		Args: oneArg("lease ID"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.wrapErr(a.runRevoke(args[0]))
@@ -254,11 +255,16 @@ func orNone(s string) string {
 }
 
 // delegationLines describes the live sub-leases a refresh found, one per line.
-func delegationLines(recs []*record.Record) []string {
+// A delegation under a recall also says when the recall ends it.
+func delegationLines(recs []*record.Record, recalled map[string]time.Time) []string {
 	lines := make([]string, len(recs))
 
 	for i, r := range recs {
 		lines[i] = fmt.Sprintf("delegated: %s on %s to %s", r.ID, keyList(r), lease.DescribeHolder(r.Holder))
+
+		if deadline, ok := recalled[r.ID]; ok {
+			lines[i] += ", recalled until " + deadline.UTC().Format(time.RFC3339)
+		}
 	}
 
 	return lines

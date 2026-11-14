@@ -162,7 +162,7 @@ func TestReleaseRemovesTheCallersOwnRecordOfANewerMinor(t *testing.T) {
 	w := newWorld(t)
 	c := w.claude(200, "s1")
 
-	id := w.plant(plantSpec{PID: 200, Paths: []string{w.dir("repo")}, Version: "1.4", Handle: "mine"})
+	id := w.plant(plantSpec{PID: 200, Paths: []string{w.dir("repo")}, Version: "1.5", Handle: "mine"})
 
 	res := w.run(c, "release", id)
 	wantStatus(t, res, exitcode.OK)

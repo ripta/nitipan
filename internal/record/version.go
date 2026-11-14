@@ -13,7 +13,7 @@ import (
 // higher major is not.
 const (
 	CurrentMajor = 1
-	CurrentMinor = 3
+	CurrentMinor = 4
 )
 
 // Version is a record format version, written as "major.minor".
@@ -43,6 +43,10 @@ var (
 
 	// MarkVersion is the minor that adds the fence mark.
 	MarkVersion = Version{Major: CurrentMajor, Minor: 3}
+
+	// RecallVersion is the minor that adds the recall record, the recalled and recall-cancelled notices,
+	// and the recalled tombstone cause. A sub-lease's own record keeps the parent minor.
+	RecallVersion = Version{Major: CurrentMajor, Minor: 4}
 )
 
 // ParseVersion parses "major.minor".

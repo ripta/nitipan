@@ -132,7 +132,7 @@ func TestListShowsTheTokenInTextAndJSONAndFromTheSidecarWhenTheNodeIsDown(t *tes
 	doc := tm.m1.w.listJSON(tm.c1)
 
 	leases, _ := doc["broker_leases"].([]any)
-	if len(leases) != 1 || doc["schema_version"] != "1.5" {
+	if len(leases) != 1 || doc["schema_version"] != "1.6" {
 		t.Fatalf("list --json = %v", doc)
 	}
 

@@ -236,7 +236,7 @@ func TestHigherMinorIsReadWithUnknownFieldsIgnored(t *testing.T) {
 }
 
 func TestHigherMinorIsNeverRewritten(t *testing.T) {
-	rec, err := Decode(mutate(t, func(m map[string]any) { m["version"] = "1.4" }))
+	rec, err := Decode(mutate(t, func(m map[string]any) { m["version"] = "1.5" }))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -572,7 +572,7 @@ func TestTombstoneRoundTripAndRules(t *testing.T) {
 		t.Errorf("higher major tombstone err = %v, want ErrUnusable", err)
 	}
 
-	m["version"] = "1.4"
+	m["version"] = "1.5"
 
 	newer, err := json.Marshal(m)
 	if err != nil {

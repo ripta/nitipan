@@ -26,12 +26,27 @@ const reasonBadTombstoneName record.Reason = "file name is not a tombstone ID"
 type Notify struct {
 	Delivered func(*record.Tombstone)
 	Notice    func(*record.Notice)
-	Warn      func(error)
+
+	// Expired receives each sub-lease a call ended because its recall deadline passed.
+	Expired func(Expiry)
+	Warn    func(error)
+}
+
+// Expiry describes a sub-lease that ended because its recall deadline passed.
+type Expiry struct {
+	Lease  *record.Record
+	Recall *record.Recall
 }
 
 func (n Notify) notice(x *record.Notice) {
 	if n.Notice != nil {
 		n.Notice(x)
+	}
+}
+
+func (n Notify) expired(x Expiry) {
+	if n.Expired != nil {
+		n.Expired(x)
 	}
 }
 
@@ -213,7 +228,7 @@ func DescribeNotice(t *record.Tombstone) string {
 	return strings.TrimSuffix(t.Detail, ".")
 }
 
-// DescribeBroken says which lease was broken, by whom, and when. A revoked sub-lease says so.
+// DescribeBroken says which lease was broken, by whom, and when. A revoked or recalled sub-lease says so.
 func DescribeBroken(t *record.Tombstone) string {
 	msg := fmt.Sprintf("lease %s", t.Lease)
 	if len(t.Paths) > 0 {
@@ -222,8 +237,12 @@ func DescribeBroken(t *record.Tombstone) string {
 
 	at := t.BrokenAt.Format("2006-01-02 15:04:05 MST")
 
-	if t.Cause == record.CauseRevoked {
+	switch t.Cause {
+	case record.CauseRevoked:
 		return fmt.Sprintf("%s was revoked by %s, the holder of its parent lease, at %s", msg, describeBreaker(t), at)
+	case record.CauseRecallExpired:
+		return fmt.Sprintf("%s was recalled by %s, the holder of its parent lease, and ended at %s because the deadline "+
+			"of the recall passed before it was released", msg, describeBreaker(t), at)
 	}
 
 	return fmt.Sprintf("%s was broken by %s at %s", msg, describeBreaker(t), at)

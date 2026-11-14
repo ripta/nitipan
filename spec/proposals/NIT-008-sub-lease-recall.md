@@ -68,7 +68,7 @@ that no caller has asked for.
 
 Decision (autonomous): no timer. The deadline is stored beside the sub-lease, and every new-binary reader enforces it
 when it reads. "Sub-leases at machine reach" left both listed candidates without a lease to act on, since a `machine`
-sub-lease has no broker term. Amended 2026-10-24; see Decision Log.
+sub-lease has no broker term. Amended 2026-11-13; see Decision Log.
 
 The recall record:
 
@@ -95,8 +95,10 @@ The recall record:
 
 Expiry:
 
-- Every locked call's repairs end each child whose recall is in force and past its deadline. The expiry first writes a
-  tombstone with cause `recalled` and the "sub-lease ended" notice to the parent. The notice says the recall's deadline
+- Every locked call's repairs end each child whose recall is in force and past its deadline. The deadline is inclusive:
+  a reader whose clock reads the deadline itself finds the child ended. A child whose own holder is dead is left for
+  the clearing that removes it, as the parent-gone repair leaves it. The expiry first writes a tombstone with cause
+  `recalled` and the "sub-lease ended" notice to the parent. The notice says the recall's deadline
   passed. It then removes the child, and removes the recall record last. The tombstone names the parent's holder as the
   breaker, taken from the parent's record, since the call that runs the expiry may be a third party's
 - A retry after a crash reuses a tombstone for the same lease whose cause is `revoked` or `recalled`, so the sub-lessee
@@ -271,7 +273,7 @@ None.
 
 ### M1: Recall with a deadline
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `recall <child-id> --deadline <duration>` by the parent's holder writes the recall record and the `recalled` notice,
   and leaves the child's record unchanged
@@ -287,8 +289,9 @@ None.
   says, and the undelivered `recalled` notice is dropped. An unreadable parent leaves the child alone and is reported
 - A recall record that is no longer in force is removed by the next locked call, after any release, break, dead-holder
   clearing, revoke, or older-binary rewrite of its child
-- A recall whose parent record is unusable ends no child for a locked call, an unlocked `list`, or the hook, and each
-  reports it. The recall survives the locked call, and is enforced once the parent reads usable again
+- A recall whose parent record is unusable ends no child for a locked call or an unlocked `list`, and each reports it.
+  The recall survives the locked call, and is enforced once the parent reads usable again. Amended 2026-11-13; see
+  Decision Log.
 - A second `recall` replaces the deadline and the notice. `recall --cancel` removes both and leaves a `recall-cancelled`
   notice, and a later `recall` removes that notice. A crash at each step of `--cancel` leaves the recall cancelled after
   the next locked call, and the sub-lessee told once. A recall of a dead sub-lessee removes the child at once with no
@@ -303,6 +306,44 @@ None.
 - A NIT-003 binary leaves the recall record alone and can still rewrite the child, and a new binary then removes the
   recall
 
+**As built:**
+
+Nothing here ran against a real agent session. Every check drives the CLI over a fake process table and a settable
+clock.
+
+- The record minor is 1.4. `CurrentMinor` moved to 4, so the tests that used 1.4 as a "newer minor" fixture now use 1.5.
+  The child's own record keeps 1.2
+- One exported function, `lease.JudgeRecall`, decides in force, past the deadline, not in force, or unusable. It reads
+  plain data and takes no lock. M2's hook and M4's node mirror call it. A locked call, an unlocked `list`, and
+  delivery's verdict on the two new notice causes all use it. The deadline is inclusive. See Decision Log
+- The repair runs after the parent-gone repair, so a child whose parent died has already stood alone and its recall is
+  reaped, never enforced. A `cancelling` record is finished before any verdict. An unusable parent leaves the recall
+  and warns on every locked call. An unusable recall record warns the same way and ends nothing
+- The crash order is hooked at each step of `recall`, `--cancel`, and the expiry, and a test crashes at each one. The
+  expiry reuses a tombstone of cause `revoked` or `recalled` for the same lease. A revoke reuses either one too. No
+  test reaches the revoke side, because every locked call's repairs end a recalled child before a revoke's body runs.
+  The shared lookup serves both
+- `recall` and `--cancel` refuse a recall record they cannot use, not only one of a higher minor, and exit 9. A cancel
+  with no recall exits 8. Recall of a dead sub-lessee prints that no recall was written
+- A recall record of a higher minor is never removed or finished by this binary. The reap, an expiry's last step, and a
+  cancel leave it for a newer binary, since NIT-001 lets an older binary remove such a record only on its own holder's
+  release. `recall` on a dead sub-lessee checks the record first and refuses the same way
+- The cancelled notice is written only for a sub-lease that still stands and names the parent. A cancel that finishes
+  after the sub-lease is gone writes none
+- A locked call prints a line to stderr for each expiry it ran, naming the sub-lease and the deadline. A call that
+  cannot use a record warns with the file's path
+- A `list` that reads without the lock drops a sub-lease past its deadline from its leases and from the parent's
+  `delegated`, so the parent reads as owner, and warns on stderr that the sub-lease counts as ended. The JSON has no
+  marker for it
+- A refresh under a recall in force returns the deadline in its result. `acquire --wait` retries on it, so an equal-key
+  refresh waits for the expiry and exits 0, or 11 when other delegations remain. A wait that ends before the deadline
+  exits 10. Without `--wait` the delegation line ends with `recalled until <deadline>`
+- `recall` prints an `acquire --wait` command on the parent's whole key set. The wait is the time to the deadline
+  rounded up to a second, plus 10 seconds, so the last attempt runs after the deadline
+- `list` text and `list --json` show a pending recall on the sub-lease. The schema moved from 1.5 to 1.6
+- The hook's recall warning, the recall refusal kind, the rings, and the node mirror are not built. They are M2, M3,
+  and M4
+
 ### M2: Recall in the git hook
 
 **Status:** NOT STARTED
@@ -311,6 +352,8 @@ None.
   and names no command, and passes the parent there
 - Before the deadline, the hook passes the sub-lessee's commits and prints the deadline on stderr
 - A recall record the hook cannot use is reported and ignored
+- A recall whose parent record is unusable ends no child for the hook, which reports it. Amended 2026-11-13; see
+  Decision Log.
 
 ### M3: Rings for pending notices and requests
 
@@ -379,6 +422,15 @@ None.
   rings, but it gave no way for a ring path to recognize it. It now names the notice's cause, `shared-claim-refused`,
   and M3's check names it too. Nothing else about the rule changed. The bullet's marker moved from the 2026-10-24 entry
   to this one.
+- 2026-11-13 (autonomous): M1 built the CLI and the locked and unlocked readers, and no hook. M1's check said "A recall
+  whose parent record is unusable ends no child for a locked call, an unlocked `list`, or the hook, and each reports
+  it." The hook is M2, so M1 would have named a reader it does not build. M1's check now names the locked call and the
+  unlocked `list`, and M2 gets a check for the hook.
+- 2026-11-13 (autonomous): "How the deadline is enforced" said every locked call's repairs end each child "whose recall
+  is in force and past its deadline", and gave no rule for the instant of the deadline or for a dead sub-lessee. The
+  deadline is now inclusive, since a wait whose last attempt runs at its own timeout must see the child ended. A child
+  whose own holder is dead is left for the clearing that removes it, as the parent-gone repair leaves it, because
+  nobody can receive its tombstone. The marker on the decision moved from 2026-10-24 to this entry.
 
 ## References
 

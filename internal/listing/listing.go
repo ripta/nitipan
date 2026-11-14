@@ -20,8 +20,9 @@ import (
 // sub-leases: the parent link, the computed delegated list, the owner and grantor_of marks of a
 // filtered query, and the top-level requests and notices arrays. Minor 3 adds the top-level marks
 // array of fence marks. Minor 4 adds the top-level broker_leases array of user and shared leases.
-// Minor 5 adds the token of a broker lease.
-const SchemaVersion = "1.5"
+// Minor 5 adds the token of a broker lease. Minor 6 adds the recall object of a sub-lease that its
+// parent recalled with a deadline.
+const SchemaVersion = "1.6"
 
 // Output is the whole `list --json` document.
 type Output struct {
@@ -128,6 +129,12 @@ type Delegation struct {
 	Keys []string `json:"keys"`
 }
 
+// Recall is the pending deadline of a recalled sub-lease. Parent is the lease the recall was made from.
+type Recall struct {
+	Parent   string    `json:"parent"`
+	Deadline time.Time `json:"deadline"`
+}
+
 // Liveness is a lease's computed liveness. A consumer treats "unknown" as alive.
 type Liveness struct {
 	Status string `json:"status"`
@@ -173,6 +180,10 @@ type Lease struct {
 	// query overlaps. It is absent when there are none.
 	Owner     *bool    `json:"owner,omitempty"`
 	GrantorOf []string `json:"grantor_of,omitempty"`
+
+	// Recall is present on a sub-lease whose recall is pending: its parent gave it a deadline and the
+	// recall is neither cancelled nor past.
+	Recall *Recall `json:"recall,omitempty"`
 
 	// Remote is true on a resource lease written on another machine. Another machine's resource is a
 	// different resource, so a consumer that counts the holders of a name skips these.

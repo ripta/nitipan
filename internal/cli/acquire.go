@@ -211,7 +211,7 @@ func (a *app) printAcquired(res *lease.AcquireResult) error {
 		return nil
 	}
 
-	lines := delegationLines(res.Delegated)
+	lines := delegationLines(res.Delegated, res.Recalled)
 	fmt.Fprintln(a.deps.Stdout, strings.Join(lines, "\n"))
 
 	return fmt.Errorf("%w: you hold %s, but %s of it %s delegated, so you do not own all of it right now",
