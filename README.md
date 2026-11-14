@@ -158,7 +158,10 @@ When a sub-lease or its parent ends:
   sub-lease then stands alone. A recall whose parent record this nitipan cannot read ends nothing, and is reported.
   The holder's `acquire --wait` on exactly its own keys waits while a delegation is under a recall, and exits 11 without
   `--wait`, listing the deadline. An older nitipan never reads `recalls/`, so it keeps answering the sub-lessee as
-  covered past the deadline until a newer binary takes the lock.
+  covered past the deadline until a newer binary takes the lock. The node applies the same rule when it mirrors
+  `leases/`, so `nitipan who holds` reports the parent as owner of a recalled sub-lease's keys once the deadline
+  passes, before any locked call removes the sub-lease. A node built before this reports the ex-sub-lessee as owner
+  until then.
 - A sub-lessee's `release`, a forced `break` of the sub-lease, and a dead sub-lessee that nitipan clears each return the
   keys to the parent. The parent's record does not change. The parent gets a notice with the sub-lease's ID, its keys,
   and how it ended. The output of a `break` says the keys went back.

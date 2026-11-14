@@ -162,6 +162,16 @@ type Node struct {
 	seenQ  []string
 	forwrd map[string]Forwarder
 
+	// recallNext is the earliest deadline, in Unix nanoseconds, among the recalls in force the last
+	// snapshot found. Zero means none. The event loop resends the mirror when the clock reaches it.
+	recallNext atomic.Int64
+
+	// recallWarnMu guards recallWarned.
+	recallWarnMu sync.Mutex
+
+	// recallWarned holds the recall problems already warned about, so a heartbeat does not repeat them.
+	recallWarned map[string]string
+
 	book       *leaseBook
 	deadlineMu sync.Mutex
 	written    map[string]bool
@@ -357,7 +367,7 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 
 	defer cleanup()
 
-	changes, regChanges, err := n.watchState(sctx)
+	changes, regChanges, recallChanges, err := n.watchState(sctx)
 	if err != nil {
 		return err
 	}
@@ -368,7 +378,7 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 
 	n.maintain(sctx)
 
-	return n.runEventLoop(ctx, sctx, exe, streamErr, changes, regChanges)
+	return n.runEventLoop(ctx, sctx, exe, streamErr, changes, regChanges, recallChanges)
 }
 
 func (n *Node) setupSession(ctx context.Context) (sctx context.Context, streamErr <-chan error, cleanup func(), err error) {
@@ -414,7 +424,7 @@ func (n *Node) setupSession(ctx context.Context) (sctx context.Context, streamEr
 	return
 }
 
-func (n *Node) runEventLoop(ctx, sctx context.Context, exe fingerprint, streamErr <-chan error, changes, regChanges <-chan struct{}) error {
+func (n *Node) runEventLoop(ctx, sctx context.Context, exe fingerprint, streamErr <-chan error, changes, regChanges, recallChanges <-chan struct{}) error {
 	lastTick := n.clockNow()
 
 	beat := n.opts.Heartbeat
@@ -450,6 +460,10 @@ func (n *Node) runEventLoop(ctx, sctx context.Context, exe fingerprint, streamEr
 			if pending == nil {
 				pending = time.After(debounce)
 			}
+		case <-recallChanges:
+			if pending == nil {
+				pending = time.After(debounce)
+			}
 		case <-pending:
 			pending = nil
 
@@ -479,6 +493,12 @@ func (n *Node) runEventLoop(ctx, sctx context.Context, exe fingerprint, streamEr
 			n.deliverLate()
 			n.ringMail()
 			n.reportReads(sctx)
+
+			if n.recallDeadlineReached() {
+				if err := n.sendSnapshot(sctx); err != nil {
+					return err
+				}
+			}
 		case <-mailTick.C:
 			n.retryReport(sctx)
 			n.serviceMail(sctx)
@@ -490,21 +510,39 @@ func (n *Node) runEventLoop(ctx, sctx context.Context, exe fingerprint, streamEr
 	}
 }
 
-// watchState watches the leases directory, and the mail registrations. A new or changed registration
-// reports its session IDs to the broker without waiting for the next heartbeat, so mail sent to a fresh
-// session does not fail as "no such session".
-func (n *Node) watchState(ctx context.Context) (leases, registrations <-chan struct{}, err error) {
+// recallDeadlineReached reports whether the clock reached the earliest deadline of a recall in force.
+//
+// A deadline passing changes no file, so nothing else would resend the mirror. The caller only resends.
+// It writes no lease state and ends no sub-lease.
+//
+// Every snapshot sets the deadline again, so a resend re-arms the check.
+func (n *Node) recallDeadlineReached() bool {
+	next := n.recallNext.Load()
+
+	return next != 0 && n.opts.Now().UnixNano() >= next
+}
+
+// watchState watches the leases directory, the recalls directory, and the mail registrations. A new
+// or changed registration reports its session IDs to the broker without waiting for the next heartbeat,
+// so mail sent to a fresh session does not fail as "no such session". A new, changed, or cancelled
+// recall changes what the mirror says, so it resends too.
+func (n *Node) watchState(ctx context.Context) (leases, registrations, recalls <-chan struct{}, err error) {
 	leases, err = n.opts.Watch(ctx, n.leasesPath())
 	if err != nil {
-		return nil, nil, fmt.Errorf("watching the leases directory: %w", err)
+		return nil, nil, nil, fmt.Errorf("watching the leases directory: %w", err)
 	}
 
 	registrations, err = n.opts.Watch(ctx, n.opts.StateDir+"/"+mailbox.RegDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("watching the mail registrations: %w", err)
+		return nil, nil, nil, fmt.Errorf("watching the mail registrations: %w", err)
 	}
 
-	return leases, registrations, nil
+	recalls, err = n.opts.Watch(ctx, n.opts.StateDir+"/"+state.RecallsDir)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("watching the recalls directory: %w", err)
+	}
+
+	return leases, registrations, recalls, nil
 }
 
 func (n *Node) leasesPath() string {

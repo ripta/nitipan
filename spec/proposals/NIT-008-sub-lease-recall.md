@@ -116,7 +116,10 @@ Readers that take no lock:
   command, as the tombstone kind does. It never names `request`
 - A recall record a reader cannot use never ends a child. A locked call leaves the child alone and reports the file. The
   hook reports it and ignores it, as NIT-005 treats a fence mark it cannot read
-- NIT-004's node applies the rule when it mirrors `leases/`, so discovery reports the parent as owner past the deadline
+- NIT-004's node applies the rule when it mirrors `leases/`, so discovery reports the parent as owner past the deadline.
+  A deadline passing changes no file, so the node also watches `recalls/` and resends the mirror once its clock reaches
+  the earliest deadline of a recall in force. That resend only re-reads and sends. It writes no lease state. Amended
+  2026-11-14; see Decision Log
 
 Changing a recall:
 
@@ -435,10 +438,34 @@ ring have no live check, as before.
 
 ### M4: Recall in the node's mirror
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - Past a recall's deadline, and before any locked call ends the child, "who holds X" reports the parent as owner of the
   recalled keys
+
+**As built:**
+
+Nothing here ran against a real broker or a real discovery query. The node tests run the node against the in-process
+broker with a settable wall clock, and read the mirror the broker holds. No test sends a "who holds" query. The broker's
+discovery returns every overlapping mirror and computes no owner, so a child missing from the mirror is the whole change.
+The wire and the broker did not change.
+
+- The node's snapshot reads `recalls/` first, then scans `leases/`, as the hook and the rings do. It judges each recall
+  with `lease.JudgeRecall` and drops from the mirror each sub-lease whose recall is in force and past its deadline. The
+  deadline is inclusive. A sub-lease whose own holder is dead stays, as in the unlocked `list`, since the clearing that
+  removes it is a locked call's job. The node judges liveness with its own checker, and reads every holder as alive when
+  it has none
+- The node watches `recalls/` beside `leases/` and the registrations, so a new, changed, or cancelled recall resends the
+  mirror after the usual debounce
+- A deadline passing changes no file. Each snapshot records the earliest deadline among the recalls in force. The event
+  loop's 250 ms tick compares the node's wall clock, `Options.Now`, with it and resends the mirror once it is reached.
+  The next snapshot re-arms the check. A tick that compares a clock reads a clock step the way the locked calls do,
+  where a timer set for a computed delay would not. The check only re-reads and re-sends. It writes no lease state and
+  ends no sub-lease. A node timer that writes lease state stays rejected, as "How the deadline is enforced" says
+- A recall record the node cannot use, and a recall whose sub-lease or parent record it cannot use, end nothing. The node
+  warns once per problem and again if the problem changes, not on every heartbeat
+- Nothing in the node tests reaches the kqueue watcher on `recalls/`. A fake watcher stands in. The kqueue watcher already
+  watches a directory that does not exist yet
 
 ## Decision Log
 
@@ -498,6 +525,11 @@ ring have no live check, as before.
   deadline is now inclusive, since a wait whose last attempt runs at its own timeout must see the child ended. A child
   whose own holder is dead is left for the clearing that removes it, as the parent-gone repair leaves it, because
   nobody can receive its tombstone. The marker on the decision moved from 2026-10-24 to this entry.
+- 2026-11-14 (autonomous): M4 built the node's mirror. "Readers that take no lock" said the node applies the rule when
+  it mirrors `leases/`, and gave the node no way to learn that a deadline passed, since a deadline changes no file. The
+  node now also watches `recalls/` and resends the mirror once its clock reaches the earliest deadline of a recall in
+  force. The resend writes no lease state, so the rejected node timer is still rejected. The check runs on the event
+  loop's existing tick against `Options.Now`, not on a timer set for a computed delay.
 - 2026-11-14: ADR candidate (cuts across the system): no wake path lets a party wake a session's agent by an act that
   costs it nothing and that the session never granted, such as a refused claim. Undecided. Found in M3.
 - 2026-11-14: ADR candidate (cuts across the system): every wake signal, for mail, lease notices, or requests, only

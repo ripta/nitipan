@@ -19,7 +19,7 @@ recall a sub-lease with a deadline. Every reader enforces the deadline from a `r
 | NIT-008 M1 | DONE | `nitipan: recall a sub-lease with a deadline` |
 | NIT-008 M2 | DONE | `nitipan: refuse a recalled sub-lessee's commits in the git hook` |
 | NIT-008 M3 | DONE | `nitipan: ring wake paths for pending lease notices and requests` |
-| NIT-008 M4 | QUEUED | |
+| NIT-008 M4 | DONE | `nitipan: drop a recalled sub-lease from the node's mirror at its deadline` |
 
 ## Approved plan and authorization
 
@@ -234,3 +234,55 @@ ADR candidates, recorded as `Undecided` in NIT-008's Decision Log:
 
 One candidate was dismissed. `adr-impact` named wake paths judging from an unlocked, best-effort read, and that is an
 implementation tradeoff, not an invariant.
+
+### NIT-008 M4: Recall in the node's mirror
+
+DONE. Commit: `nitipan: drop a recalled sub-lease from the node's mirror at its deadline`, which carries the proposal
+and this report.
+
+Checks: `make fmt` clean. The final `make ci` passed (lint 0 issues; `internal/cli` 442s, `internal/node` 33.7s).
+`proposals.py freeze` with the three earlier row commits returns `[]`. `proposals.py check` reports only that NIT-008 is
+ready for `implemented` and its row for `history.md`. The row finish handles both.
+
+Test cost: the five new node tests run in about 1.8s alone (`-count=1 -p 1 -parallel 1`, `-race`). The deadline test
+waits on the node's 250ms tick through `eventually`, with a settable clock and no fixed sleep.
+
+Unowned failure, recorded per "Test Failures":
+
+- Original failure: one `make ci` run in the review round failed two `internal/cli` tests.
+  `TestLateRefusalReleasesTheNewAnchorOnTheNextCall` failed at `wide_test.go:540`, "an unknown outcome keeps the
+  anchor". `TestRetriedReleaseAfterALostReplyStillReleasesACreatedAnchor` failed at `wide_test.go:567`, "the node did
+  not pick up the claim request within 300ms". The run took 459s.
+- Attempts: on the M4 tree, both tests at `-count=20` under `-race` passed 40 of 40. A standalone full `internal/cli`
+  run passed in 447.7s, and the final `make ci` passed. On a scratch copy with the M3 node code, the same `-count=20`
+  run failed once, at `wide_test.go:540` with the same assertion.
+- Evidence: the first failure reproduces with no M4 code. M4's code is idle on that path, since the wide tests write no
+  recall. As a precaution, the deadline check now runs after request serving on each tick.
+- Uncertain: the 300ms pickup failure was not reproduced on the base. One base reproduction is not a statistical
+  comparison, and the root cause is not found. It looks like a timing flake under load.
+
+Implementer best guesses:
+
+- The resend checks the deadline on the node's existing 250ms request tick against its clock, not a computed timer.
+  It needs no new seam, follows clock steps, and resolves to 250ms. The node bullet under "Readers that take no lock"
+  is amended to say so.
+- The tests assert on the mirror the broker holds and send no "who holds" query. The broker returns every overlapping
+  mirror and elects no owner, so the mirror's contents are the whole change. The reviewer agreed.
+- A sub-lease whose own holder is dead stays in the mirror, as in the unlocked `list`.
+- Node warnings about unusable recall records are deduplicated once per change, since the mirror is rebuilt on every
+  heartbeat.
+
+Deviations: none from the plan. NIT-004 is untouched.
+
+Review findings:
+
+- A `recalls/` read error other than a missing directory failed the whole snapshot (PLAUSIBLE). Confirmed: with a
+  regular file at `recalls`, `snapshot()` failed, the session ended, and the restart hit the same error. Every lease's
+  mirror was lost. A regression test failed on the unfixed code. Fixed: the node warns once, treats the recall list as
+  empty, and still sends every lease.
+- Three test comments and a failure message said "timer" where the code uses the tick. Fixed.
+- Two node doc comments packed ideas or bound to the wrong field. Fixed.
+- `adr-impact`: ADR-01, ADR-04, ADR-07, and ADR-08 consistent. No conflict.
+
+ADR candidates: none pass. "The node never writes lease state" is false as stated, because the node already publishes
+notices under the lock. "Every reader applies the same recall rule" is the candidate the user declined on 2026-10-24.
