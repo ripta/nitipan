@@ -115,13 +115,22 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 	}
 
 	if c == nil {
+		// Recalls are read before the leases. An expiry removes the sub-lease and then its recall, so a
+		// reader in the other order can find the sub-lease still there and its recall gone.
+		recalls, recallErr := e.loadRecalls()
+
 		entries, err := e.load()
 		if err != nil {
 			return nil, err
 		}
 
 		c = &call{e: e, entries: entries}
-		res.Warnings = append(res.Warnings, c.hideEndedRecalls()...)
+
+		if recallErr != nil {
+			res.Warnings = append(res.Warnings, recallErr.Error())
+		} else {
+			res.Warnings = append(res.Warnings, c.hideEndedRecalls(recalls)...)
+		}
 	}
 
 	if req.Emit == nil {

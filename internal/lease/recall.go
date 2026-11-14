@@ -613,12 +613,7 @@ func (c *call) pendingRecalls() map[string]*record.Recall {
 // sub-lease whose recall is in force and past its deadline as ended, so the parent reads as the owner.
 // It writes nothing. The returned lines are warnings: the sub-leases it hid, and the recalls it could
 // not use.
-func (c *call) hideEndedRecalls() []string {
-	recalls, err := c.e.loadRecalls()
-	if err != nil {
-		return []string{err.Error()}
-	}
-
+func (c *call) hideEndedRecalls(recalls []*recallEntry) []string {
 	var out []string
 
 	for _, re := range recalls {

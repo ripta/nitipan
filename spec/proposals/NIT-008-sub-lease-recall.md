@@ -346,7 +346,7 @@ clock.
 
 ### M2: Recall in the git hook
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - The hook refuses an ex-sub-lessee's commits on recalled keys past the deadline, with a refusal that quotes the recall
   and names no command, and passes the parent there
@@ -354,6 +354,36 @@ clock.
 - A recall record the hook cannot use is reported and ignored
 - A recall whose parent record is unusable ends no child for the hook, which reports it. Amended 2026-11-13; see
   Decision Log.
+
+**As built:**
+
+Nothing here ran against real git. The checks drive `hook reference-transaction` over a fake process table and a
+settable clock, with the touched paths fixed by a `Deps.Touched` seam that defaults to the real git work. The seam is
+new. No test reaches git's own calling of the hook.
+
+- The judge reads `recalls/` when it is built and judges each recall with `lease.JudgeRecall`, the rule the locked calls
+  use. A sub-lease past its deadline is marked removed in the judge's own copy of the records, so the parent reads as
+  the owner of its keys and the parent's commits pass. The state directory is not written
+- `RefusedRecalled` is the new refusal kind. It is checked after fence marks and tombstones, before the owner check,
+  for the holder of the ended sub-lease only. Its message quotes the deadline and the parent's holder, says the
+  sub-lease no longer exists, and names no command. A caller that holds both the sub-lease and the parent is never
+  refused by it
+- Before the deadline the sub-lessee's commits pass. When every path of the update passes, the hook prints one stderr
+  line per recall the update fell under, with the deadline. A refused update prints no such line
+- A recall record the hook cannot use, and a recall whose parent record it cannot use, go into the judge's warnings and
+  end no sub-lease. An unusable parent record also covers every path as an unusable record, so the sub-lessee's commit
+  there is refused with the unusable kind and not the recall kind
+- A sub-lease whose own holder is dead is not hidden, as in the unlocked `list`. A dead holder's record never refuses,
+  so the parent passes there either way
+- The hook and the unlocked `list` read `recalls/` before the leases, and the hook reads the leases before the
+  tombstones. An expiry publishes the tombstone, removes the sub-lease, and drops the recall last. A reader that read
+  the recall last could find the sub-lease still standing with its recall gone, and pass the ex-sub-lessee once. In this
+  order a sub-lease the read still finds has its recall in hand, and one already removed has its tombstone. A test
+  cannot interleave a read with an expiry, so none pins the order
+- Sub-leases do not nest, so a sub-lease past its deadline is never a parent whose own recall the judge must re-parent
+- NIT-005 and NIT-007 needed no amendment. NIT-005 already says a sub-lease past an in-force recall deadline is not live,
+  and its refusal text for a tombstone or mark still holds. NIT-007 already says the git hook's recall warning is not a
+  mail ring
 
 ### M3: Rings for pending notices and requests
 

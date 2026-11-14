@@ -220,6 +220,7 @@ and refuses it when it touches a path that:
 - a record covers whose holder's liveness is unknown, or that nitipan cannot use
 - an undelivered tombstone addressed to the caller lists
 - a fence mark addressed to the caller guards
+- a sub-lease of the caller ended at the deadline of its recall, which gives the keys back to the parent
 
 A path no live record covers passes, because a lease is not required to commit. A dead holder's record does not refuse.
 A caller with no agent variables is the user's own terminal and is never refused. A caller with agent variables and no
@@ -233,7 +234,12 @@ commit and a pin, `git update-ref refs/nitipan/salvage/<id> <sha>`, that keeps i
 outside `refs/heads`, so the hook lets it through. A pinned commit landed on a branch later is still checked.
 
 Each refusal kind has its own message. A refusal for a lease that ended quotes how it ended and names no command, and
-says to report to the user.
+says to report to the user. The recall refusal quotes the recall's deadline and the parent's holder in the same way.
+
+The hook reads recalls without the lock. It applies the same rule as `list`. A sub-lease past its recall's deadline
+counts as ended, so the parent owns its keys and the parent's commits pass. Before the deadline, the hook passes the sub-lessee's
+commits and prints the deadline on stderr. That line writes nothing and consumes nothing. A recall record the hook cannot
+use, and a recall whose parent record it cannot use, end no sub-lease. The hook reports each and ignores the recall.
 
 The hook goes into the directory git uses for hooks, so a linked worktree shares it. It goes into every initialized
 submodule too. An existing `reference-transaction` hook is kept and chained, and `setup git --uninstall <checkout>` puts

@@ -83,6 +83,10 @@ type Deps struct {
 	// variables that point git at another repository. Default: the git binary on PATH.
 	Git gitfence.Runner
 
+	// Touched works out the paths a ref transaction touches, for the git hook. Default: the git binary in
+	// the hook's environment and working directory.
+	Touched func([]gitfence.Update) ([]gitfence.RefTouch, error)
+
 	// LookPath finds nitipan on PATH, so the git hooks can bake the stable location and not the
 	// symlink-resolved one. Default: exec.LookPath.
 	LookPath func(string) (string, error)
@@ -131,6 +135,10 @@ func (d Deps) withDefaults() Deps {
 
 	if d.Git == nil {
 		d.Git = gitfence.ExecClean
+	}
+
+	if d.Touched == nil {
+		d.Touched = gitfence.New().Touched
 	}
 
 	if d.LookPath == nil {

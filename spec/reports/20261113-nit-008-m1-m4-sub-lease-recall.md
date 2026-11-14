@@ -17,7 +17,7 @@ recall a sub-lease with a deadline. Every reader enforces the deadline from a `r
 | Milestone | Run status | Commits |
 |-----------|------------|---------|
 | NIT-008 M1 | DONE | `nitipan: recall a sub-lease with a deadline` |
-| NIT-008 M2 | QUEUED | |
+| NIT-008 M2 | DONE | `nitipan: refuse a recalled sub-lessee's commits in the git hook` |
 | NIT-008 M3 | QUEUED | |
 | NIT-008 M4 | QUEUED | |
 
@@ -116,3 +116,50 @@ ADR candidates:
   storage mechanism serving ADR-04's minor rule, not an invariant of its own.
 
 Open: the README still says "ten commands", which was already out of date before this run.
+
+### NIT-008 M2: Recall in the git hook
+
+DONE. Commit: `nitipan: refuse a recalled sub-lessee's commits in the git hook`, which carries the proposal and this
+report.
+
+Checks: `make fmt` clean, `make ci` passes (lint 0 issues; `internal/cli` about 435s under `-race`). The first `make ci`
+of the fix round failed on an errcheck in a new test. The fix is in, and the rerun passed. `proposals.py check` and
+`proposals.py freeze --row-commit` for M1's commit both return `[]`. No unowned failures.
+
+Test cost: the first round's four hook recall tests ran in 1.9s alone under `-race`. The fix round's run used a filter
+that also matched the older hook tests. That run took 143s and is not a figure for the new tests alone.
+
+Implementer best guesses:
+
+- A `Deps.Touched` seam in the CLI, following `Deps.Git`, so hook tests feed touched paths without real git. The plan
+  named no seam. The alternative is real-git end-to-end tests with on-disk deadline edits.
+- With an unusable parent record, the hook warns that the recall is not enforced. NIT-005's unusable kind still refuses
+  the sub-lessee, because that record's footprint covers every path. The M2 check says only "ends no child and reports
+  it".
+- The pre-deadline line prints only when the whole update passes, once per recall, and never for the parent's holder.
+- A caller holding both the parent and the sub-lease is never refused by the recall kind and gets no notice.
+- A dead sub-lessee is left as is, matching the unlocked `list`.
+
+Deviations: none from the proposal or the plan. NIT-005 and NIT-007 already describe the recall refusal and the hook's
+deadline line, so neither needed a correction. The reviewer confirmed both.
+
+Review findings:
+
+- Several As built claims had no test (plan gap). Fixed with one table-driven test and one count test. They cover a
+  caller holding both leases, a refused update printing no line, one line per recall across two paths, a dead
+  sub-lessee, and a recall against a mark and against a tombstone. The unusable-parent test now asserts `Refused`. No
+  claim turned out false. The dead-sub-lessee claim is barely observable, so As built was reworded to say the record
+  never refuses either way.
+- The unlocked read order let an expiry slip between reads (PLAUSIBLE). Confirmed by reading. Entries and tombstones
+  read before the tombstone was published, plus recalls read after the drop, showed a live sub-lease with no recall.
+  The ex-sub-lessee would pass once. Fixed: the hook and the unlocked `list` now read recalls first, then entries,
+  tombstones, and marks. A test cannot interleave a read with an expiry. The test pins the fix, not the bug, and As
+  built says so. Residue: a recall read just before a cancel that lands exactly at the deadline could show a child the
+  cancel saved as ended, to one unlocked reader. Unlocked readers write nothing, so the next read corrects it.
+- Nested recalls would mislabel a notice (PLAUSIBLE). Not confirmed: sub-leases do not nest, since a record with a
+  `parent` has no delegations. Noted in As built.
+- `recalledCause` ignores a grandchild's ownership (PLAUSIBLE). Not confirmed, for the same reason. No change.
+- Doc comments on two hook helpers packed several ideas, and one README sentence stacked clauses. Both fixed.
+- `adr-impact`: ADR-03, ADR-04, ADR-06, and ADR-07 consistent. No conflict.
+
+ADR candidates: none new. The lock-free recall rule is the candidate the user declined on 2026-10-24.
