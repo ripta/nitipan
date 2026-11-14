@@ -8,7 +8,6 @@ import (
 
 	"github.com/space-armada/nitipan/internal/handoff"
 	"github.com/space-armada/nitipan/internal/lease"
-	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/wire"
@@ -32,7 +31,7 @@ func (n *Node) snapshot() (wire.Snapshot, error) {
 		n.warn(fmt.Sprintf("listing the derived entries: %v", err))
 	}
 
-	recalls, recallsErr := n.readRecalls(dir)
+	recalls, recallsErr := lease.ReadRecalls(dir)
 
 	files, err := dir.Scan(state.LeasesDir)
 	if err != nil {
@@ -42,13 +41,13 @@ func (n *Node) snapshot() (wire.Snapshot, error) {
 	budget := &deriveBudget{until: time.Now().Add(n.deriveBudget())}
 	leases := make([]wire.MirroredLease, 0, len(files))
 	present := make(map[string]bool, len(files))
-	views := make(map[string]lease.RecallLease, len(files))
+	records := make(map[string]*record.Record, len(files))
 
 	for _, f := range files {
 		present[f.ID] = true
 
 		m, rec := mirrorOf(f)
-		views[f.ID] = n.viewOf(rec)
+		records[f.ID] = rec
 
 		if rec != nil {
 			m.Derived = n.derivedFor(rec, budget)
@@ -61,7 +60,7 @@ func (n *Node) snapshot() (wire.Snapshot, error) {
 
 	sort.Slice(leases, func(i, j int) bool { return leases[i].ID < leases[j].ID })
 
-	judged := n.applyRecalls(leases, recalls, recallsErr, views)
+	judged := n.applyRecalls(leases, recalls, recallsErr, n.recallViews(records))
 
 	if judged.next.IsZero() {
 		n.recallNext.Store(0)
@@ -128,7 +127,7 @@ type recalledOut struct {
 //
 // The node never writes lease state here. The locked call that finds the deadline passed removes the
 // sub-lease, and this only keeps discovery from saying the ex-sub-lessee still owns the keys.
-func (n *Node) applyRecalls(leases []wire.MirroredLease, recalls []*mirroredRecall, recallsErr error, views map[string]lease.RecallLease) recalledOut {
+func (n *Node) applyRecalls(leases []wire.MirroredLease, recalls []*lease.RecallEntry, recallsErr error, view func(id string) lease.RecallLease) recalledOut {
 	out := recalledOut{leases: leases}
 	now := n.opts.Now()
 	ended := map[string]bool{}
@@ -138,27 +137,25 @@ func (n *Node) applyRecalls(leases []wire.MirroredLease, recalls []*mirroredReca
 		warned[""] = fmt.Sprintf("%v, so no recall ends a sub-lease in the mirror", recallsErr)
 	}
 
-	for _, rc := range recalls {
-		if rc.rec == nil {
-			warned[rc.id] = fmt.Sprintf("the recall record %s/%s.json cannot be used by this node (%s), so it ends no sub-lease",
-				state.RecallsDir, rc.id, rc.why)
+	for _, j := range lease.JudgeRecalls(recalls, view, now) {
+		rc := j.Entry
+
+		if rc.Bad != nil {
+			warned[rc.ID] = fmt.Sprintf("the recall record %s/%s.json cannot be used by this node (%s), so it ends no sub-lease",
+				state.RecallsDir, rc.ID, rc.Bad.Reason)
 
 			continue
 		}
 
-		verdict := lease.JudgeRecall(rc.rec, views[rc.rec.ID], views[rc.rec.Parent], now)
-
-		switch verdict.Status {
-		case lease.RecallUnusable:
-			warned[rc.id] = fmt.Sprintf("the recall of sub-lease %s is not enforced in the mirror: %s", rc.id, verdict.Why)
-		case lease.RecallInForce:
-			if out.next.IsZero() || rc.rec.Deadline.Before(out.next) {
-				out.next = rc.rec.Deadline
+		switch {
+		case j.Verdict.Status == lease.RecallUnusable:
+			warned[rc.ID] = fmt.Sprintf("the recall of sub-lease %s is not enforced in the mirror: %s", rc.ID, j.Verdict.Why)
+		case j.Verdict.Status == lease.RecallInForce:
+			if out.next.IsZero() || rc.Rec.Deadline.Before(out.next) {
+				out.next = rc.Rec.Deadline
 			}
-		case lease.RecallPastDeadline:
-			if views[rc.rec.ID].Live.Status != liveness.Dead {
-				ended[rc.rec.ID] = true
-			}
+		case j.Ended:
+			ended[rc.Rec.ID] = true
 		}
 	}
 
@@ -196,58 +193,26 @@ func (n *Node) warnRecalls(now map[string]string) {
 	n.recallWarned = now
 }
 
-// mirroredRecall is one file in recalls/. The record is nil when this binary cannot use it, and why
-// says so.
-type mirroredRecall struct {
-	id  string
-	rec *record.Recall
-	why string
-}
+// recallViews shows the scanned lease files to the judgement of a recall. A holder's liveness can cost
+// a directory read or a database query, so it is looked up only for a lease some recall names, and
+// once per snapshot.
+func (n *Node) recallViews(records map[string]*record.Record) func(id string) lease.RecallLease {
+	seen := map[string]lease.RecallLease{}
 
-// readRecalls reads every file in recalls/. It runs before the leases are scanned. An expiry removes
-// the sub-lease and drops the recall last, so a sub-lease the later scan still finds has its recall
-// in hand here, and one the scan no longer finds is gone.
-func (n *Node) readRecalls(dir *state.Dir) ([]*mirroredRecall, error) {
-	files, err := dir.Scan(state.RecallsDir)
-	if err != nil {
-		return nil, fmt.Errorf("reading the recalls: %w", err)
-	}
-
-	out := make([]*mirroredRecall, 0, len(files))
-
-	for _, f := range files {
-		mr := &mirroredRecall{id: f.ID}
-
-		rc, err := record.DecodeRecall(f.Data)
-
-		var bad *record.UnusableError
-
-		switch {
-		case f.BadName:
-			mr.why = "the file name is not a lease ID"
-		case errors.As(err, &bad):
-			mr.why = string(bad.Reason)
-		case err != nil:
-			mr.why = err.Error()
-		case rc.ID != f.ID:
-			mr.why = "the record's ID differs from its file name"
-		default:
-			mr.rec = rc
+	return func(id string) lease.RecallLease {
+		if v, ok := seen[id]; ok {
+			return v
 		}
 
-		out = append(out, mr)
+		rec, exists := records[id]
+		v := lease.RecallLease{Exists: exists, Rec: rec}
+
+		if rec != nil && n.opts.Checker != nil {
+			v.Live = n.opts.Checker.Check(rec.Envelope)
+		}
+
+		seen[id] = v
+
+		return v
 	}
-
-	return out, nil
-}
-
-// viewOf shows a scanned lease file to the judgement of a recall.
-func (n *Node) viewOf(rec *record.Record) lease.RecallLease {
-	v := lease.RecallLease{Exists: true, Rec: rec}
-
-	if rec != nil && n.opts.Checker != nil {
-		v.Live = n.opts.Checker.Check(rec.Envelope)
-	}
-
-	return v
 }

@@ -68,7 +68,7 @@ that no caller has asked for.
 
 Decision (autonomous): no timer. The deadline is stored beside the sub-lease, and every new-binary reader enforces it
 when it reads. "Sub-leases at machine reach" left both listed candidates without a lease to act on, since a `machine`
-sub-lease has no broker term. Amended 2026-11-13; see Decision Log.
+sub-lease has no broker term.
 
 The recall record:
 
@@ -401,7 +401,7 @@ new. No test reaches git's own calling of the hook.
 
 **As built:**
 
-The Claude Code waiter and the opencode plugin ran against the real opencode, and the Codex turn hook and `codex queue`
+The opencode plugin ran against the real opencode, and the Codex turn hook and `codex queue`
 against the real Codex, with the fake model. The node's socket and queue rings ran only against a fixture executable.
 The live checks cannot start a node, since the node rings only over an HTTPS broker. The Claude Code waiter and socket
 ring have no live check, as before.
@@ -451,10 +451,16 @@ discovery returns every overlapping mirror and computes no owner, so a child mis
 The wire and the broker did not change.
 
 - The node's snapshot reads `recalls/` first, then scans `leases/`, as the hook and the rings do. It judges each recall
-  with `lease.JudgeRecall` and drops from the mirror each sub-lease whose recall is in force and past its deadline. The
+  with `lease.JudgeRecalls` and drops from the mirror each sub-lease whose recall is in force and past its deadline. The
   deadline is inclusive. A sub-lease whose own holder is dead stays, as in the unlocked `list`, since the clearing that
   removes it is a locked call's job. The node judges liveness with its own checker, and reads every holder as alive when
-  it has none
+  it has none. It looks a holder up only for a lease some recall names, since a session check can read a directory or a
+  database, and it does that once per snapshot
+- The unlocked `list`, the hook's judge, the ring view, and the node all read recalls with `lease.ReadRecalls` and judge
+  them with `lease.JudgeRecalls`. The usable-recall test and the dead-sub-lessee rule live there only. Each reader keeps
+  its own warnings. The judgement uses one fixed view of the leases, so a verdict does not depend on file order. The
+  unlocked `list` and the ring view used to remove an ended sub-lease while they still iterated, which let a nested
+  sub-lease's verdict change with file order
 - The node watches `recalls/` beside `leases/` and the registrations, so a new, changed, or cancelled recall resends the
   mirror after the usual debounce
 - A deadline passing changes no file. Each snapshot records the earliest deadline among the recalls in force. The event
@@ -529,7 +535,9 @@ The wire and the broker did not change.
   it mirrors `leases/`, and gave the node no way to learn that a deadline passed, since a deadline changes no file. The
   node now also watches `recalls/` and resends the mirror once its clock reaches the earliest deadline of a recall in
   force. The resend writes no lease state, so the rejected node timer is still rejected. The check runs on the event
-  loop's existing tick against `Options.Now`, not on a timer set for a computed delay.
+  loop's existing tick against `Options.Now`, not on a timer set for a computed delay. The "How the deadline is
+  enforced" decision carried a marker for each of this entry and the 2026-11-13 one. The 2026-11-13 marker moved to
+  this entry, so the decision has one.
 - 2026-11-14: ADR candidate (cuts across the system): no wake path lets a party wake a session's agent by an act that
   costs it nothing and that the session never granted, such as a refused claim. Undecided. Found in M3.
 - 2026-11-14: ADR candidate (cuts across the system): every wake signal, for mail, lease notices, or requests, only

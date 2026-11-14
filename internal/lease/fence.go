@@ -128,10 +128,12 @@ func (e *Engine) NewJudge(h adapter.Holder) (*Judge, error) {
 // lookup reads the parent as the owner.
 //
 // A recall that cannot be used, or whose parent cannot be used, ends no sub-lease.
-func (j *Judge) readRecalls(recalls []*recallEntry) {
+func (j *Judge) readRecalls(recalls []*RecallEntry) {
 	var ended []*recallState
 
-	for _, re := range recalls {
+	for _, jr := range j.c.judgeRecalls(recalls) {
+		re := jr.Entry
+
 		if re.Bad != nil {
 			j.recallWarnings = append(j.recallWarnings, fmt.Sprintf("the recall record %s cannot be used by this nitipan (%s), "+
 				"so it ends no sub-lease. Upgrade nitipan or ask the user", re.Path, re.Bad.Reason))
@@ -139,19 +141,14 @@ func (j *Judge) readRecalls(recalls []*recallEntry) {
 			continue
 		}
 
-		verdict := j.c.judgeRecall(re.Rec)
-
-		switch verdict.Status {
-		case RecallUnusable:
+		switch {
+		case jr.Verdict.Status == RecallUnusable:
 			j.recallWarnings = append(j.recallWarnings, fmt.Sprintf("the recall of sub-lease %s is not enforced: %s. Upgrade nitipan "+
-				"or ask the user", re.ID, verdict.Why))
-		case RecallInForce:
+				"or ask the user", re.ID, jr.Verdict.Why))
+		case jr.Verdict.Status == RecallInForce:
 			j.pending = append(j.pending, j.recallStateOf(re.Rec))
-		case RecallPastDeadline:
+		case jr.Ended:
 			rs := j.recallStateOf(re.Rec)
-			if rs.kid.Live.Status == liveness.Dead {
-				continue
-			}
 
 			j.ended = append(j.ended, rs)
 			ended = append(ended, rs)

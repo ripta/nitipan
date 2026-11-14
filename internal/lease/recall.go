@@ -89,32 +89,39 @@ func (v RecallVerdict) Pending() bool {
 	return v.Status == RecallInForce || v.Status == RecallPastDeadline
 }
 
-// recallEntry is one file in recalls/. Rec is nil when the file cannot be used, and Bad says why.
-type recallEntry struct {
+// RecallEntry is one file in recalls/. Rec is nil when the file cannot be used, and Bad says why.
+type RecallEntry struct {
 	ID   string
 	Path string
 	Rec  *record.Recall
 	Bad  *record.UnusableError
 }
 
-// loadRecalls reads and classifies every file in recalls/, in file-name order. It needs no lock.
-func (e *Engine) loadRecalls() ([]*recallEntry, error) {
-	files, err := e.Dir.Scan(state.RecallsDir)
+// ReadRecalls reads and classifies every file in recalls/, in file-name order. It needs no lock.
+func ReadRecalls(dir *state.Dir) ([]*RecallEntry, error) {
+	files, err := dir.Scan(state.RecallsDir)
 	if err != nil {
 		return nil, fmt.Errorf("reading the recalls: %w", err)
 	}
 
-	out := make([]*recallEntry, 0, len(files))
+	out := make([]*RecallEntry, 0, len(files))
 
 	for _, f := range files {
-		out = append(out, e.classifyRecall(f))
+		out = append(out, ClassifyRecall(dir, f))
 	}
 
 	return out, nil
 }
 
-func (e *Engine) classifyRecall(f state.File) *recallEntry {
-	re := &recallEntry{ID: f.ID, Path: filepath.Join(e.Dir.Path(), state.RecallsDir, f.ID+".json")}
+// loadRecalls reads the recalls of the engine's state directory.
+func (e *Engine) loadRecalls() ([]*RecallEntry, error) {
+	return ReadRecalls(e.Dir)
+}
+
+// ClassifyRecall decides whether one file in recalls/ is usable. Every reader shares this rule, so
+// the reason it gives for an unusable recall is the same everywhere.
+func ClassifyRecall(dir *state.Dir, f state.File) *RecallEntry {
+	re := &RecallEntry{ID: f.ID, Path: filepath.Join(dir.Path(), state.RecallsDir, f.ID+".json")}
 
 	switch rc, err := record.DecodeRecall(f.Data); {
 	case f.BadName:
@@ -130,10 +137,44 @@ func (e *Engine) classifyRecall(f state.File) *recallEntry {
 	return re
 }
 
+// RecallJudgement is a recall with the verdict reached on it. A recall that cannot be used has no
+// verdict, and its Verdict is the zero value, so a reader checks Entry.Bad first.
+//
+// Ended is true when the recall is past its deadline and its sub-lessee can still receive the news.
+// A sub-lease whose own holder is dead is left for the clearing that removes it, since nobody can
+// receive its tombstone.
+type RecallJudgement struct {
+	Entry   *RecallEntry
+	Verdict RecallVerdict
+	Ended   bool
+}
+
+// JudgeRecalls judges every recall against one fixed view of the leases, so a verdict does not
+// depend on the order of the files. The readers that take no lock all call it, and then apply the
+// verdicts their own way.
+func JudgeRecalls(entries []*RecallEntry, view func(id string) RecallLease, now time.Time) []RecallJudgement {
+	out := make([]RecallJudgement, 0, len(entries))
+
+	for _, re := range entries {
+		j := RecallJudgement{Entry: re}
+
+		if re.Rec != nil {
+			kid := view(re.Rec.ID)
+
+			j.Verdict = JudgeRecall(re.Rec, kid, view(re.Rec.Parent), now)
+			j.Ended = j.Verdict.Status == RecallPastDeadline && kid.Live.Status != liveness.Dead
+		}
+
+		out = append(out, j)
+	}
+
+	return out
+}
+
 const reasonBadRecallName record.Reason = "file name is not a lease ID"
 
 // recallByID reads the recall of one sub-lease. It is nil when there is none.
-func (c *call) recallByID(id string) (*recallEntry, error) {
+func (c *call) recallByID(id string) (*RecallEntry, error) {
 	if !state.ValidID(id) {
 		return nil, nil
 	}
@@ -147,7 +188,7 @@ func (c *call) recallByID(id string) (*recallEntry, error) {
 		return nil, err
 	}
 
-	return c.e.classifyRecall(state.File{ID: id, Data: data}), nil
+	return ClassifyRecall(c.e.Dir, state.File{ID: id, Data: data}), nil
 }
 
 // leaseView shows an entry to the judgement of a recall.
@@ -158,6 +199,11 @@ func (c *call) leaseView(id string) RecallLease {
 	}
 
 	return RecallLease{Exists: true, Rec: en.Rec, Live: en.Live}
+}
+
+// judgeRecalls judges each recall against the leases as the call stands, without removing any.
+func (c *call) judgeRecalls(recalls []*RecallEntry) []RecallJudgement {
+	return JudgeRecalls(recalls, c.leaseView, c.e.Now())
 }
 
 // judgeRecall judges a recall against the leases as the call stands.
@@ -275,7 +321,7 @@ func (c *call) recallDead(kid *entry, res *RecallResult) (*RecallResult, error) 
 
 // rewritableRecall reads the recall a sub-lease already has and refuses one this binary must not
 // rewrite: a record it cannot use, or one of a higher minor. The refusal names the upgrade.
-func (c *call) rewritableRecall(id string) (*recallEntry, error) {
+func (c *call) rewritableRecall(id string) (*RecallEntry, error) {
 	re, err := c.recallByID(id)
 	if err != nil || re == nil {
 		return nil, err
@@ -474,7 +520,7 @@ func (c *call) repairRecalls() error {
 	return nil
 }
 
-func (c *call) repairRecall(re *recallEntry) error {
+func (c *call) repairRecall(re *RecallEntry) error {
 	rc := re.Rec
 
 	if rc.State == record.RecallCancelling {
@@ -613,10 +659,15 @@ func (c *call) pendingRecalls() map[string]*record.Recall {
 // sub-lease whose recall is in force and past its deadline as ended, so the parent reads as the owner.
 // It writes nothing. The returned lines are warnings: the sub-leases it hid, and the recalls it could
 // not use.
-func (c *call) hideEndedRecalls(recalls []*recallEntry) []string {
-	var out []string
+func (c *call) hideEndedRecalls(recalls []*RecallEntry) []string {
+	var (
+		out   []string
+		ended []*entry
+	)
 
-	for _, re := range recalls {
+	for _, j := range c.judgeRecalls(recalls) {
+		re := j.Entry
+
 		if re.Bad != nil {
 			out = append(out, fmt.Sprintf("the recall record %s cannot be used by this nitipan (%s), so it ends no sub-lease",
 				re.Path, re.Bad.Reason))
@@ -624,22 +675,19 @@ func (c *call) hideEndedRecalls(recalls []*recallEntry) []string {
 			continue
 		}
 
-		verdict := c.judgeRecall(re.Rec)
-
-		switch verdict.Status {
-		case RecallUnusable:
-			out = append(out, fmt.Sprintf("the recall of sub-lease %s is not enforced: %s", re.ID, verdict.Why))
-		case RecallPastDeadline:
-			kid := c.entryByID(re.ID)
-			if kid.Live.Status == liveness.Dead {
-				continue
-			}
-
-			kid.removed = true
+		switch {
+		case j.Verdict.Status == RecallUnusable:
+			out = append(out, fmt.Sprintf("the recall of sub-lease %s is not enforced: %s", re.ID, j.Verdict.Why))
+		case j.Ended:
+			ended = append(ended, c.entryByID(re.ID))
 
 			out = append(out, fmt.Sprintf("sub-lease %s is past the deadline of its recall and counts as ended, so lease %s "+
 				"owns its keys. The next locked nitipan call removes it", re.ID, re.Rec.Parent))
 		}
+	}
+
+	for _, kid := range ended {
+		kid.removed = true
 	}
 
 	c.entries = slices.DeleteFunc(c.entries, func(en *entry) bool { return en.removed })

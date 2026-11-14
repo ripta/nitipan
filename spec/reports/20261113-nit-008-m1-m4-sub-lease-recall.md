@@ -286,3 +286,39 @@ Review findings:
 
 ADR candidates: none pass. "The node never writes lease state" is false as stated, because the node already publishes
 notices under the lock. "Every reader applies the same recall rule" is the candidate the user declined on 2026-10-24.
+
+## Row review
+
+Commit: `nitipan: share one recall judgement across every reader that takes no lock`, which carries the proposal and
+this report.
+
+The reviewer found no blocking defect. All five readers apply the one recall rule with an inclusive deadline, skip a
+dead sub-lessee, and read recalls before leases.
+
+Findings:
+
+- The deadline decision carried two Amended markers. Fixed: one marker, dated 2026-11-14, and that day's Decision Log
+  entry says the earlier marker moved to it.
+- M3's As built said the Claude Code waiter ran live. It did not. Fixed: only the opencode plugin and the Codex paths
+  ran live.
+- The README said "ten commands" where there are eleven, and its `list --json` history was wrong about its baseline.
+  Fixed, and two over-wide paragraphs were rewrapped.
+- No test pinned the inclusive deadline across the hook, the unlocked `list`, and the ring. Fixed with one table test
+  at the deadline and one nanosecond before it. It runs in 1.45s alone under `-race`.
+- The node ran liveness for every lease on every snapshot (PLAUSIBLE). Confirmed: a session holder's liveness reads
+  registration files, and opencode's can read its database. Fixed: liveness runs only for leases a recall names, once
+  per snapshot. No regression test, since this is a cost cut with no new behavior.
+- Recall classification and the "ended recall" loop existed in several copies (PLAUSIBLE). Confirmed: unusable-reason
+  strings had already drifted between the node and the CLI. Fixed: one shared reader, classifier, and judgement in the
+  lease package serve the hook, the unlocked `list`, the ring view, and the node. Each reader keeps its own warnings
+  and read order. Lease and node tests passed before and after. The shared judgement uses one fixed view, so a nested
+  sub-lease's verdict no longer depends on file order. Sub-leases do not nest today, so no behavior changed.
+
+Checks: `make fmt` clean, `make ci` passes (`internal/cli` 431s). The known `wide_test.go` flake did not recur.
+`proposals.py freeze` with the four row commits returns `[]`.
+
+`adr-impact` on the row range raised a PLAUSIBLE tension with ADR-04's minor rule. An older binary that never reads
+`recalls/` stays more permissive about the sub-lessee's own claim past the deadline. This is dismissed as a conflict.
+The accepted proposal moved the deadline into a side record to satisfy the field rule, and it states this older-binary
+gap in "How the deadline is enforced" and Risks. It is listed for the user's review. `adr-impact` also named the ring
+ledger's skew rule as a weak candidate, and it fails the Architecture test as a format detail.

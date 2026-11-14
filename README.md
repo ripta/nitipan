@@ -15,7 +15,7 @@ fake model server. They need no manual steps and cost no model tokens.
 
 ## First version
 
-The first version runs on one machine, with no daemon. It has ten commands:
+The first version runs on one machine, with no daemon. It has eleven commands:
 
 - `acquire` claims a domain
 - `release` gives it up
@@ -179,9 +179,9 @@ When a sub-lease or its parent ends:
 the lease it asks to share. A sub-lease whose parent is dead or gone prints at the top level, with its stored `parent`
 link, until a locked call repairs it. A `list` that reads without the lock prints it that way too.
 
-`list --json` has schema version 1.6, an additive change over 1.2 that adds the `marks` array. The sub-lease fields
-below came in with 1.2, an additive change over 1.1. Consumers ignore fields they do not know. Every lease stays a
-top-level entry in `leases`, so a consumer of the earlier schema still sees all of them.
+`list --json` has schema version 1.6. Every minor version is an additive change. The sub-lease fields below came in
+with 1.2, the `marks` array with 1.3, and the `recall` object with 1.6. Consumers ignore fields they do not know. Every
+lease stays a top-level entry in `leases`, so a consumer of the earlier schema still sees all of them.
 
 - `parent` is on a sub-lease, and names its parent lease ID.
 - `delegated` is on a parent that has live sub-leases. It lists each one as `{"id": ..., "keys": [...]}`. It is
@@ -240,9 +240,10 @@ Each refusal kind has its own message. A refusal for a lease that ended quotes h
 says to report to the user. The recall refusal quotes the recall's deadline and the parent's holder in the same way.
 
 The hook reads recalls without the lock. It applies the same rule as `list`. A sub-lease past its recall's deadline
-counts as ended, so the parent owns its keys and the parent's commits pass. Before the deadline, the hook passes the sub-lessee's
-commits and prints the deadline on stderr. That line writes nothing and consumes nothing. A recall record the hook cannot
-use, and a recall whose parent record it cannot use, end no sub-lease. The hook reports each and ignores the recall.
+counts as ended, so the parent owns its keys and the parent's commits pass. Before the deadline, the hook passes the
+sub-lessee's commits and prints the deadline on stderr. That line writes nothing and consumes nothing. A recall record
+the hook cannot use, and a recall whose parent record it cannot use, end no sub-lease. The hook reports each and
+ignores the recall.
 
 The hook goes into the directory git uses for hooks, so a linked worktree shares it. It goes into every initialized
 submodule too. An existing `reference-transaction` hook is kept and chained, and `setup git --uninstall <checkout>` puts
