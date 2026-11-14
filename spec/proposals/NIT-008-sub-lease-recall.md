@@ -68,7 +68,7 @@ that no caller has asked for.
 
 Decision (autonomous): no timer. The deadline is stored beside the sub-lease, and every new-binary reader enforces it
 when it reads. "Sub-leases at machine reach" left both listed candidates without a lease to act on, since a `machine`
-sub-lease has no broker term.
+sub-lease has no broker term. Amended 2026-11-14; see Decision Log.
 
 The recall record:
 
@@ -118,8 +118,7 @@ Readers that take no lock:
   hook reports it and ignores it, as NIT-005 treats a fence mark it cannot read
 - NIT-004's node applies the rule when it mirrors `leases/`, so discovery reports the parent as owner past the deadline.
   A deadline passing changes no file, so the node also watches `recalls/` and resends the mirror once its clock reaches
-  the earliest deadline of a recall in force. That resend only re-reads and sends. It writes no lease state. Amended
-  2026-11-14; see Decision Log
+  the earliest deadline of a recall in force. That resend only re-reads and sends. It writes no lease state
 
 Changing a recall:
 
@@ -542,6 +541,11 @@ The wire and the broker did not change.
   costs it nothing and that the session never granted, such as a refused claim. Undecided. Found in M3.
 - 2026-11-14: ADR candidate (cuts across the system): every wake signal, for mail, lease notices, or requests, only
   signals, and only a read consumes. ADR-06 states this for mail alone. Undecided. Found in M3.
+- 2026-11-14: Correction of fact. The 2026-11-14 entry above says the "How the deadline is enforced" decision has one
+  marker. The text put that marker inside the readers bullet instead, which read "the earliest deadline of a recall in
+  force. That resend only re-reads and sends. It writes no lease state. Amended 2026-11-14; see Decision Log". The
+  decision paragraph, which ended "sub-lease has no broker term.", carried none. The marker now sits on the decision
+  paragraph, where the entry says it is. No decision changed.
 
 ## References
 
