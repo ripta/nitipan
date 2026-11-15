@@ -26,9 +26,12 @@ const hookInputLimit = 1 << 20
 // hookInput is what a hook or plugin sends on standard input. Codex sends more fields than these,
 // and they are ignored.
 type hookInput struct {
-	SessionID string `json:"session_id"`
-	Present   *bool  `json:"present"`
-	Executing *bool  `json:"executing"`
+	Event     string   `json:"hook_event_name"`
+	SessionID string   `json:"session_id"`
+	Present   *bool    `json:"present"`
+	Executing *bool    `json:"executing"`
+	Keys      []string `json:"keys"`
+	Sessions  []string `json:"sessions"`
 }
 
 // hookCmd registers the commands that agent hooks and plugins call, and the one that the git hook
@@ -57,6 +60,13 @@ func (a *app) hookCmd() *cobra.Command {
 		a.hookSub("session-end", a.runSessionEnd),
 		a.hookSub("presence", a.runPresence),
 		a.hookSub("execution", a.runExecution),
+		a.hookSub("mail-turn", a.runCodexMailTurn),
+		a.hookSub("mail-poll", func(in hookInput, h adapter.Holder, args []string) error { return a.pluginMail(in, h, args, "poll") }),
+		a.hookSub("mail-retry", func(in hookInput, h adapter.Holder, args []string) error { return a.pluginMail(in, h, args, "retry") }),
+		a.hookSub("mail-reminder", func(in hookInput, h adapter.Holder, args []string) error {
+			return a.pluginMail(in, h, args, "reminder")
+		}),
+		a.hookSub("mail-stop", func(in hookInput, h adapter.Holder, args []string) error { return a.pluginMail(in, h, args, "stop") }),
 		a.hookRefTransaction(),
 		a.hookPrePush(),
 	)
@@ -166,13 +176,19 @@ func (a *app) runSessionStart(in hookInput, host adapter.Holder, args []string) 
 		return err
 	}
 
-	return e.RegisterCodex(session.RegisterInput{
+	err = e.RegisterCodex(session.RegisterInput{
 		Host:       host,
 		HostArgs:   args,
 		Session:    in.SessionID,
 		CodexHome:  home,
 		Executable: exe,
 	})
+	if err != nil {
+		return err
+	}
+	host.SessionID = in.SessionID
+	_, err = a.registerMail(e.Dir.Path(), host)
+	return err
 }
 
 func (a *app) runSessionEnd(in hookInput, host adapter.Holder, _ []string) error {

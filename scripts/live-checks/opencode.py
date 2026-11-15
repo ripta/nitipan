@@ -94,6 +94,8 @@ R_SWEEP = "Sweep keeps what it must and removes dead files"
 SCRIPTED_TURNS = 0
 REAL_TURNS = 0
 MAX_REAL_TURNS = 0
+IGNORE_MAIL_RINGS = False
+MODEL_REQUESTS: list[dict] = []
 
 
 # The fake provider. reply() is pure so it can be tested without a socket.
@@ -123,6 +125,12 @@ def reply(request: dict) -> dict:
     # command so the resumed turn stays in flight long enough to observe.
     if not found and users and "server restarted" in users[-1]:
         found = next((f for f in (MARKER.search(u) for u in reversed(users)) if f), None)
+    if not found and users and "Run `nitipan mail read`" in users[-1]:
+        if IGNORE_MAIL_RINGS:
+            return {"kind": "text", "text": "ok"}
+        tool = next((n for n in names if n in ("shell", "bash")), "shell")
+        command = f"{shlex.quote(str(BIN))} mail read > {shlex.quote(str(WORK / 'mail-read.out'))}"
+        return {"kind": "tool", "name": tool, "arguments": json.dumps({"command": command})}
     if not found:
         return {"kind": "text", "text": "ok"}
     tool = next((n for n in names if n in ("shell", "bash")), None) or next(
@@ -185,6 +193,7 @@ class FakeHandler(BaseHTTPRequestHandler):
             request = json.loads(raw)
         except ValueError:
             request = {}
+        MODEL_REQUESTS.append(request)
         answer = reply(request)
         log("fake_request", path=self.path, tools=len(request.get("tools") or []), answer=answer["kind"],
             stream=bool(request.get("stream")))
@@ -1020,7 +1029,62 @@ def step_database() -> None:
           "skipped: same reason, and the real database is never touched")
 
 
+def step_mail() -> None:
+    directory = scratch("mail")
+    session = new_session("mail", directory)
+    tui = open_tui("mail", session, directory)
+    check("mail", "idle mail wake", "mail recipient TUI is open", tui is not None)
+    if tui is None:
+        raise RuntimeError("the mailbox test needs a live recipient TUI")
+    init = sh(session, f"{BIN} mail status", "mail-register")
+    check("mail", "idle mail wake", "opencode registers its mailbox", init.exit == 0, repr(init))
+    check("mail", "idle mail wake", "recipient is idle before mail", wait_idle(session))
+    message = common.store_mail(session, "opencode-mail-fixture-" + RUNID)
+    output = WORK / "mail-read.out"
+    consumed = wait_for(lambda: output.exists() and "opencode-mail-fixture-" + RUNID in output.read_text(), 45)
+    check("mail", "idle mail wake", "plugin wakes the idle session and it reads its mail", bool(consumed),
+          output.read_text() if output.exists() else tui.tail())
+    check("mail", "only a read consumes", "mail read removes the durable message", not message.exists())
+    tui.stop()
+
+
 # The plan. It is the single list the dry run prints and the driver walks.
+
+
+def step_mail_reminder() -> None:
+    global IGNORE_MAIL_RINGS
+    directory = scratch("mail-reminder")
+    session = new_session("mail-reminder", directory)
+    tui = open_tui("mail-reminder", session, directory)
+    if tui is None:
+        raise RuntimeError("mail reminder test needs a recipient TUI")
+    try:
+        init = sh(session, f"{BIN} mail status", "reminder-register")
+        check("mail-reminder", "later reminders", "recipient registers", init.exit == 0, repr(init))
+        IGNORE_MAIL_RINGS = True
+        message = common.store_mail(session, "unread-reminder-fixture-" + RUNID)
+        def wake_requests():
+            return [r for r in MODEL_REQUESTS if any(m.get("role") == "user" and
+                    "Run `nitipan mail read`" in message_text(m) for m in r.get("messages", [])[-1:])]
+        check("mail-reminder", "later reminders", "first wake reaches the idle session", bool(wait_for(wake_requests, 30)))
+        check("mail-reminder", "later reminders", "ignored wake leaves durable mail", wait_idle(session) and message.exists())
+        wake_count = len(wake_requests())
+        mark = len(MODEL_REQUESTS)
+        later = sh(session, "echo later-context", "reminder-later")
+        requests = MODEL_REQUESTS[mark:]
+        contexts = ["\n".join(message_text(m) for m in r.get("messages", []) if m.get("role") in ("system", "developer")) for r in requests]
+        check("mail-reminder", "later reminders", "later turn and post-tool model context repeat the reminder",
+              later.exit == 0 and len(contexts) >= 2 and all("Run `nitipan mail read`" in text for text in contexts),
+              f"requests={len(contexts)}; reminders={[('Run `nitipan mail read`' in text) for text in contexts]}")
+        check("mail-reminder", "later reminders", "reminders preserve mail and do not enqueue another wake",
+              message.exists() and len(wake_requests()) == wake_count)
+        IGNORE_MAIL_RINGS = False
+        read = sh(session, f"{BIN} mail read", "reminder-read")
+        check("mail-reminder", "later reminders", "explicit read consumes unread mail",
+              read.exit == 0 and "unread-reminder-fixture-" + RUNID in read.text and not message.exists(), repr(read))
+    finally:
+        IGNORE_MAIL_RINGS = False
+        tui.stop()
 
 
 @dataclass
@@ -1035,6 +1099,8 @@ class Step:
 STEPS = [
     Step("install", step_install, "make build, private config and fake provider, install plugins, start the server",
          [("0", R_PLUGINS)], always=True),
+    Step("mail-reminder", step_mail_reminder, "unread mail reminds in later turn/tool context without waking again"),
+    Step("mail", step_mail, "idle plugin wake followed by explicit mail read"),
     Step("plugins", step_plugins, "installed files and `opencode plugin list`", [("0", R_PLUGINS), ("13", R_PLUGINS)]),
     Step("headless", lambda: step_headless("2", "headless"), "acquire from a session no TUI has open fails",
          [("2", R_NOTUI)]),
@@ -1108,6 +1174,7 @@ def apply_cleanup() -> list[str]:
         except Exception as e:
             log("cleanup_error", what="fake provider", error=repr(e))
     sweep_marks()
+    common.sweep_mail()
     return [x["id"] for x in leases() if x["id"] in OWN]
 
 
@@ -1223,10 +1290,11 @@ def probe() -> int:
         if FAKE:
             FAKE.stop()
         sweep_marks()
+        common.sweep_mail()
 
 
 def main() -> int:
-    global MAX_REAL_TURNS, BASELINE
+    global MAX_REAL_TURNS, BASELINE, RESULTS_PATH
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--max-model-turns", type=int, default=0,
                         help="hard cap on real model turns. The harness uses none, so the default is 0")
@@ -1236,7 +1304,10 @@ def main() -> int:
     parser.add_argument("--probe", action="store_true",
                         help="check the parts that rest on source reading (private server, fake provider, "
                              "TUI under a pty) and exit")
+    parser.add_argument("--results", type=Path, help="write the primary results here instead of the historical report")
     opts = parser.parse_args()
+    if opts.results:
+        RESULTS_PATH = opts.results
     only = set(opts.only.split(",")) if opts.only else None
     if only and only - {s.name for s in STEPS}:
         parser.error(f"unknown step in --only: {sorted(only - {s.name for s in STEPS})}")

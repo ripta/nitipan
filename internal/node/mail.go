@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"slices"
 	"sort"
 	"strings"
@@ -465,7 +466,7 @@ func (n *Node) pendingRings() []pendingRing {
 
 	for _, r := range regs {
 		ad, ok := adapter.ByName(r.Agent)
-		if !ok || ad.Delivery.Push != adapter.PushSocket || !mailbox.Live(r, n.checker()) || n.waiterLive(r) {
+		if !ok || (ad.Delivery.Push != adapter.PushSocket && ad.Delivery.Push != adapter.PushCodexQueue) || !mailbox.Live(r, n.checker()) || n.waiterLive(r) {
 			continue
 		}
 
@@ -499,7 +500,12 @@ func (n *Node) waiterLive(r mailbox.Registration) bool {
 }
 
 func (n *Node) ringSocket(ad adapter.Adapter, r mailbox.Registration, keys []string) {
-	if r.Endpoint.Socket == "" {
+	if ad.Delivery.Push == adapter.PushCodexQueue {
+		if why := mailbox.CodexProblem(n.opts.CodexPath, n.opts.CodexHome, r.Endpoint.CodexHome); why != "" {
+			n.warn(why)
+			return
+		}
+	} else if r.Endpoint.Socket == "" {
 		return
 	}
 
@@ -535,7 +541,13 @@ func (n *Node) ringSocket(ad adapter.Adapter, r mailbox.Registration, keys []str
 		return
 	}
 
-	if err := ringDialer(r, len(fresh)); err != nil {
+	var ringErr error
+	if ad.Delivery.Push == adapter.PushCodexQueue {
+		ringErr = n.queueRing(r, len(fresh))
+	} else {
+		ringErr = ringDialer(r, len(fresh))
+	}
+	if err := ringErr; err != nil {
 		_ = mailbox.Unclaim(n.opts.StateDir, r.Identity, fresh)
 
 		n.ringMu.Lock()
@@ -646,4 +658,17 @@ func (n *Node) forwardMailStatus(ctx context.Context, req handoff.Request) (json
 	}
 
 	return json.Marshal(out)
+}
+
+// queueRing executes only the path and configuration launchd supplied. Its environment is built from
+// fixed system paths and trusted home data, not the host process or a session registration.
+func (n *Node) queueRing(r mailbox.Registration, count int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, n.opts.CodexPath, "queue", "--thread", r.Current, "--message", mailbox.RingText(count))
+	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "CODEX_HOME=" + n.opts.CodexHome, "HOME=" + n.opts.Home}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("codex queue: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

@@ -118,10 +118,12 @@ type ReplyError struct {
 // Presence is the record a live node publishes. The CLI checks it with the liveness rule before it
 // writes a request.
 type Presence struct {
-	Version int                 `json:"version"`
-	PID     int                 `json:"pid"`
-	Start   record.ProcessStart `json:"start"`
-	Machine record.Machine      `json:"machine"`
+	CodexPath string              `json:"codex_path,omitempty"`
+	CodexHome string              `json:"codex_home,omitempty"`
+	Version   int                 `json:"version"`
+	PID       int                 `json:"pid"`
+	Start     record.ProcessStart `json:"start"`
+	Machine   record.Machine      `json:"machine"`
 
 	NodeVersion string `json:"node_version"`
 

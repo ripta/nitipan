@@ -23,7 +23,8 @@ import (
 // Endpoint is where a session takes a ring. It holds a path or an address, never a credential. The
 // node never stores or presents a session's CLAUDE_CODE_MESSAGING_TOKEN.
 type Endpoint struct {
-	Socket string `json:"socket,omitempty"`
+	Socket    string `json:"socket,omitempty"`
+	CodexHome string `json:"codex_home,omitempty"`
 }
 
 // Registration is one mail-capable process. It stores identity fields and every session ID the process
@@ -53,10 +54,25 @@ func IdentityKey(agent string, pid int, start record.ProcessStart) string {
 	return hex.EncodeToString(sum[:])[:24]
 }
 
+// RegistrationKey separates concurrent sessions on shared hosts. Claude Code retains process aliases
+// across /clear; the other agents' session IDs name independent conversations.
+func RegistrationKey(agent string, pid int, start record.ProcessStart, id string) string {
+	base := IdentityKey(agent, pid, start)
+	if agent != session.AgentCodex && agent != session.AgentOpencode {
+		return base
+	}
+	sum := sha256.Sum256([]byte(base + "\x00" + id))
+	return hex.EncodeToString(sum[:])[:24]
+}
+
 // Envelope is the liveness envelope of the registration's process.
 func (r Registration) Envelope() record.Envelope {
+	kind := record.LivenessProcess
+	if r.Agent == session.AgentCodex || r.Agent == session.AgentOpencode {
+		kind = record.LivenessSession
+	}
 	return record.Envelope{
-		Liveness: record.LivenessProcess, Machine: r.Machine, Holder: record.Holder{Agent: r.Agent, PID: r.PID, Start: r.Start},
+		Liveness: kind, Machine: r.Machine, Holder: record.Holder{Agent: r.Agent, PID: r.PID, Start: r.Start, SessionID: r.Current},
 	}
 }
 
@@ -72,7 +88,7 @@ func Refresh(root string, r Registration, now time.Time) (Registration, error) {
 		return r, fmt.Errorf("session ID %q: %w", r.Current, ErrBadName)
 	}
 
-	r.Identity = IdentityKey(r.Agent, r.PID, r.Start)
+	r.Identity = RegistrationKey(r.Agent, r.PID, r.Start, r.Current)
 	r.Version = Version
 	r.UpdatedAt = now.UTC()
 
@@ -128,6 +144,10 @@ func readRegistration(root, name string) (Registration, error) {
 		return r, err
 	}
 
+	if (r.Agent == session.AgentCodex || r.Agent == session.AgentOpencode) &&
+		(r.Identity != RegistrationKey(r.Agent, r.PID, r.Start, r.Current) || len(r.SessionIDs) != 1 || r.SessionIDs[0] != r.Current) {
+		return r, errors.New("a shared-host mailbox registration must name exactly one session and its identity")
+	}
 	if r.Identity+fileSuffix != name || r.Current == "" || r.PID <= 0 {
 		return r, errors.New("its name or fields do not match its contents")
 	}
@@ -173,6 +193,9 @@ func Live(r Registration, c *liveness.Checker) bool {
 		return true
 	}
 
+	if liveness.SameMachine(c.Local, r.Machine) && c.CheckProcess(r.PID, r.Start).Status == liveness.Dead {
+		return false
+	}
 	return c.Check(r.Envelope()).Status != liveness.Dead
 }
 
@@ -283,4 +306,18 @@ func Resolve(regs []Registration, sessionID string, c *liveness.Checker) Resolut
 	}
 
 	return Resolution{}
+}
+
+// CodexProblem explains why a registered session cannot be pushed through the trusted queue.
+func CodexProblem(path, home, registered string) string {
+	if path == "" || home == "" {
+		return "Codex push unavailable: the node LaunchAgent has no Codex path and home; rerun nitipan setup node"
+	}
+	if !filepath.IsAbs(path) || !filepath.IsAbs(home) {
+		return "Codex push unavailable: the node's Codex path and home must be absolute"
+	}
+	if registered == "" || filepath.Clean(registered) != filepath.Clean(home) {
+		return "Codex push unavailable: this session's CODEX_HOME differs from the node LaunchAgent's; mail stays unrung"
+	}
+	return ""
 }

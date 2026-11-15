@@ -23,9 +23,8 @@ import (
 // ErrNotMailable means the calling session has no mail address.
 var ErrNotMailable = errors.New("this session is not mailable")
 
-// mailAgents are the agents whose sessions can send and read mail. opencode and Codex arrive with their
-// own wake paths.
-var mailAgents = []string{"claude"}
+// mailAgents are the agents whose sessions can send and read mail.
+var mailAgents = []string{"claude", "codex", "opencode"}
 
 func (a *app) mailCmd() *cobra.Command {
 	mail := &cobra.Command{
@@ -139,11 +138,18 @@ func (a *app) registerMail(root string, h adapter.Holder) (mailbox.Registration,
 		reg.Endpoint.Socket = a.deps.Getenv(v)
 	}
 
+	if h.Adapter.Name == session.AgentCodex {
+		home, err := a.codexHome()
+		if err != nil {
+			return mailbox.Registration{}, err
+		}
+		reg.Endpoint.CodexHome = home
+	}
 	got, err := mailbox.Refresh(root, reg, a.deps.Now())
 	if errors.Is(err, mailbox.ErrNewer) {
 		a.warn(err)
 
-		return mailbox.Find(root, mailbox.IdentityKey(reg.Agent, reg.PID, reg.Start))
+		return mailbox.Find(root, mailbox.RegistrationKey(reg.Agent, reg.PID, reg.Start, reg.Current))
 	}
 
 	if err != nil {
@@ -375,6 +381,22 @@ func (a *app) mailboxStatus(cmd *cobra.Command, ms mailSession) error {
 		fmt.Fprintf(out, "waiter: the presence file cannot be replaced (%s), so no waiter arms for this session\n", problem)
 	}
 
+	if ms.reg.Agent == session.AgentCodex {
+		p, err := handoff.ReadPresence(ms.root)
+		if err != nil {
+			fmt.Fprintln(out, "Codex push unavailable: no usable node presence")
+		} else if why := mailbox.CodexProblem(p.CodexPath, p.CodexHome, ms.reg.Endpoint.CodexHome); why != "" {
+			fmt.Fprintln(out, why)
+		}
+	}
+	if ms.reg.Agent == session.AgentOpencode {
+		w, ok := mailbox.Waiter(ms.root, ms.reg.Identity)
+		if !ok || a.deps.Now().Sub(w.ArmedAt) > mailbox.PluginFreshness {
+			fmt.Fprintln(out, "opencode mail plugin: missing or stale presence; only turn and command reminders are available")
+		} else {
+			fmt.Fprintln(out, "opencode mail plugin: watching")
+		}
+	}
 	for _, field := range ms.holder.Adapter.Delivery.RequiredFields {
 		if field == adapter.FieldSocket && ms.reg.Endpoint.Socket == "" {
 			fmt.Fprintf(out, "socket ring: unavailable. This session reported no %s, so the node cannot ring it\n",
@@ -401,7 +423,7 @@ func (a *app) pendingFor(root string, h adapter.Holder) (int, []mailbox.Unknown)
 	sessions := []string{h.SessionID}
 
 	if h.SessionID != "" {
-		id := mailbox.IdentityKey(h.Adapter.Name, h.PID, h.Start)
+		id := mailbox.RegistrationKey(h.Adapter.Name, h.PID, h.Start, h.SessionID)
 		if reg, err := mailbox.Find(root, id); err == nil {
 			sessions = reg.SessionIDs
 		}

@@ -69,6 +69,13 @@ type Options struct {
 	// ExecPath is the executable the node watches. When it changes, the node exits.
 	ExecPath string
 
+	// CodexPath and CodexHome come from the node's LaunchAgent arguments, never a registration or
+	// another process. An empty path disables Codex pushes.
+	CodexPath string
+	CodexHome string
+	// Home is the node user's home from the operating-system account database.
+	Home string
+
 	// ExecEvery is how often the executable is checked. Default: 5 seconds.
 	ExecEvery time.Duration
 
@@ -275,6 +282,8 @@ func (n *Node) Run(ctx context.Context) error {
 		Machine:        n.opts.Machine,
 		NodeVersion:    n.opts.Version,
 		RequestVersion: handoff.RequestVersion,
+		CodexPath:      n.opts.CodexPath,
+		CodexHome:      n.opts.CodexHome,
 		Kinds:          n.kinds(),
 	})
 	if err != nil {
