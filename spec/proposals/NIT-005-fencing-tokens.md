@@ -2,7 +2,7 @@
 
 **Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-11-08
+**Updated:** 2026-11-14
 
 ## Dependencies
 
@@ -93,6 +93,7 @@ differs too.
 - A host that does not support atomic push cannot hold the fence and the branch update in one transaction. There, a
   fail-closed pre-push check renews the lease with the broker before the push. That is a lease check, not fencing. Its
   window is bounded by the lease term, which NIT-004 has not settled. It is labeled as such wherever it applies
+  Superseded in part by NIT-009; see Decision Log.
 
 What this does not fence:
 
@@ -269,6 +270,7 @@ times. Only a higher token in the check set is a refusal. Running out of attempt
 The fenced remote is the one being pushed to. A claim inside a submodule is fenced by pushes to the submodule's own
 remote, under the submodule's own root set. A host that refuses to create refs under the fence namespace fails the whole
 atomic push. The error says the host's ref policy refuses the fence, which is not a lost lease.
+Superseded in part by NIT-009; see Decision Log.
 
 The pusher's token comes from the grant and renewal replies that NIT-004's request handoff delivers to the CLI. `list`
 shows it wherever it shows the holder's broker leases.
@@ -609,6 +611,7 @@ None.
   after a synchronous renewal. A host that refuses refs under the fence namespace fails the push outright. Mitigation:
   the lease check bounds the impact, and `make live-fence-hosts` probes a new host. Amended 2026-11-08; see Decision
   Log.
+  Superseded in part by NIT-009; see Decision Log.
 - **Hooks are bypassable** — likelihood: medium, impact: medium.
   `git push --no-verify`, a local `core.hooksPath` set after `acquire`, a clone with no hooks, and a binary from before
   this proposal each skip the fence. `--no-verify` does not skip `reference-transaction`. Accepted: the environment is
@@ -1130,6 +1133,12 @@ Fences `machine` leases on one machine. Needs no broker.
   the touched-set `rev-list` and `diff-tree` failed as "could not verify" on a slow SSH round trip or a long first push,
   where the hook passed. No document fixes the value. The hook's bound keeps the wrapper and the hook agreeing on what
   a slow remote is. `ExecClean` keeps 10 seconds for setup and the acquire gate. The push itself has no bound.
+- 2026-11-14: Superseded in part by NIT-009: the `nitipan.<remote>.atomic` key of the 2026-11-08 entry above. nitipan no
+  longer writes the key. A remote's fence mode is `nitipan.<remote>.fence`, with three states set only by the user. With
+  the key unset, a host that refuses `--atomic` or the fence ref gets the lease check for that one push, with a warning,
+  and the next push tries the fence again. Also superseded in part by NIT-009: the text that such a host fails the whole
+  push. This covers "What enforces the token", "Token scope", and the risk "The user's remote hosts may not support
+  atomic push". An `atomic=false` already in a clone is still read, as `fence=false`.
 
 ## References
 

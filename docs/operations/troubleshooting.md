@@ -385,33 +385,74 @@ nitipan: fence contention: other pushes kept updating the fence refs on origin, 
 
 Other pushes kept moving the fence refs while this push ran. It exits 13. Push again.
 
-### The host refuses fence refs
+## The host refuses the fence
+
+A remote's fence mode is the git config key `nitipan.<remote>.fence`. Unset tries the fence and falls back to a lease
+check. `true` always fences. `false` never tries the fence. See [Fence modes](../reference/pushing.md#fence-modes).
+
+### The fallback warning
 
 ```
-origin refused the fence ref. This is the host's ref policy about refs under refs/nitipan/fence/ and not a lost lease. Report this to the user
+nitipan: origin refused the fence ref refs/nitipan/fence/<root-sha>/<encoded-path>: <reason>. This push gets a lease check and not fencing. Set nitipan.origin.fence to false to skip the fenced attempt, or to true to make this refusal an error
 ```
 
-The git host does not accept refs under `refs/nitipan/fence/`. The whole push fails. Change the host's ref policy, or
-push that repo somewhere else.
+The host refused the fence ref, or did not support `--atomic`. The second case reads `origin does not support atomic
+push`. The push still went through, with a lease check in place of fencing. nitipan records nothing, so the next push
+tries the fence again.
 
-## The remote is marked as unable to take an atomic push
+A host that always refuses makes every push upload twice. To stop the first attempt, set the key to `false`:
+
+```sh
+git config nitipan.origin.fence false
+```
+
+Set it to `true` when you want a refusal to stop the push.
+
+### The `true` error
 
 ```
-nitipan: origin cannot take an atomic push, so this push gets a lease check and not fencing. Recorded in nitipan.origin.atomic
+origin refused the fence ref refs/nitipan/fence/<root-sha>/<encoded-path>: <reason>, and nitipan.origin.fence is true, so the push is an error and not a lease check. Set nitipan.origin.fence to false to skip the fence, or unset it to fall back to a lease check
 ```
 
-A host that cannot take `git push --atomic` cannot hold the fence and the branch in one transaction. `nitipan push`
-records `nitipan.<remote>.atomic = false` in the clone's git config. From then on, pushes to that remote renew the
-holder's leases with the broker and push without fence refs. That is a lease check, not fencing.
+You set the key to `true`, and the host refused the fence. The reason is the host's own text. Change the host's ref policy
+for refs under `refs/nitipan/fence/`, or unset the key to take the lease check.
 
-nitipan never clears the flag. When the host later gains atomic push, clear it yourself:
+### The pre-push hook refuses the fallback push
+
+```
+The pre-push hook in this clone refuses a push with no fence refs. It may be older than this nitipan. Run nitipan setup git --install, then push again
+```
+
+The hook in this clone came from an older nitipan. It does not know the fallback push, and it does not read `fence`.
+Run `nitipan setup git --install` in the checkout, then push again.
+
+### The value is not a boolean
+
+```
+nitipan.origin.fence is "maybe" in /path/to/repo/.git/config, which is not a boolean. Set it to true or false, or unset it
+```
+
+`nitipan push` and the hook both exit 1 on a value like this. Fix the value in the file the message names. nitipan does not
+guess what you meant. The user's own terminal push is not held to the key, so it still goes through.
+
+### The old `atomic` key
+
+```
+nitipan: nitipan.origin.atomic is false in /path/to/repo/.git/config. The old key acts as nitipan.origin.fence=false. After nitipan setup git --install, it can be renamed to nitipan.origin.fence=false or unset
+```
+
+Older nitipan wrote `nitipan.<remote>.atomic = false` for a host without atomic push. Newer nitipan reads it as
+`fence = false` while `fence` is unset, and never rewrites it. Every push it affects prints this line once.
+
+An older hook reads only the old key. Run `nitipan setup git --install` first. Then rename the key to `fence`, or unset
+it to try the fence again:
 
 ```sh
 git config --unset nitipan.origin.atomic
 ```
 
-The `pre-push` hook trusts the flag whoever set it. Check for it with `git config --get nitipan.<remote>.atomic` when a
-remote seems to skip fencing.
+When `fence` is set beside a leftover `atomic = false`, `fence` wins. The line still prints, because an older hook still
+obeys the old key.
 
 ## A lease was broken
 

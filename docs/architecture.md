@@ -62,6 +62,31 @@ Solid arrows are calls that the source starts. Dotted arrows are signals that on
 connection between a machine and the broker host starts on the machine. The broker never connects in, as
 [ADR-01](../spec/adrs/ADR-01-machines-connect-out-to-broker.md) records.
 
+## Coordination, not correctness
+
+Git guarantees the repo's data. It rejects a non-fast-forward push. An atomic push applies all its refs or none. The
+broker, the leases, and the fence refs sit on top of that as coordination layers. The broker orders grants across
+machines. A lease says which session should work in a domain, and it expires when its holder goes quiet. A fence makes
+the remote enforce that lease against a holder that lost it without knowing. Each layer makes collisions between agents
+rarer. None of them guards against data loss.
+
+A run with no broker has no fencing at all, and that is a supported setup. Sessions on different machines then meet only
+at git's fast-forward rule. A lease check in place of fencing is graceful degradation. It is strictly better than the
+no-broker baseline. A gap in fencing weakens coordination. It is never a correctness defect.
+
+The fence exists so the remote enforces the lease and the holder never needs the broker at push time. A change to the
+push path is weighed against that purpose. A change that puts the broker in every fenced push defeats the fence. See
+[ADR-09](../spec/adrs/ADR-09-fencing-is-coordination-not-correctness.md).
+
+## Honoring the user's configuration
+
+nitipan honors its user's configuration in every scope git reads. A value the user sets is the user's decision. nitipan
+never ignores it, overrides it, or treats it as an accident to guard against.
+
+nitipan does not offer an unsafe value. Every value it does offer is legitimate, and setting it needs no justification.
+A warning about a legitimate value is short and non-intrusive, such as one stderr line that says what the value does.
+The `nitipan.<remote>.fence` key follows this rule. See [Pushing](reference/pushing.md#fence-modes).
+
 ## Components
 
 | Component | Runs as | Talks to |
@@ -190,6 +215,11 @@ node, so commits stay local and fast.
 `nitipan push` and the `pre-push` hook do reach out. They read the fence refs on the remote with `git ls-remote`. For
 a path that the caller's broker leases do not cover, they ask the broker through the node. `nitipan push` then runs one
 `git push --atomic` with the branches and the fence refs together.
+
+A host can refuse `--atomic` or a fence ref. Unless the remote's `nitipan.<remote>.fence` key says otherwise, that one
+push then gets a lease check in place of fencing, with a short warning. `nitipan push` sets `NITIPAN_FENCE_FALLBACK` on
+the fallback git call, so the `pre-push` hook accepts the fence-less push and runs its own lease check on it. The pusher
+decides this from the output of `git push --porcelain`. See [Fence modes](reference/pushing.md#fence-modes).
 
 ```mermaid
 sequenceDiagram

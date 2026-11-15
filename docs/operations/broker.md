@@ -308,8 +308,8 @@ from pushing the counter to its top.
 
 A restore also loses the lease table since the backup. A holder whose lease the restored broker does not know gets
 `not_found` on renewal. It is lost. The broker never revives a lease it has no record of, because two sessions would
-then each believe they hold it. A holder pushing to a remote that cannot take an atomic push sees
-`the broker has no record of lease <id>`.
+then each believe they hold it. A holder whose push gets a lease check sees `the broker has no record of lease <id>`. A lease check follows a remote that
+cannot take an atomic push or refuses the fence ref, and any push under `nitipan.<remote>.fence = false`.
 
 The broker revives only a lapsed lease it still holds and nobody else took. A revived lease keeps its token.
 

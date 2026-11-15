@@ -19,7 +19,7 @@ remote's fence mode one key, `nitipan.<remote>.fence`, with three states. It cla
 |-----------|------------|---------|
 | NIT-009 M1 | DONE | `nitipan: judge a failed fenced push from git's porcelain output` |
 | NIT-009 M2 | DONE | `nitipan: give each remote a three-state fence mode with a sanctioned fallback` |
-| NIT-009 M3 | QUEUED | |
+| NIT-009 M3 | DONE | `docs: describe the three fence modes and the lease-check fallback` |
 
 ## Approved plan and authorization
 
@@ -130,3 +130,40 @@ Review findings:
 - adr-impact: no conflict. It named the fence-mode contract and the `NITIPAN_FENCE_FALLBACK` handshake as possible ADR
   candidates. Dismissed: NIT-009's Decision Log already weighed and declined who may set the mode, under NIT-005's
   shipped trust model, and the handshake follows `NITIPAN_FENCE_DELETE`. Neither adds a new principle.
+
+### NIT-009 M3: Docs, probe, and NIT-005 markers
+
+DONE. Commit: `docs: describe the three fence modes and the lease-check fallback`, which carries both proposals and
+this report.
+
+`docs/reference/pushing.md` describes the three states, the old `atomic` key, and the probe. Troubleshooting has one
+entry for a host that refuses the fence. It covers the fallback warning, the `true` error, the hook refusing the
+fallback, the invalid value, and the old key. `docs/architecture.md` gains "Coordination, not correctness" and
+"Honoring the user's configuration". The probe pushes with `--porcelain` and prints the porcelain lines of a refused
+step. NIT-005 carries three "Superseded in part by NIT-009" markers and a Decision Log entry for the `atomic` key.
+
+Checks: `make fmt` and `make ci` passed. `proposals.py check` reports only the row-finishing work. `freeze` was clean
+after the review fixes. The probe's `--dry-run` printed all four steps with `--porcelain`. Against a local bare remote
+whose update hook refuses fence refs, the probe exited 1 and reported the branch line as `[remote rejected] (atomic
+push failure)` and the fence line as `[remote rejected] (hook declined)`. `rumdl check` flags MD013 at 80 columns,
+which the repo's 120-column docs ignore, and MD040 on bare code fences, which the existing docs already use.
+
+Implementer best guesses:
+
+- `docs/operations/broker.md`, `docs/getting-started/broker-and-nodes.md`, and `docs/reference/cli.md` get one-sentence
+  fixes, so no doc describes the removed write. NIT-009's Decision Log records it as a run best guess.
+- The two principles get their own sections in `docs/architecture.md`, ahead of Components.
+- The troubleshooting entries quote the code's messages, with placeholders such as `<reason>`.
+
+Review findings:
+
+- The NIT-005 marker at line 95 changed the existing line, and freeze flagged it. Confirmed. Fixed: the line is
+  byte-identical and the marker stands on its own line. The implementer first reported freeze clean from its exit code
+  alone.
+- A `docs/operations/broker.md` sentence ran to 135 columns with an aside. Fixed as two sentences, and the second now
+  names every case that takes the lease check.
+- A `docs/reference/pushing.md` line ran to 121 columns. Fixed.
+- adr-impact: no conflict. The architecture page states ADR-09 faithfully. It omits the question-to-the-user rule and
+  the threat-model bullet, which `pushing.md` applies. It named the configuration-honoring principle and the never-write
+  rule as possible ADRs. Dismissed: the user declined the first as an ADR in NIT-009's Decision Log, and it covers the
+  second.

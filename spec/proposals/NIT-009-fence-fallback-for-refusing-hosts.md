@@ -352,7 +352,7 @@ name or one with a newline has no mode.
 
 ### M3: Docs, probe, and NIT-005 markers
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `docs/reference/pushing.md` describes the three states in place of "Hosts without atomic push"
 - `docs/operations/troubleshooting.md` replaces "The host refuses fence refs" and "The remote is marked as unable to
@@ -365,6 +365,21 @@ name or one with a newline has no mode.
 - `make live-fence-hosts` pushes with `--porcelain` and reports each host's porcelain lines for a refused fence ref
 - NIT-005's "What enforces the token", "Token scope", and its atomic-push risk carry "Superseded in part by NIT-009; see
   Decision Log" markers, and its Decision Log records the supersession of the `atomic` key
+
+**As built:**
+
+Every message the docs quote is copied from the code. The fallback warning, the `true` error, the invalid-value error, the
+legacy notice, and the reinstall hint match the text in `push.go` and `fencemode.go`.
+
+- The docs also correct the other places that described the removed `atomic=false` write. These are `broker.md`,
+  `broker-and-nodes.md`, and `cli.md`. The three named files were not the only ones. See Decision Log.
+- `docs/architecture.md` carries the two principles in sections of their own, ahead of "Components". The hooks-and-pushes
+  section names the fallback and `NITIPAN_FENCE_FALLBACK`. The coordination section links ADR-09.
+- The probe reports the porcelain lines of a refused step under the remote's row, and a step with no porcelain lines
+  reports git's stderr instead. A failed clean-up push reports its porcelain lines too. It ran against a local bare
+  remote whose update hook refuses `refs/nitipan/fence/*`. It printed the branch line with `atomic push failure` and the
+  fence line with `hook declined`. That is the shape rule 3 judges.
+- NIT-005 carries the three markers and one Decision Log entry for the supersession. Its `**Updated:**` date moved.
 
 ## Decision Log
 
@@ -455,6 +470,10 @@ name or one with a newline has no mode.
   pusher still prints for itself since a clone may have no hook. An inherited copy of the variable is stripped, as for
   `NITIPAN_FENCE_FALLBACK`. Skew was checked: an older hook prints nothing, and a newer hook with an older pusher
   prints once. Amended "Replacing `nitipan.<remote>.atomic`", "Version skew", and the M2 checks.
+- 2026-11-14 (run best guess): M3 also corrected `broker.md`, `broker-and-nodes.md`, and `cli.md`. The milestone named
+  `pushing.md`, `troubleshooting.md`, and `architecture.md`. These three other pages describe the removed `atomic=false`
+  write or the fail-the-push behavior, and a doc that describes a removed behavior is wrong. The change is wording only
+  and adds no mechanism.
 
 ## References
 
