@@ -10,6 +10,9 @@ const (
 	PathBreak   = Prefix + "/break"
 	PathRenew   = Prefix + "/renew"
 	PathList    = Prefix + "/list"
+
+	// PathFence takes a fence token report. A broker that predates tokens answers 404.
+	PathFence = Prefix + "/fence"
 )
 
 // EventLease is the event kind that carries a Lease whose state changed.
@@ -71,8 +74,8 @@ type Lease struct {
 	State    string `json:"state"`
 	Revision uint64 `json:"revision"`
 
-	// Token is reserved for fencing. The broker bumps its counter with each grant and a revival keeps
-	// the token.
+	// Token orders grants for fencing. Each new grant gets max(counter+1, wall clock in microseconds), and a
+	// revival keeps the token. It stays under 2^53 until about the year 2255, so JSON readers hold it exactly.
 	Token uint64 `json:"token,omitempty"`
 
 	ExpiresMillis int64 `json:"expires_ms,omitempty"`
@@ -191,4 +194,32 @@ type Listed struct {
 type SnapshotAck struct {
 	Version Version `json:"version"`
 	Leases  []Lease `json:"leases"`
+}
+
+// FenceReport tells the broker a fence token a receiver refused a push over, or that a pusher read from a
+// fence ref. A restored broker may have counted fewer tokens than it once issued.
+type FenceReport struct {
+	Version Version `json:"version"`
+	Token   uint64  `json:"token"`
+}
+
+// Fence verdicts.
+const (
+	// FenceKnown means the token is at or below the counter, so the broker issued it or a later one.
+	FenceKnown = "known"
+
+	// FenceRaised means the token was above the counter and within the bound, so the broker raised its counter
+	// to it.
+	FenceRaised = "raised"
+
+	// FenceUnusable means the token is above the bound, so no honest counter could have issued it. The
+	// reporter treats the fence ref that carried it as unusable.
+	FenceUnusable = "unusable"
+)
+
+// FenceVerdict answers a FenceReport. Counter is the broker's counter after the report.
+type FenceVerdict struct {
+	Version Version `json:"version"`
+	Verdict string  `json:"verdict"`
+	Counter uint64  `json:"counter"`
 }

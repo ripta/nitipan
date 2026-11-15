@@ -416,15 +416,19 @@ restart, a reinstall, and a restore from backup is open.
 The candidates were persisting the counter before each reply, flooring each token at the wall clock, learning from
 refused pushes, and an epoch prefix.
 
-Decision (autonomous): persist, floor at the clock, and raise on a bounded report.
+Decision (autonomous): persist, floor at the clock, and raise on a bounded report. Amended 2026-10-29; see Decision
+Log.
 
 - Each new token is `max(last + 1, now)`, with `now` the broker's wall-clock time in microseconds. The counter and the
-  grant land in one durable write before the reply leaves
+  grant land in one durable write before the reply leaves. The broker puts no floor on the counter at load, since
+  every grant floors its own token
 - A pusher refused by a fence token higher than any the broker has issued reports it through the request handoff. The
-  broker raises its counter above that token only when the token is at most `now` plus a margin. The refusal names the
-  cause as a broker restore
-- A reported token above that bound marks its fence ref unusable, under "Carrying the token". The user deletes that ref.
-  A garbage value near `2^64` can then never push the counter to its top
+  broker answers with a verdict. A token at or below the counter is `known`, and nothing is written. A token above the
+  counter and at most `now` plus 24 hours is `raised`, and the counter is set to the token in one durable write. A
+  token above that bound is `unusable`, and nothing is written. The refusal names the cause as a broker restore
+- The `unusable` verdict is the report's reply, not broker state. The reporter marks the fence ref unusable, under
+  "Carrying the token". The user deletes that ref. A garbage value near `2^64` can then never push the counter to its
+  top. The report grants no authority, since it only raises the counter within the bound
 - Microsecond tokens stay below `2^53` until about the year 2255, so JSON readers such as `jq` read them exactly. The
   fence object and `list --json` carry tokens as JSON numbers under that bound
 
@@ -674,13 +678,28 @@ Fences `machine` leases on one machine. Needs no broker.
 
 ### M2: Token issue
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - Every broker grant returns a token of `max(last + 1, now)` in microseconds, persisted with the grant before the
   reply leaves
 - A revived lease keeps its token, and a renewal for a lease the broker does not know returns lost
-- A reported fence token within the bound raises the counter, and one above it marks the ref unusable
+- A reported fence token within the bound raises the counter, and one above it gets the `unusable` verdict, which the
+  reporter treats as an unusable ref. Amended 2026-10-29; see Decision Log
 - The token reaches the CLI in the grant and renewal replies, and `list` shows it
+
+**As built:**
+
+- The report is a new broker path, `fence`, with a request kind of the same name on the handoff. Its body is the
+  token, and its reply is the verdict and the counter after the report. The CLI has a function that sends it. No
+  command calls it until `nitipan push`. Decision Log entries of 2026-10-29 record each guess.
+- A restore test grants, restores an older store file, and shows the renewal answered `not_found` with nothing
+  revived, and the next grant above every earlier token once the clock moved on.
+- The sidecar is at file version 1.1 and carries the token. The node writes it on grant and on every renewal reply
+  that differs. The CLI writes it from the grant and renew replies it reads, so a node from before this change
+  cannot leave a sidecar without a token the broker returned. `list --json` is at schema 1.5, with `token` on each
+  broker lease.
+- Existing broker tests that asserted a counter of 1 now assert the counter equals the token, since tokens are clock
+  microseconds.
 
 ### M3: Remote fencing
 
@@ -907,6 +926,46 @@ Fences `machine` leases on one machine. Needs no broker.
   may leave stated mixed-binary gaps instead of a `format` bump. ADR-04's minor rule says an old reader is never more
   permissive, and the fence mark's two gaps make older `acquire` and `break` more permissive. Undecided. Found in
   NIT-005 M1.
+- 2026-10-29 (run best guess): Amended "Counter durability" and M2's check on a reported token, with the margin and
+  the verdicts. The text named a margin without a value. It said the broker "raises its counter above that token",
+  and the broker now sets the counter to the token, so the next grant issues above it. It said a token above the bound
+  "marks its fence ref unusable", and M2's check said the same. The margin is 24 hours, a named
+  broker constant. It is wide enough to cover clock skew between the broker and a pusher's remote, and narrow enough
+  that a value past it cannot be a restored counter. If it is wrong, one constant changes, and no stored data does.
+- 2026-10-29 (run best guess): "Marks the ref unusable" is the `unusable` verdict in the report's reply, not broker
+  state. The broker knows no fence refs, and none exist before the push wrapper. The reporter acts on the verdict.
+  If the broker should remember reported tokens, it needs a new field in its store, which a later proposal can add.
+- 2026-10-29 (run best guess): The report has no user-facing command in M2. The push wrapper is its only caller, and a
+  command with no caller would be surface nobody asked for. The CLI function that sends it is tested end to end through
+  the node and the broker. If a command is wanted earlier, it is a thin wrapper over that function.
+- 2026-10-29 (run best guess): The report keeps the current request version. A new request kind is refused by an
+  older node through the presence record's kinds, as `KindSince` and NIT-004's "Version skew" already say. An older
+  broker answers 404 and the CLI reports it as too old. No older binary could mishandle it silently.
+- 2026-10-29 (run best guess): The sidecar's file version moves to 1.1 for its own writes only. The deadline, in-flight,
+  and orphan files keep 1.0, since they gained no field. NIT-004 says a new field on a request that a node could drop
+  takes a new request version. This field is not one: the token rides in the broker's reply, which the node forwards
+  whole, and the CLI writes it into the sidecar from that reply. A node from before this change therefore cannot drop
+  it on a grant or a renew that goes through the CLI. An older CLI that rewrites a sidecar, as it does to clear the
+  anchor's created flag, drops the token, and the next renewal reply puts it back through the node. A missing token
+  reads as no token. If this is wrong, the request version moves to 3 and `KindSince` gains an entry.
+- 2026-10-29 (run best guess): The node also records the token from renewal replies, which the plan did not list. The
+  CLI repair covers only renewals the CLI asks for, and an older CLI can drop the token at any time. Without the node
+  repair, `nitipan push` would refuse a live lease for lack of a token until the holder ran `renew` by hand.
+- 2026-10-29 (run best guess): The broker takes its wall clock once per claim. The reply token and the committed
+  counter come from that one value, so the dry-run prediction the earlier code made is gone. A wall clock that steps
+  back cannot lower a token, since the counter term wins.
+- 2026-10-29 (run best guess): No floor at load, as the text of NIT-004's "Broker lifecycle and store" left open. Every
+  grant floors at the clock, so a floor at load adds nothing a grant does not add. A broker restored from an older
+  file and left idle issues nothing, so no stale token can pass in that time. If a floor at load is wanted, it is one
+  `max` at start.
+- 2026-10-29 (run best guess): A claim fails closed with a 503 when the stored counter is at its 64-bit maximum.
+  Adding one would wrap to zero and issue a token below every earlier one. Only a damaged or hand-edited store holds
+  such a counter, since the report path caps it at the clock plus the margin. The broker does not validate the counter
+  at load, so a bad store still starts and still serves renewals.
+- 2026-10-29: ADR candidate (cuts across the system): a fence token never falls below the broker's wall clock, and a
+  restored or reinstalled broker never issues below a token already on a remote. The invariant is the floor and the
+  bounded raise, not the margin value. M3 only reads tokens, so nothing the invariant rests on is still in design.
+  Undecided. Found in NIT-005 M2.
 
 ## References
 

@@ -648,8 +648,9 @@ One file means one atomic write covers a grant, its request outcome, and its cou
 temp-file pattern `internal/state` already uses, and ADR-04's evolution rule for JSON. The scale is a handful of
 machines in one user scope, renewing every 100 seconds, so rewriting the whole file costs nothing that matters.
 
-This does not settle NIT-005's "Counter durability". Restoring an older file, or reinstalling with a fresh store,
-restarts the counter below tokens already seen. The counter's floor on load is NIT-005's to decide.
+Restoring an older file, or reinstalling with a fresh store, restarts the counter below tokens already seen. NIT-005's
+"Counter durability" settles that. The broker puts no floor on the counter at load. Every new token is floored at the
+wall clock instead, and a bounded report raises the counter. Amended 2026-10-29; see Decision Log.
 
 An append-only log with snapshots was rejected. It adds torn-tail detection, a crash-safe order for compaction, and
 idempotent replay, each a new place to be wrong, to save write volume at a scale nobody named. SQLite was rejected. It
@@ -781,7 +782,8 @@ None.
   Grants made after the migration are lost on rollback, and the restart grace lets every node renew.
 - **The design depends on NIT-005 and NIT-006, which are still in design** — likelihood: medium, impact: medium.
   NIT-005 relies on revival keeping the token, on the synchronous renew, and on the store keeping its counter. Its
-  counter floor after a restore stays open there. NIT-006, accepted on 2026-10-24, settled the `acting_for` scope
+  counter durability after a restore is settled there: tokens floor at the clock, and a bounded report raises the
+  counter. Amended 2026-10-29; see Decision Log. NIT-006, accepted on 2026-10-24, settled the `acting_for` scope
   question and the node credential, and amended the decisions its Impacts entry here names. A change there can reopen
   a decision here. Mitigation: each reliance is written in this proposal's
   Impacts and in the decision it rests on. NIT-005's working copy still says NIT-004 has not settled the term, which
@@ -908,8 +910,9 @@ Amended 2026-10-24; see Decision Log.
   answers. `list --json` gained `broker_leases`, so its schema moved to 1.4.
 - The store keeps the 1.0 version. The grant, the outcome, and the counter ride in the `leases`, `outcomes`, and
   `counter` fields M1 reserved. A taken or broken lease stays in `leases` with state `taken` or `ended` until its node
-  acks it in a snapshot. The counter bumps with each grant, and the grant's token is the counter value. Revival keeps
-  it. Whether NIT-005 keeps that meaning is NIT-005's to settle.
+  acks it in a snapshot. The counter bumps with each grant, and the grant's token was the counter value. Revival keeps
+  it. NIT-005 M2 then floored each token at the wall clock and sets the counter to the token. Amended 2026-10-29;
+  see Decision Log.
 - The snapshot answer carries the node's leases, end facts included, and the snapshot request carries the acks. An
   older node ignores the answer, and an older broker answers with no body, which a node accepts.
 - A holder never conflicts with its own leases at the broker. See the 2026-10-29 Decision Log entry on M2.
@@ -1109,6 +1112,10 @@ Amended 2026-10-24; see Decision Log.
 - 2026-10-29: ADR candidate (departs from the past): at `user` and `shared` reach, a lease names a repo's files across
   every checkout and worktree, unlike the checkout-boundary exemption ADR-03 sets for `machine` reach. Undecided.
   Found in NIT-004 M2.
+- 2026-10-29 (run best guess): Amended "Broker lifecycle and store" and the risk on NIT-005, which both left the
+  counter's floor on load to NIT-005. The text said the floor is NIT-005's to decide. NIT-005 M2 settled it: the
+  broker applies no floor at load, since every grant floors its token at the wall clock. If a floor at load is wanted
+  later, it is one `max` at start, and tokens already issued stay valid.
 
 ## References
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"sort"
@@ -352,6 +353,41 @@ func (b *Broker) answer(w http.ResponseWriter, node NodeKey, id string, res wire
 	_, _ = w.Write(raw)
 }
 
+// FenceMargin is how far past the broker's clock a reported fence token may sit and still raise the
+// counter. A token above it cannot have come from an honest counter, so one garbage value never pushes
+// the counter to its top.
+const FenceMargin = 24 * time.Hour
+
+// nextToken returns the token for a new grant: the larger of the next counter value and the wall clock in
+// microseconds. The clock term keeps a counter restored from an older file ahead of every token issued
+// before the restore, as long as the clock has moved forward.
+func nextToken(counter uint64, now time.Time) uint64 {
+	return max(counter+1, microseconds(now))
+}
+
+// counterExhausted answers 503 and reports true when the counter cannot advance. Only a corrupt or
+// hand-edited store holds a counter that high. Adding one would wrap to zero and issue a token below every
+// earlier one, so a claim fails closed instead.
+func (b *Broker) counterExhausted(w http.ResponseWriter) bool {
+	if b.g.counter != math.MaxUint64 {
+		return false
+	}
+
+	writeErr(w, http.StatusServiceUnavailable, wire.CodeUnavailable, "the broker's token counter is at its limit, "+
+		"which only a damaged store causes. Restore the store or repair its counter")
+
+	return true
+}
+
+// microseconds is t as microseconds since the epoch. A time before the epoch reads as zero.
+func microseconds(t time.Time) uint64 {
+	if us := t.UnixMicro(); us > 0 {
+		return uint64(us)
+	}
+
+	return 0
+}
+
 func validRequestID(id string) bool {
 	return id != "" && len(id) <= 64 && !strings.ContainsAny(id, "/\x00")
 }
@@ -443,14 +479,20 @@ func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKe
 		Machine: node.MachineID, UID: node.UID, Derivation: req.Derivation,
 	}
 
+	if b.counterExhausted(w) {
+		return
+	}
+
 	b.dl[req.ID] = b.cfg.Clock.Now() + b.cfg.Term
 
 	taken := slices.Clone(lapsed)
 
-	res := wire.Result{Code: wire.CodeGranted}
+	// The token is fixed once, here. The reply and the committed change both use it, so they never differ.
+	fresh.Token = nextToken(b.g.counter, b.cfg.Now())
+
+	res := wire.Result{Code: wire.CodeGranted, Lease: ptr(b.viewOf(fresh))}
 	change := func(s *gstate) {
-		s.counter++
-		fresh.Token = s.counter
+		s.counter = fresh.Token
 		s.grants[fresh.ID] = fresh
 
 		for _, g := range taken {
@@ -460,10 +502,6 @@ func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKe
 			t.TakenBy = taker
 		}
 	}
-
-	// The reply needs the token, which change assigns. Build the answer after a dry run of the counter.
-	fresh.Token = b.g.counter + 1
-	res.Lease = ptr(b.viewOf(fresh))
 
 	b.answer(w, node, req.ID, res, change)
 
@@ -755,6 +793,53 @@ func (b *Broker) handleBreak(w http.ResponseWriter, r *http.Request, node NodeKe
 	if !over && b.g.grants[g.ID] != nil {
 		b.announceLocked(b.g.grants[g.ID])
 	}
+}
+
+// handleFence takes a fence token that a pusher or receiver saw on a remote. A token above the counter and
+// within the bound proves the broker lost state, so the counter rises to it. A token above the bound is
+// refused without a write.
+//
+// The report grants nothing. It can only raise the counter, within a bound, so a forged report at worst
+// skips token values. No ref, lease, or holder changes on its word, which is why the request handoff may
+// carry it without a proof the session cannot make.
+func (b *Broker) handleFence(w http.ResponseWriter, r *http.Request, _ NodeKey) {
+	var req wire.FenceReport
+
+	if !decodeBody(w, r, &req, func() wire.Version { return req.Version }) {
+		return
+	}
+
+	if req.Token == 0 {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, "the fence report names no token")
+
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	verdict := wire.FenceKnown
+
+	switch bound := microseconds(b.cfg.Now().Add(FenceMargin)); {
+	case req.Token <= b.g.counter:
+	case req.Token > bound:
+		verdict = wire.FenceUnusable
+	default:
+		err := b.mutate(func(s *gstate) error {
+			s.counter = req.Token
+
+			return nil
+		})
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, wire.CodeUnavailable, err.Error())
+
+			return
+		}
+
+		verdict = wire.FenceRaised
+	}
+
+	writeJSON(w, http.StatusOK, wire.FenceVerdict{Version: wire.Current, Verdict: verdict, Counter: b.g.counter})
 }
 
 func (b *Broker) handleList(w http.ResponseWriter, r *http.Request, _ NodeKey) {

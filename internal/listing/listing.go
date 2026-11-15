@@ -20,7 +20,8 @@ import (
 // sub-leases: the parent link, the computed delegated list, the owner and grantor_of marks of a
 // filtered query, and the top-level requests and notices arrays. Minor 3 adds the top-level marks
 // array of fence marks. Minor 4 adds the top-level broker_leases array of user and shared leases.
-const SchemaVersion = "1.4"
+// Minor 5 adds the token of a broker lease.
+const SchemaVersion = "1.5"
 
 // Output is the whole `list --json` document.
 type Output struct {
@@ -289,6 +290,7 @@ type BrokerLease struct {
 	Liveness string   `json:"liveness,omitempty"`
 	Expires  string   `json:"expires,omitempty"`
 	Mine     bool     `json:"mine"`
+	Token    uint64   `json:"token,omitempty"`
 	AtRisk   bool     `json:"at_risk,omitempty"`
 	Risk     string   `json:"risk,omitempty"`
 }

@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,11 +22,34 @@ type localVolume struct{}
 
 func (localVolume) Local(string) error { return nil }
 
+// wallClock is a settable wall clock. The broker reads it from its handler goroutines.
+type wallClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *wallClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.t
+}
+
+func (c *wallClock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.t = t
+}
+
+var wallStart = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+
 type harness struct {
 	t     *testing.T
 	b     *Broker
 	store *Store
 	clock *monoclock.Fake
+	wall  *wallClock
 	srv   *httptest.Server
 	path  string
 }
@@ -44,7 +69,8 @@ func newHarness(t *testing.T, mutate func(*Config)) *harness {
 	t.Cleanup(func() { _ = store.Close() })
 
 	clock := monoclock.NewFake(time.Hour)
-	cfg := Config{Store: store, Term: testTerm, Keepalive: 20 * time.Millisecond, Clock: clock, Version: "test"}
+	wall := &wallClock{t: wallStart}
+	cfg := Config{Store: store, Term: testTerm, Keepalive: 20 * time.Millisecond, Clock: clock, Now: wall.Now, Version: "test"}
 
 	if mutate != nil {
 		mutate(&cfg)
@@ -55,7 +81,7 @@ func newHarness(t *testing.T, mutate func(*Config)) *harness {
 
 	t.Cleanup(srv.Close)
 
-	return &harness{t: t, b: b, store: store, clock: clock, srv: srv, path: path}
+	return &harness{t: t, b: b, store: store, clock: clock, wall: wall, srv: srv, path: path}
 }
 
 type nodeID struct {
@@ -166,4 +192,35 @@ func (h *harness) view(k NodeKey) NodeView {
 
 func handleOf(identity, machine string) string {
 	return handle.Derive(identity, machine)
+}
+
+// restart replaces the broker with a new one over the store file. A non-nil restore first overwrites the
+// file with older contents, as a restore from backup would.
+func (h *harness) restart(restore []byte) {
+	h.t.Helper()
+
+	h.srv.Close()
+
+	if err := h.store.Close(); err != nil {
+		h.t.Fatal(err)
+	}
+
+	if restore != nil {
+		if err := os.WriteFile(h.path, restore, 0o600); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+
+	store, err := OpenStore(h.path, StoreOptions{Volume: localVolume{}})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+
+	h.t.Cleanup(func() { _ = store.Close() })
+
+	h.store = store
+	h.b = New(Config{Store: store, Term: testTerm, Keepalive: 20 * time.Millisecond, Clock: h.clock, Now: h.wall.Now, Version: "test"})
+	h.srv = httptest.NewServer(h.b.Handler())
+
+	h.t.Cleanup(h.srv.Close)
 }

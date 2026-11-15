@@ -126,7 +126,7 @@ func TestClaimRetryNeverGrantsTwice(t *testing.T) {
 	a := h.claim(laptop, "L1", wire.ReachUser, name("svc"), "a")
 	b := h.claim(laptop, "L1", wire.ReachUser, name("svc"), "a")
 
-	if a.Lease.Token != b.Lease.Token || h.store.Data().Counter != 1 || len(h.b.Leases()) != 1 {
+	if a.Lease.Token != b.Lease.Token || h.store.Data().Counter != a.Lease.Token || len(h.b.Leases()) != 1 {
 		t.Fatalf("a retry must replay the outcome: %+v vs %+v, counter %d", a, b, h.store.Data().Counter)
 	}
 }
@@ -309,7 +309,7 @@ func TestRestartKeepsLeasesAndOutcomesAndExpiresNothingForOneTerm(t *testing.T) 
 		t.Fatal("nothing expires for one term after start")
 	}
 
-	if _, ok := store.Data().Outcomes["L1"]; !ok || store.Data().Counter != 1 {
+	if _, ok := store.Data().Outcomes["L1"]; !ok || store.Data().Counter != first.Lease.Token {
 		t.Fatal("the request outcome and the counter survive")
 	}
 }

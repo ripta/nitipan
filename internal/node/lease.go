@@ -498,6 +498,8 @@ func (n *Node) applyRenewed(out wire.Renewed, sent time.Duration, live map[strin
 				continue
 			}
 
+			n.recordToken(sc, r.Lease.Token)
+
 			restored := n.book.clearWrittenOff(r.ID)
 
 			n.book.apply(*r.Lease, sent, true)
@@ -510,6 +512,8 @@ func (n *Node) applyRenewed(out wire.Renewed, sent time.Duration, live map[strin
 			if r.Lease == nil {
 				continue
 			}
+
+			n.recordToken(sc, r.Lease.Token)
 
 			n.book.apply(*r.Lease, sent, true)
 

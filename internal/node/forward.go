@@ -18,6 +18,7 @@ func (n *Node) registerLeaseKinds() {
 	n.forwrd[handoff.KindBreak] = n.forwardBreak
 	n.forwrd[handoff.KindRenew] = n.forwardRenew
 	n.forwrd[handoff.KindList] = n.forwardList
+	n.forwrd[handoff.KindFence] = n.forwardFence
 }
 
 func decodeBodyOf(req handoff.Request, into any) error {
@@ -55,12 +56,18 @@ func (n *Node) forwardClaim(ctx context.Context, req handoff.Request) (json.RawM
 
 		sc := handoff.Sidecar{
 			ID: leaseID, Reach: body.Reach, Anchor: body.Anchor, Entries: body.Entries, Derivation: body.Derivation,
-			Holder: body.Holder, Description: body.Description, CreatedAt: n.opts.Now().UTC(),
+			Holder: body.Holder, Description: body.Description, CreatedAt: n.opts.Now().UTC(), Token: res.Lease.Token,
 		}
 
 		err := n.withLock(func(l *state.Locked) error {
-			if _, err := handoff.ReadSidecar(n.opts.StateDir, leaseID); err == nil {
-				return nil
+			if have, err := handoff.ReadSidecar(n.opts.StateDir, leaseID); err == nil {
+				if have.Token == sc.Token {
+					return nil
+				}
+
+				have.Token = sc.Token
+
+				return handoff.WriteSidecar(l, have)
 			}
 
 			return handoff.WriteSidecar(l, sc)
@@ -185,6 +192,44 @@ func (n *Node) forwardList(ctx context.Context, _ handoff.Request) (json.RawMess
 	}
 
 	return json.Marshal(out)
+}
+
+func (n *Node) forwardFence(ctx context.Context, req handoff.Request) (json.RawMessage, error) {
+	var body handoff.FenceBody
+	if err := decodeBodyOf(req, &body); err != nil {
+		return nil, err
+	}
+
+	var out wire.FenceVerdict
+	if err := n.cl.call(ctx, wire.PathFence, wire.FenceReport{Version: wire.Current, Token: body.Token}, &out); err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(out)
+}
+
+// recordToken stores the broker's token in a lease's sidecar. It never creates a sidecar, so a lease
+// released meanwhile stays gone.
+func (n *Node) recordToken(sc handoff.Sidecar, token uint64) {
+	if token == 0 || sc.ID == "" || sc.Token == token {
+		return
+	}
+
+	id := sc.ID
+
+	err := n.withLock(func(l *state.Locked) error {
+		sc, err := handoff.ReadSidecar(n.opts.StateDir, id)
+		if err != nil || sc.Token == token {
+			return nil
+		}
+
+		sc.Token = token
+
+		return handoff.WriteSidecar(l, sc)
+	})
+	if err != nil {
+		n.warn(fmt.Sprintf("recording the token of lease %s: %v", id, err))
+	}
 }
 
 func (n *Node) publishDeadlinesNow() {
