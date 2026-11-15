@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strings"
@@ -136,7 +137,13 @@ func TestWhoHoldsRepoNameReachesGrantsAndEveryMirror(t *testing.T) {
 	}
 
 	grant := found(t, ans, "G1")
-	if grant.State != wire.StateLive || grant.Reach != wire.ReachUser || grant.Qualified != FormatAddress("h-a", grant.Node) || len(grant.Names) != 1 {
+
+	mailName, err := DeriveMailName("claude", "s-a", h.data().Labels[grant.Node].MachineID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if grant.State != wire.StateLive || grant.Reach != wire.ReachUser || grant.Qualified != FormatAddress(mailName, grant.Node) || len(grant.Names) != 1 {
 		t.Fatalf("grant = %+v", grant)
 	}
 
@@ -432,5 +439,55 @@ func TestWhoIsListsAnUnreadableMirrorAsUnknownInsteadOfSkippingIt(t *testing.T) 
 
 	if ans.Holders != 1 || len(ans.Notes) == 0 {
 		t.Fatalf("the answer must say a holder behind an unreadable record may be missed: %+v", ans)
+	}
+}
+
+func TestDiscoveryPrintsMailAddressesAndAcceptsOneAndNeverFallsBackToTheHandle(t *testing.T) {
+	h := newHarness(t, nil)
+	h.twoNodes()
+
+	h.claim(laptop, "G1", wire.ReachUser, name("svc"), "a")
+
+	// A Claude Code holder whose record predates session_id has no mail address.
+	noSession := machineMirror(t, "M1", "h-old", nil, "/x")
+
+	var r record.Record
+	if err := json.Unmarshal(noSession.Record, &r); err != nil {
+		t.Fatal(err)
+	}
+
+	r.Holder.SessionID = ""
+
+	data, err := r.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	noSession.Record = data
+	h.snapshot(laptop, noSession)
+
+	label := h.data().Nodes[laptop.key().String()].Label
+	want, _ := DeriveMailName("claude", "s-a", laptop.Machine)
+	addr := FormatAddress(want, label)
+
+	ans, status := h.whoHolds(studio, wire.WhoHolds{Address: addr})
+	if status != http.StatusOK || !slices.Contains(leaseIDs(ans.Found), "G1") {
+		t.Fatalf("who holds %s: status %d, found %v", addr, status, leaseIDs(ans.Found))
+	}
+
+	if f := found(t, ans, "G1"); f.Qualified != addr || f.NotMailable != "" {
+		t.Errorf("found = %+v, want the mail address", f)
+	}
+
+	byName := h.whoIs(studio, want)
+	if byName.Holders != 1 || len(byName.Found) != 1 || byName.Found[0].Lease != "G1" {
+		t.Errorf("who is %s = %+v", want, byName)
+	}
+
+	all, _ := h.whoHolds(studio, wire.WhoHolds{Address: "h-old@" + label})
+	m := found(t, all, "M1")
+
+	if m.Qualified != "" || m.NotMailable == "" {
+		t.Errorf("a holder with no session ID = %+v, want not mailable and no fallback to the handle", m)
 	}
 }

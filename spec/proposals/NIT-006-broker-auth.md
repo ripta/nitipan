@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-24
+**Updated:** 2026-11-08
 
 ## Dependencies
 
@@ -121,10 +121,10 @@ exists.
   rollback starts an older broker from the pre-upgrade state. A rollback loses every binding, admission, delegation,
   and grant made since, and turns cross-user features off with them. An older broker can never read a coworker's
   binding as one of the owner's enrolled labels, or compare a presented key against a hash
-- The kept previous file holds NIT-007's keys in the clear. Every "forget label" and "revoke user" after the upgrade
-  also removes those keys from it, so a rollback never brings back a key forgotten since. The broker deletes the file
+- The kept previous file holds the hashes of NIT-007's keys. Every "forget label" and "revoke user" after the upgrade
+  also removes those hashes from it, so a rollback never brings back a key forgotten since. The broker deletes the file
   only when the owner confirms on the broker host that no rollback is wanted, and the confirm output says a rollback
-  is then impossible
+  is then impossible. Amended 2026-11-08; see Decision Log
 - Binding a label rewrites every lease it holds whose `acting_for` is not a user label to the newly bound user. The
   upgrade is one case: it binds the pinned labels to the owner, so their leases move to the owner's scope. A label
   nobody approved keeps a legacy `acting_for` until it is bound. While cross-user features are off, the broker counts
@@ -555,7 +555,8 @@ Amended 2026-10-24; see Decision Log.
 - **A rollback across the store change loses cross-user state** — likelihood: low, impact: medium.
   Mitigation: NIT-004 keeps the previous file, so an older broker starts from it. Every binding, admission,
   delegation, and grant made since is lost, and must be made again after the upgrade is retried. The kept file holds
-  NIT-007's keys in the clear, minus every key forgotten since, until the owner confirms no rollback is wanted.
+  the hashes of NIT-007's keys, minus every key forgotten since, until the owner confirms no rollback is wanted.
+  Amended 2026-11-08; see Decision Log
 - **The design depends on accepted proposals not yet built** — likelihood: medium, impact: medium.
   NIT-006 changes decisions in NIT-004, NIT-007, and NIT-008, all accepted and not started. A later change there can
   undo what NIT-006 relies on, such as NIT-008 ringing the refused-claim notice. Mitigation: each was amended in place
@@ -774,6 +775,11 @@ Amended 2026-10-24; see Decision Log.
   only the broker and node contract, so it fails the Architecture test.
 - 2026-10-24: Accepted. NIT-004, NIT-007, and NIT-008 were amended in place for its decisions.
 - 2026-10-24: Scheduled as NIT-006 M1-M3 in queue.md.
+- 2026-11-08 (autonomous): The kept previous store was said to hold NIT-007's keys "in the clear". NIT-007 stores only
+  a hash of each pinned key, as its "Auth" says. The kept-file bullet and the rollback risk now say the
+  file holds the hashes. The rule that "forget label" and "revoke user" also remove them from the kept file stays,
+  since a retained hash would still let a forgotten key authenticate after a rollback. NIT-007 M1's row review found
+  the stale wording.
 
 ## References
 

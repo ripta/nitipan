@@ -5,6 +5,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +24,7 @@ import (
 	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/lease"
 	"github.com/space-armada/nitipan/internal/machine"
+	"github.com/space-armada/nitipan/internal/node"
 	"github.com/space-armada/nitipan/internal/proc"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/rootset"
@@ -102,6 +105,23 @@ type Deps struct {
 
 	// OpencodeDB reads opencode's database. Nil reads it with the sqlite3 program.
 	OpencodeDB session.OpencodeDB
+
+	// Context ends the mail waiter. Default: a context that never ends.
+	Context context.Context
+
+	// MailWatch watches the mailbox for the waiter. Default: node.SystemWatch.
+	MailWatch node.WatchFunc
+
+	// MailPoll is how often the waiter checks that it is still the current waiter. Default: DefaultMailPoll.
+	MailPoll time.Duration
+
+	// ManagedSettingsDirs are the directories that hold Claude Code's managed settings. The waiter reads
+	// them for crossSessionInbound. Default: the macOS and Linux locations.
+	ManagedSettingsDirs []string
+
+	// AdminSocket overrides the broker's admin socket path for the approval commands. Default: beside the
+	// broker's store.
+	AdminSocket string
 }
 
 func (d Deps) withDefaults() Deps {
@@ -143,6 +163,18 @@ func (d Deps) withDefaults() Deps {
 
 	if d.Finder == nil {
 		d.Finder = keys.NewGitBoundaries(keys.ExecGit)
+	}
+
+	if d.Context == nil {
+		d.Context = context.Background()
+	}
+
+	if d.MailWatch == nil {
+		d.MailWatch = node.SystemWatch
+	}
+
+	if d.MailPoll == 0 {
+		d.MailPoll = DefaultMailPoll
 	}
 
 	return d
@@ -207,6 +239,7 @@ func newRoot(a *app) *cobra.Command {
 	})
 
 	root.AddCommand(
+		a.mailCmd(),
 		a.acquireCmd(),
 		a.releaseCmd(),
 		a.listCmd(),
@@ -237,6 +270,12 @@ func Execute(deps Deps, args []string) int {
 	err := root.Execute()
 
 	a.releaseOrphans()
+	a.ringIdentified()
+
+	// The waiter's ring is the hook's whole output. Exit status 2 is what wakes an idle session.
+	if errors.Is(err, errWake) {
+		return wakeStatus
+	}
 
 	if err != nil {
 		fmt.Fprintf(deps.Stderr, "nitipan: %v\n", err)

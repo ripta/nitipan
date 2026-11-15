@@ -81,7 +81,7 @@ func (a *app) runBreak(cmd *cobra.Command, ids []string) error {
 
 	req := lease.BreakRequest{IDs: ids, Force: force}
 
-	req.Caller, req.CallerErr = a.resolver().Resolve().Caller()
+	req.Caller, req.CallerErr = a.caller()
 
 	e, err := a.engine()
 	if err != nil {

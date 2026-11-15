@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-24
+**Updated:** 2026-11-08
 
 ## Dependencies
 
@@ -22,8 +22,8 @@
   kinds gated on the node's registered version. "Node lifecycle": the LaunchAgent plist `setup` prints also carries
   the codex path and `CODEX_HOME`, since the plist is the one node input no agent sandbox can write
 - NIT-008 — "Wake paths ring, and only a read consumes" and "Agents without a wake path". Rings also cover pending
-  NIT-003 notices and requests. The ring ledger holds their keys and lives in the state directory. NIT-008 M3 builds
-  this. Amended 2026-10-24; see Decision Log
+  NIT-003 notices and requests. The ring ledger holds their keys and lives in the state directory. NIT-007 M1 builds
+  the ledger with the mail keys. NIT-008 M3 adds the notice and request keys. Amended 2026-11-08; see Decision Log
 - NIT-006 — "Node credential": NIT-006, now accepted, keeps the pinned bearer key "Auth" sets and binds its label to
   one user, and never runs a second credential beside it. "Cross-user mail authorization" opens mail across users
   under the recipient user's grant. Amended 2026-10-24; see Decision Log
@@ -102,8 +102,9 @@ that mailbox.
 - The node keeps a ledger of message IDs it has accepted, so a resend after a crash between the write and the ack is
   dropped, even when the first copy was already consumed. An entry is kept as long as the broker could still resend
   the message
-- The broker sends mail only to a node whose registered version supports it. For an older node it keeps the message
-  and tells the sender "recipient node too old", rather than letting the node ack an event it does not know
+- The broker sends mail only to a node whose registered version supports it. For an older node it refuses the send with
+  "recipient node too old", and bounces mail already queued for a node that later registers without mail, rather than
+  letting the node ack an event it does not know. Amended 2026-11-08; see Decision Log
 - Mail queued on the broker for a disconnected node is part of the broker's persisted state until the node acks it.
   NIT-004's "Broker lifecycle and store" persists no general event queue, so its store must also hold queued mail.
   See Risks
@@ -136,15 +137,17 @@ Log.
 - Each agent's start path writes a registration into the state directory: a new Claude Code `SessionStart` hook that
   `setup` prints, Codex's existing `SessionStart` hook, and the opencode plugin's session events. Every nitipan call
   that sends or reads mail refreshes it from its own environment. That covers a session started before the hook was
-  installed, and gives every sender a reply address
+  installed, and gives every sender a reply address. A send is refused unless its sender is a registered session that its
+  node reported as live, so every bounce has a mailbox to land in. Amended 2026-11-08; see Decision Log
 - A registration stores the holder's identity fields, which are agent, PID, process start, and every session ID the
   process has held, plus the delivery endpoint. It stores no name. The node checks the fields with NIT-001's liveness
   rule before it rings. A later registration for the same identity replaces the earlier one, which is how an endpoint
   is refreshed
 - The mail address is `<mail name>@<label>`. The mail name is derived from the agent and the session ID through
-  NIT-001's word list, with its own domain separator, and carries a derivation version. For Codex and opencode it is
-  the same four words as their NIT-001 handle, since both handles are already keyed by session ID. A Claude Code
-  session has two names: its lease handle, keyed by PID, and its mail name, keyed by `CLAUDE_CODE_SESSION_ID`
+  NIT-001's word list. A Claude Code mail name has its own domain separator. A Codex or opencode mail name uses
+  NIT-001's identity string unchanged, so it equals their handle, since both handles are already keyed by session ID.
+  The broker stores a derivation version with each session it learns. A Claude Code session has two names: its lease
+  handle, keyed by PID, and its mail name, keyed by `CLAUDE_CODE_SESSION_ID`. Amended 2026-11-08; see Decision Log
 - The broker is the only place a mail name is derived, as it is for labels. Nodes report raw session IDs from
   registrations and from lease records' `session_id`. Discovery answers, reply addresses, and `mail status` all print
   the mail address, so no sender ever derives one. "Who holds X" and "who is named N" accept a mail address too
@@ -162,7 +165,12 @@ Log.
   session's identity, within the same-user trust NIT-001 already has
 - The node reports each live registration's session IDs to the broker, and the broker keeps every session ID each
   label ever reported. Mail for an address no node ever reported is refused at send with "no such session", as NIT-004
-  refuses an unknown label. An address once reported stays valid, so a stored copy never strands
+  refuses an unknown label. An address once reported stays valid, so a stored copy never strands. The broker reads
+  reports only from a label pinned to the reporting node's key, since a pending label can neither send nor receive
+  mail. It reads the first 256 sessions of a snapshot, and refuses an agent it has no mail name for and an ID unsafe in
+  a file name. It stores at most 10,000 session IDs per label and refuses a new one past that. Each refusal is logged
+  with its reason and never dropped quietly. A label that reaches the bound needs a new design, since an address once
+  reported stays valid. Amended 2026-11-08; see Decision Log
 - Registrations, presence files, and message files carry `major.minor` versions under ADR-04's reader rules, as
   NIT-004's sidecars do. One the node or CLI cannot use reads as unknown: it is never rung or read, and `mail status`
   says why. A registration missing a field its adapter's descriptor needs is refused the same way
@@ -194,15 +202,19 @@ verified HTTPS. Mail across users waits on NIT-006.
   `Authorization` slot on every request: the stream's `GET`, every send, and every ack
 - The broker pins the key to the label when the user approves the label on the broker host. A new label stays pending
   until then and can neither send nor receive mail. Its leases follow NIT-004 unchanged. The approve command takes a
-  fingerprint, which the node prints locally, and pins the pending key that matches it. Every other pending key for the
-  label is discarded, so a host that submits a key of its own cannot block the approval
+  fingerprint, which the node prints locally, and pins the pending key that matches it. A fingerprint no pending key has
+  is recorded, and the label pins the first key that presents it. Every other pending key for the label is discarded, so
+  a host that submits a key of its own cannot block the approval. Amended 2026-11-08; see Decision Log
 - A different key for a pinned label is refused whether or not the old stream is live, for leases as well as mail.
-  Labels the broker saw before mail shipped are not pinned automatically. Each needs the same approval
+  Labels the broker saw before mail shipped are not pinned automatically. Each needs the same approval. Until then the
+  label keeps NIT-004's live-stream key rule for leases, and its stream receives no mail. Approval closes a stream that
+  opened under another key. Amended 2026-11-08; see Decision Log
 - A reinstalled or wiped machine is recovered with a broker-side "forget label" command. Mail queued for a forgotten
-  label is kept for the label's next approved key, never handed to an unapproved one. Mail already stored on the
-  forgotten machine and never read bounces to its senders without its body, since the broker no longer holds it.
-  Under NIT-006, when the next key binds the label to a different user, the queued mail bounces instead. Amended
-  2026-10-24; see Decision Log
+  label is kept for the label's next approved key, never handed to an unapproved one. Mail the broker had sent and
+  saw no ack for is queued again, since an ack lost before a wipe cannot be told from a message that never arrived.
+  Mail already stored on the forgotten machine and never read bounces to its senders without its body, since the
+  broker no longer holds it. Under NIT-006, when the next key binds the label to a different user, the queued mail
+  bounces instead. Amended 2026-11-08; see Decision Log
 - A node sends and accepts mail only when its broker address is HTTPS with a certificate it verifies. A node on plain
   HTTP gets leases but no mail, and its error says why
 - The broker stamps each message's sender from the authenticated connection and ignores any sender field the client
@@ -255,8 +267,9 @@ The ledger is a file beside the registration in the state directory, so a waiter
 NIT-008's "Telling the sub-lessee" sets its format, and adds keys for pending notices and requests, which every wake
 path rings for.
 
-A message body is capped at a fixed size, refused at send. The cap keeps queued and bounced mail small in NIT-004's
-whole-file store, and keeps one message within what an agent shows as tool output.
+A message body is capped at 64 KiB, refused at send. The cap keeps queued and bounced mail small in NIT-004's
+whole-file store, and keeps one message within what an agent shows as tool output. Amended 2026-11-08; see Decision
+Log.
 
 nitipan cannot see whether a push path delivered. The inbox socket reports no outcome, and `codex queue` exits once
 the message is stored, not once it runs. A path that took the message out of the mailbox before the session read it
@@ -386,6 +399,16 @@ read is returned to the sender with the reason.
 - Stage updates and bounces are new event kinds between broker and node. The broker sends them only to a node whose
   registered version supports them. A newer node facing an older broker reports "broker too old" for mail, per NIT-004's
   "Version skew"
+- The mail request kinds raise the handoff request version to 4, which is global to the CLI and node. A new CLI facing
+  an older node gets "node too old" for every request, mail or not, until the node restarts on the new binary, which
+  it does by itself when its executable changes. An older CLI facing a new node sends versions the node still answers,
+  and has no mail commands. The broker never sees the handoff version. Its direction is the node's registration: an
+  older node sends no mail capability, so the broker refuses a send to it with "recipient node too old", and a newer
+  node facing an older broker reports "broker too old". The broker store is 1.1. A 1.0 store is stamped 1.1 as it
+  loads, so a 1.0 broker refuses the file once a newer broker has run on it. Rolling the broker back below 1.1
+  therefore needs a copy of the store made before the upgrade, and loses every approval, reported session, and queued
+  message since. A minor stamp keeps no previous file, since NIT-004 keeps one only before a major migration.
+  Amended 2026-11-08; see Decision Log
 
 A sender can tell mail in flight from mail stuck, and a reply is never silently lost. An idle requestor wakes for its
 reply or its bounce, and for nothing else.
@@ -446,10 +469,11 @@ Amended 2026-10-24; see Decision Log.
 
 ### M1: Mailbox and Claude Code delivery
 
-**Status:** NOT STARTED
+**Status:** DONE
 
-- A session on one machine sends a message that a Claude Code session on another machine reads with
-  `nitipan mail read`, and the message is stored on the recipient's machine before the broker drops it
+- A Claude Code session on one machine sends a message that a Claude Code session on another machine reads with
+  `nitipan mail read`, and the message is stored on the recipient's machine before the broker drops it. Amended
+  2026-11-08; see Decision Log
 - Mail queued for a disconnected node survives a broker restart. A body over the cap is refused at send
 - A node crash between storing a message and acking it, followed by a resend, leaves one copy, including after the
   first copy was read
@@ -461,11 +485,11 @@ Amended 2026-10-24; see Decision Log.
   body
 - The broker stamps the sender from the connection, and a client-set sender or `sender_verified` is ignored. The
   reader shows the sender and its verification outside the message body
-- A session registers at start and on each mail call. A resumed Claude Code session keeps its mail address and reads
-  mail sent before the resume, a stored address still reaches it after 7 days, and mail to a pre-`/clear` address
-  reaches the live process marked as such. Two live sessions with one session ID make the address ambiguous. A dead
-  registration is never rung, mail for an address no node reported is refused at send, and a Claude Code holder with
-  no session ID shows as not mailable
+- A Claude Code session registers at start and on each mail call. A resumed Claude Code session keeps its mail
+  address and reads mail sent before the resume, a stored address still reaches it after 7 days, and mail to a
+  pre-`/clear` address reaches the live process marked as such. Two live sessions with one session ID make the address
+  ambiguous. A dead registration is never rung, mail for an address no node reported is refused at send, and a Claude
+  Code holder with no session ID shows as not mailable. Amended 2026-11-08; see Decision Log
 - The broker alone derives mail names. Discovery, reply addresses, and `mail status` print mail addresses, and "who
   holds X" and "who is named N" accept one
 - The node rings a Claude Code socket only after the kernel names the registered PID as its peer
@@ -485,6 +509,148 @@ Amended 2026-10-24; see Decision Log.
   it stored and read, and only unstored messages are resent
 - An old node with a new broker gets no mail, and the sender gets "recipient node too old". A new node with an old
   broker reports "broker too old" for mail. Both in tests
+
+**As built:**
+
+Left to the user. No live Claude Code harness exists in the repo, and no check here ran against a real session:
+
+- A live check that a real idle Claude Code session wakes through the `asyncRewake` waiter, and through the node's
+  socket ring with no waiter armed. Tests drive the hook contract (exit status 2 with the ring on standard error) and a
+  fake inbox socket, never Claude Code itself
+- The Risks item "The work environment blocks every Claude Code wake path": check the work org's managed settings for
+  `crossSessionInbound`. Only the user can do that. It does not hold the milestone
+
+What was built, and what was found:
+
+- The mailbox is a `mail/` tree in the state directory: inbox, accepted-ID ledger, read markers, registrations, ring
+  ledger, waiter presence, and the sender's stage notes. A reader files a read marker and the node owns the ledger, so
+  neither rewrites the other's file. The accepted-ID check also counts a message still in the inbox or already marked
+  read, which closes the window between the write and the ledger entry
+- The ring ledger is built here, in NIT-008's format as amended, keyed `mail:<message ID>`. A waiter and the node claim
+  keys under one lock, so each message wakes a session at most once. NIT-008 M3 adds the notice and request keys. See
+  Decision Log
+- The broker store is 1.1: pins, every session ID each label reported, and mail. A 1.0 store is stamped 1.1 as it loads,
+  so an older broker refuses the file once a newer one has run on it. Each node's last mail capability and HTTPS flag are
+  stored, so "recipient node too old" and the plain HTTP refusal work while the node is offline
+- Approval is a broker-local admin unix socket beside the store, with a peer UID check and a 0700 directory. `nitipan
+  broker pending|approve|forget` call it. No network route and no handoff kind reaches it, and tests assert both. The
+  approve output and `setup broker` carry ADR-08's warning. The node prints its key fingerprint with `nitipan node
+  fingerprint` and in `setup node`
+- Claude Code facts checked against its docs on 2026-11-08. The hooks page documents `asyncRewake` as "runs in the
+  background and wakes Claude on exit code 2", with stderr shown as a system reminder, and documents no maximum for a
+  hook `timeout`. `setup claude` therefore prints 86400 seconds. The settings page lists `crossSessionInbound` scopes as
+  user, shared project, project local, managed, and `--settings`, on an `accept` < `hold` < `refuse` ladder, where a
+  stricter project or local value beats a managed one. The environment variable page names
+  `CLAUDE_CODE_MESSAGING_SOCKET` (v2.1.224 or later) and `CLAUDE_CODE_MESSAGING_TOKEN`, exported to hooks and Bash
+  commands. The token is never read, stored, or presented. The waiter reads the user, project, local, and file-based
+  managed scopes. It cannot see MDM, server-managed, or `--settings` values of the session. A refusal set only there
+  stops the socket ring inside Claude Code and leaves the waiter armed. The macOS managed path comes from the sandbox's
+  own deny list, and the Linux path from memory, since the managed settings page was not fetched
+- The mail name for Codex and opencode is already derived and equals the lease handle. Their delivery is M2
+- `NIT-006` said a kept previous store holds this proposal's keys in the clear. Keys are stored hashed, so that line was
+  stale. The row review corrected it in NIT-006 with an amendment
+- A `Makefile` variable pair, `TEST_PKGS` and `TEST_ARGS`, lets `make test` run one package. Nothing else changed in
+  the build
+- `TestDeadHolderEndsItsLeasesAtOnce` already raced on the base commit. It deleted from the fake process table while the
+  node read it, and failed about one run in three there. The fake table now locks, and the test calls `Remove`
+- `TestWhoHoldsReadsAV1RecordAndAnUnreadableSidecarAndAQuietNode` failed about one run in thirty on this milestone's
+  tree and never on the base. The cause was in the product. While the node derived a lease's repo entries, which can
+  take a while, an unreadable derived file of a higher major could appear. The node then wrote its own file over it, and
+  the lease read as derived. A node never rewrites a file it cannot read, so it now leaves that file alone and the lease
+  reads as unknown. A node test holds the derivation open, plants the file, and releases it, so no timing is involved.
+  The CLI test passes 60 of 60 runs after the fix, and failed within 30 before it
+- Review found and the milestone fixed five more, each pinned by a test:
+  - An unusable registration may name any session, so while one exists no stored mail expires and none bounces for want
+    of a live holder. It is never reaped, and `mail status` lists it. The sessions it names are left out of the node's
+    snapshot, since the node cannot read them
+  - A ring ledger, accepted-ID entry, waiter presence file, or sent note that is unusable or of a higher minor is never
+    rewritten. A ledger read that way may let a ring repeat, and the node then rings that registration at most once
+    every 30 seconds. An accepted-ID entry of any version still counts as the message taken, so a resend never becomes a
+    second copy. A waiter that cannot replace a newer presence file does not arm, and `mail status` says why
+  - The admin socket's directory must belong to the broker's user. A file at the socket path is removed only when it is a
+    stale socket. A path over the platform's limit is refused with the path and the limit
+  - Approval no longer depends on the bounded list of pending keys. A host that registers many fresh keys while the real
+    machine sleeps could evict the real key before the user approved it, and could hold the label's stream so the real
+    key was never recorded. A well-formed fingerprint no pending key has is recorded, and the label pins the first key
+    that presents it. A malformed fingerprint, or an approval for a label already pinned to another key, is refused
+  - `mail send` rings pending mail like any identified-holder call. `mail read` and `mail status` stay quiet, since they
+    show the mail
+- The row review found and fixed these, each pinned by a test where one could be written:
+  - The broker stored every session a node reported, with no check of the agent or ID, no bound, and from a pending
+    label. It now reads reports only from a pinned label, first 256 per snapshot, refuses an unknown agent and an
+    unsafe ID, and stores at most 10,000 IDs per label. Each refusal is logged. A mail to a label that was never
+    approved is refused with "no such session", since the broker holds no address for it. A forgotten label keeps its
+    addresses, so mail queued for it waits
+  - A socket ring held the node's mail lock across the dial and the write. A socket that never answers could stall
+    every other mail call for the dial's two seconds. The node now judges the registrations under the lock and dials
+    after releasing it. The claim on the ring ledger is still made before the dial and undone when it fails. A reap
+    can land between the pick and the claim, so the claim and the undo write no ledger for an identity with no
+    registration, and removing a registration holds the ledger lock
+  - A registration refresh over a file that failed to decode, or whose name and fields did not match, rewrote it and
+    dropped its session IDs. A refresh now refuses on any read error other than a missing file
+  - Reaping a dead process's registration removed files this binary may not remove under ADR-04. It now removes only a
+    file it can decode, of its own major and no higher minor. A registration it must leave keeps its ledger and
+    presence beside it. A leftover registration still reads as dead, so nothing rings it, and `mail status` lists it
+  - The version skew and store rollback consequences, and the narrowed checks and behaviors the Decision Log held
+    alone, are now in the settled text with markers
+- The Claude-only gate narrows two checks. A session sends mail and registers its mailbox only when its agent is Claude
+  Code. Codex and opencode sessions get a clear refusal until M2 lifts the gate. See Decision Log
+
+Check to test, by the bullet order above:
+
+1. Two machines, stored before the broker drops it: node `TestMailIsStoredOnTheRecipientsMachineBeforeTheBrokerDropsItAndTheSenderSeesTheStage`, cli
+   `TestASessionSendsMailAcrossMachinesAndTheRecipientReadsItFramedOutsideTheBody`
+2. Survives a restart, cap refused: broker `TestQueuedMailSurvivesABrokerRestartAndIsStoredThenAcked`,
+   `TestABodyOverTheCapIsRefusedAtSend`, cli `TestMailRefusesABodyOverTheCapBeforeTheBrokerSeesIt`
+3. Crash between store and ack: node `TestACrashBetweenStoringAndAckingLeavesOneCopyEvenAfterTheFirstWasRead`, mailbox
+   `TestTheAcceptedLedgerOutlivesTheReadAndPrunesAfterTheRetention`
+4. Approval, pinning, keys, HTTPS: broker `TestANewLabelCanNeitherSendNorReceiveMailUntilApproved`,
+   `TestAPendingLabelStillGetsLeaseServiceButNoMailEvent`, `TestASecondKeyForAnApprovedLabelIsRefusedWhileItsMachineSleeps`,
+   `TestAnUnpinnedLabelKeepsTheLiveStreamKeyRule`, `TestApproveByFingerprintPinsThatKeyAndDiscardsTheOthers`,
+   `TestApprovingTheRealKeyClosesAnImpostorsOpenStreamAndSendsItNoMail`, `TestAFloodOfFreshKeysCannotEvictTheRealKeyFromAnApprovalItNeverGets`,
+   `TestAdminPathChecksOwnerFileTypeAndLength`,
+   `TestASendOrAckWithoutTheLabelsKeyIsRefused`, `TestANodeOnPlainHTTPGetsNoMailAndTheErrorSaysWhy`, `TestDefaultKeyPolicy`;
+   node `TestANodeOnPlainHTTPSendsAndAcceptsNoMailAndSaysWhy`; cli `TestANodeOnPlainHTTPGetsNoMailAndTheErrorSaysWhy`,
+   `TestTheApprovalCommandsReachTheBrokerOnlyThroughItsAdminSocket`; the admin socket, peer UID, and no network route:
+   broker `TestAdminSocketListsApprovesAndForgetsForTheBrokersOwnUser`, `TestAdminSocketRefusesAPeerThatIsAnotherOSUser`,
+   `TestAdminSocketNeedsAPrivateDirectory`, `TestTheNetworkHandlerServesNoApprovalRoute`
+5. Forget: broker `TestForgetKeepsQueuedMailForTheNextKeyAndBouncesStoredUnreadMailWithoutItsBody`
+6. Sender stamped from the connection, reader framing: broker `TestMailReachesTheRecipientsStreamWithTheSenderStampedByTheBroker`;
+   cli `TestASessionSendsMailAcrossMachinesAndTheRecipientReadsItFramedOutsideTheBody`
+7. Registration, resume, 7 days, pre-clear, ambiguity, dead, unreported, no session ID: cli
+   `TestAResumedSessionReadsMailSentBeforeTheResumeAndAnAddressOutlivesItsProcess`,
+   `TestMailToAPreClearAddressReachesTheLiveProcessAndSaysSo`,
+   `TestTwoLiveSessionsWithOneSessionIDBounceTheMailToItsSender`, `TestAClaudeHolderWithNoSessionIDIsNotMailable`; broker
+   `TestAnAddressOnceReportedStaysValidAndMailQueuedForAnUnapprovedLabelBouncesWithTheLabelReason`,
+   `TestSendRefusesAnUnknownLabelAnUnreportedNameAndAnUnreportedSender`; node `TestTwoLiveRegistrationsWithOneSessionIDMakeTheAddressAmbiguousAndTheSenderIsBounced`,
+   `TestTheNodeSkipsTheSocketRingWhileALiveWaiterIsArmedAndForADeadRegistration`; mailbox
+   `TestResolveFollowsTheAddressOrderLiveCurrentThenLivePreClearThenNothing`, `TestRefreshKeepsEverySessionIDAndRefusesAFileOfANewerMinor`
+8. The broker alone derives names; discovery and `who`: broker `TestAMailNameIsDerivedFromTheSessionIDAndSurvivesAResume`,
+   `TestDiscoveryPrintsMailAddressesAndAcceptsOneAndNeverFallsBackToTheHandle`
+9. Socket ring only after the kernel names the PID: node `TestTheNodeNeverRingsASocketWhoseKernelPeerIsNotTheRegisteredPID`,
+   `TestTheNodeRingsAClaudeSocketOnceWithNoContentAndOnlyForThePeerItNamed`
+10. Waiter, socket ring with no waiter, refuse stand-down, replacement: cli `TestTheWaiterWakesAnIdleSessionWithStatusTwoAndLeavesTheMailInPlace`,
+    `TestAWaiterFacingCrossSessionInboundRefuseStandsDownInEveryScope`, `TestANewerWaiterReplacesTheOlderAndADayOfTurnsLeavesOneWaiter`; node
+    `TestTheNodeRingsAClaudeSocketOnceWithNoContentAndOnlyForThePeerItNamed`
+11. No wake path removes mail, each message wakes at most once: cli `TestTheWaiterWakesAnIdleSessionWithStatusTwoAndLeavesTheMailInPlace`,
+    `TestTurnHooksAndIdentifiedHolderCallsRingWithoutRecordingOrRemoving`; mailbox
+    `TestClaimReturnsEachKeyToExactlyOneCallerEvenWhenTheyRace`; node the socket ring test
+12. Unknown versions: cli `TestMailOfAnUnknownVersionIsNeverRungOrReadAndStatusSaysWhy`; node
+    `TestAnUnusableRegistrationMakesItsSessionUnknownSoItsMailIsNeverExpired`; mailbox `TestClaimNeverRewritesARingLedgerItCannotUseOrOfAHigherMinor`,
+    `TestAnAcceptedEntryOfAnyVersionStillMeansTheMessageWasTakenAndIsNeverRewritten`,
+    `TestAWaiterPresenceOfAnotherVersionIsNotReplacedAndStatusCanSayWhy`, `TestASentNoteOfAHigherMinorIsNeitherRewrittenNorListed`;
+    node `TestADerivationNeverRewritesASidecarItCannotReadThatAppearedWhileItRan`; mailbox
+    `TestAMessageOfAnUnknownMajorOrWithAMismatchedNameIsNeverReadAsMail`, `TestAnUnusableLedgerReadsAsEmptyAndOldKeysArePruned`
+13. Identified-holder calls and turn hooks ring: cli `TestTurnHooksAndIdentifiedHolderCallsRingWithoutRecordingOrRemoving`,
+    `TestSetupClaudePrintsTheMailHooksWithTheWaiterAsAsyncRewake`
+14. Status, stages, bounce reasons, bounces wake and stages do not: broker `TestAReadReportAdvancesTheStageAndTellsTheSenderWithoutWakingIt`,
+    `TestMailTheBrokerNeverSentBouncesToItsSenderAfterSevenDaysWithItsBody`, `TestABounceThatCannotReachItsSenderIsDroppedAfterSevenDays`,
+    `TestQueuedMailBouncesAtOnceWhenItsNodeLaterReportsNoMailCapability`; node
+    `TestMailForASessionNobodyResumesBouncesToItsSenderWithTheBodyAfterSevenDays`; cli the first test's stage lines
+15. A sent message never bounces for expiry; a returning node reports first: broker
+    `TestASentMessageNeverBouncesForExpiryAndAReportedStoreStopsTheResend`
+16. Old node with new broker, new node with old broker: broker `TestAnOldNodeGetsNoMailAndTheSenderLearnsTheRecipientNodeIsTooOld`; cli
+    `TestANewNodeWithAnOldBrokerReportsBrokerTooOldForMail`, `TestAnOldNodeIsToldToUpgradeBeforeMailIsHandedToIt`
 
 ### M2: opencode and Codex delivery
 
@@ -594,6 +760,82 @@ Amended 2026-10-24; see Decision Log.
   mail. "Delivery guarantees" gains NIT-006's bounce reasons. The Summary and the prompt-injection risk said mail
   stays within one user until NIT-006. They now cite NIT-006's grant and reach rule.
 - 2026-10-24: Scheduled as NIT-007 M1 and NIT-007 M2 in queue.md. NIT-005 M3 goes between them.
+- 2026-11-08 (autonomous): M1 built the ring ledger. Impacts said "NIT-008 M3 builds this", for the ledger of rung
+  keys. M1's own checks need it: a waiter with no node must ring once per message, and the node's socket ring must skip
+  what a waiter rang. Two ledgers cannot give that. The ledger is the state-directory file in NIT-008's format, keyed by
+  message ID. NIT-008 M3 adds the notice and request keys. NIT-008's sentence about a pre-M3 node keeping its own mail
+  ledger was amended to match. The same amendment corrects the ledger's header: NIT-008 said it carries "NIT-001's
+  envelope with `major.minor`", and it carries a version and its registration's identity.
+- 2026-11-08 (autonomous): The mail name text said every mail name is derived "with its own domain separator", and that
+  Codex and opencode names are the same four words as their handle. Both cannot hold, since a domain separator changes
+  the words. The domain separator now applies to Claude Code names. Codex and opencode names use NIT-001's identity
+  string unchanged, so they equal their handle. M2 inherits that. Each session the broker learns carries a derivation
+  version.
+- 2026-11-08 (autonomous): The text said that for an older node the broker "keeps the message and tells the sender
+  'recipient node too old'". The broker now refuses the send with that error and queues nothing. It also bounces mail
+  already queued for a node that later registers without mail capability, with the reason "the recipient node is too
+  old". Keeping a message the node can never take would leave it to expire after 7 days with the wrong reason. The
+  capability is a number in the node's registration, stored per node, so the answer holds while the node is offline.
+- 2026-11-08 (autonomous): The body cap was "a fixed size". It is 64 KiB. The text fixed a cap and gave no number.
+- 2026-11-08 (autonomous): Approve, pending, and forget reach the running broker through a unix socket beside its store,
+  checked by the peer UID, never through a network route or a handoff kind. The store's flock rules out a second
+  process editing the file, and ADR-08 requires a channel for proofs that no node carries. The settled "approves on the
+  broker host" text already says this.
+- 2026-11-08 (autonomous): A sender must be a mailable identified holder: a registered session that its node reported as
+  live, with a mail name. Every bounce then has a mailbox to land in. A holder with no session ID cannot send.
+- 2026-11-08 (autonomous): Labels the broker saw before mail shipped stay unpinned and keep NIT-004's live-stream key
+  rule until approved. Mail needs the pin. "Forget label" also resets the sent flag on mail still queued, since an ack
+  lost before a wipe can no longer be told from a message that never arrived. The next approved key receives it again.
+  A stream that opened under another key also receives no mail, and approval closes it. Otherwise a host that took
+  an unpinned label's stream while the machine slept would be sent the label's mail the moment the real key was
+  approved.
+- 2026-11-08 (autonomous): A store of an older minor is stamped with this broker's version as it loads. Otherwise a
+  1.0 broker could open a file that already holds mail and drop it on its next rewrite.
+- 2026-11-08 (autonomous): The waiter hook timeout is 86400 seconds. Claude Code documents no maximum for a hook
+  timeout. The waiter reads `crossSessionInbound` from the user, project, local, and file-based managed scopes, which the
+  settings page lists, plus the managed drop-in directory. See the As built block for what it cannot see.
+- 2026-11-08 (autonomous): Only Claude Code sessions can send mail or register a mailbox in M1. The milestone's checks
+  say "a session sends" and "a session registers", and Codex and opencode have no wake path until M2. Their sessions
+  get a refusal that names the supported agents. M2 lifts the gate with their delivery. `mail read` and `mail status`
+  ring nothing, because they show the mail. `mail send` rings pending mail like any identified-holder call.
+- 2026-11-08 (autonomous): "Auth" said approval "pins the pending key that matches" the fingerprint. That depends on the
+  bounded list of pending keys. A host on the LAN that registers fresh keys while the real machine sleeps can evict the
+  real key from the list, and can keep a stream open so the real key's registration is refused and never recorded.
+  Approval now also accepts a well-formed fingerprint no pending key has, and the label pins the first key that
+  presents it. The fingerprint is a 64-bit prefix of the key hash, so a host cannot present a matching key without the
+  user's. A malformed fingerprint, and an approval for a label pinned to another key, are refused. The cost is that a
+  mistyped fingerprint is recorded and waits. `broker pending` shows it, and the approve output says nothing is pinned.
+- 2026-11-08 (autonomous): Files under `mail/` that this binary cannot use, or that carry a higher minor, are never
+  rewritten, and an unusable registration makes the sessions it may name unknown rather than dead. ADR-04's reader rules
+  say so for lease records. M1 applies them to every mail file. A ledger that cannot be written may repeat a ring, which
+  the settled design allows. The accepted-ID ledger instead treats any entry as the message taken.
+- 2026-11-08 (autonomous): A node's request handoff version is 4 for the mail kinds, as the M2 and M3 precedents of
+  NIT-004 bumped it for their kinds.
+- 2026-11-08 (autonomous): The row review amended the text in place for decisions the log held alone. "A session on
+  one machine sends" and "A session registers at start" said any session, and now say a Claude Code session, since
+  M1 gates the other agents until M2. "Mailbox registration" gained that a send is refused unless its sender is a
+  registered session that its node reported as live. "Auth" gained that an unpinned label's stream receives no mail
+  until approval, which closes a stream opened under another key. "Auth"'s forget text said queued mail waits for
+  the next approved key, and now also says mail the broker had sent without an ack is queued again.
+- 2026-11-08 (autonomous): The broker read every session a node reported. "Mailbox registration" said the broker keeps
+  every session ID each label reported, with no condition and no bound. It now reads reports only from a label pinned
+  to the node's key, the first 256 per snapshot, only for an agent with a mail name and an ID safe in a file name,
+  and it stores at most 10,000 per label. Each refusal is logged. The first condition follows "Auth", which says a
+  pending label can neither send nor receive mail. The others bound what a node, or a host holding a pending key,
+  can make the whole-file store and the per-send name derivation grow by. A mail to a label never approved is now
+  "no such session" instead of waiting. A label forgotten after it reported keeps its addresses, so its mail still
+  waits. The 10,000 bound is about 1 MiB per label and about 2.7 years at 10 new sessions a day. A label that
+  reaches it needs a new design: no eviction exists, since an address once reported stays valid.
+- 2026-11-08 (autonomous): "Delivery guarantees" covered mail event kinds between broker and node only. It said nothing
+  of the handoff request version 4 between CLI and node, or of the store stamp. It now states each direction of the
+  CLI, node, and broker trio, and that rolling the broker back below store 1.1 needs a pre-upgrade copy of the store
+  and loses the approvals, sessions, and mail since.
+- 2026-11-08 (autonomous): Two node rules from the row review. A file under `mail/` that this binary cannot decode, or
+  that carries a higher minor, is never rewritten, and a registration refresh over one now fails. A reaped dead
+  registration is removed only when it and each sibling file is decodable, of the binary's major, and no higher
+  minor. Otherwise the file stays. ADR-04 says an old binary never removes a session file of a higher version or one
+  it cannot decode. NIT-008's "removed with its registration" holds for files this binary can use. A leftover
+  registration reads as dead because its process is dead, so nothing rings it.
 
 ## References
 

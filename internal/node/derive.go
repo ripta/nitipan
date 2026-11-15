@@ -48,8 +48,19 @@ func (n *Node) derivedFor(rec *record.Record, budget *deriveBudget) *wire.Derive
 
 	// The CLI writes its file right after the lease appears, and the node's own derivation takes longer
 	// than that. A file the CLI wrote meanwhile wins, since only it marks a holder that can read a notice.
+	// A file this node cannot read that appeared meanwhile, such as one of a higher major, is never
+	// rewritten, and the lease reads as unknown.
+	unreadable := false
+
 	werr := n.withLock(func(l *state.Locked) error {
-		if cur, err := handoff.ReadDerived(n.opts.StateDir, rec.ID); err == nil && cur.By == handoff.DerivedByCLI && cur.Matches(rec.Domain.Keys) {
+		cur, err := handoff.ReadDerived(n.opts.StateDir, rec.ID)
+
+		switch {
+		case errors.Is(err, handoff.ErrUnusableFile):
+			unreadable = true
+
+			return nil
+		case err == nil && cur.By == handoff.DerivedByCLI && cur.Matches(rec.Domain.Keys):
 			d = cur
 
 			return nil
@@ -59,6 +70,10 @@ func (n *Node) derivedFor(rec *record.Record, budget *deriveBudget) *wire.Derive
 	})
 	if werr != nil {
 		n.warn(fmt.Sprintf("writing the derived entries of lease %s: %v", rec.ID, werr))
+	}
+
+	if unreadable {
+		return nil
 	}
 
 	return d.Wire()

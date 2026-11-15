@@ -42,7 +42,7 @@ lease files, which are nitipan's own format. A liveness of "unknown" means treat
 func (a *app) runList(cmd *cobra.Command) error {
 	req := lease.ListRequest{}
 
-	caller, callerErr := a.resolver().Resolve().Caller()
+	caller, callerErr := a.caller()
 	if callerErr == nil {
 		req.Caller = caller
 

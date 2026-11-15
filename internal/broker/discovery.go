@@ -129,9 +129,10 @@ func (b *Broker) nodeStaleLocked(k NodeKey) bool {
 
 func (b *Broker) foundGrant(g *grant) wire.Found {
 	v := b.viewOf(g)
+	addr, why := b.mailAddress(g.Holder, g.Node)
 
 	return wire.Found{
-		Lease: g.ID, Qualified: FormatAddress(g.Holder.Handle, g.Node), Reach: g.Reach, State: g.State,
+		Lease: g.ID, Qualified: addr, NotMailable: why, Reach: g.Reach, State: g.State,
 		Stale: b.nodeStaleLocked(g.nodeKey()), Holder: g.Holder, Node: g.Node, Host: b.store.Data().Labels[g.Node].Host,
 		Description: g.Description, Liveness: g.Liveness, Anchor: g.Anchor, Names: g.Entries, ExpiresMillis: v.ExpiresMillis,
 	}
@@ -139,7 +140,7 @@ func (b *Broker) foundGrant(g *grant) wire.Found {
 
 // foundMirror describes a mirror. State is mirrored, or stale when the node has gone quiet. A caller that
 // cannot judge the mirror passes StateUnknown and says why.
-func foundMirror(m mirror, state, why string) wire.Found {
+func (b *Broker) foundMirror(m mirror, state, why string) wire.Found {
 	f := wire.Found{Lease: m.id, Reach: record.ReachMachine, State: state, Stale: m.stale, Node: m.label, Host: m.host, Why: why}
 
 	if f.State == wire.StateMirrored && m.stale {
@@ -151,7 +152,7 @@ func foundMirror(m mirror, state, why string) wire.Found {
 	}
 
 	f.Holder = holderOfRecord(m.rec)
-	f.Qualified = FormatAddress(m.rec.Holder.Handle, m.label)
+	f.Qualified, f.NotMailable = b.mailAddress(f.Holder, m.label)
 	f.Description = m.rec.Description
 	f.Resource = m.rec.Domain.Name
 
@@ -198,7 +199,7 @@ func sortFound(fs []wire.Found) {
 // overlap.
 func (b *Broker) judge(asker NodeKey, q wire.WhoHolds, addr *Address, m mirror) (match bool, unknown string) {
 	if addr != nil {
-		return m.label == addr.Label && m.rec != nil && m.rec.Holder.Handle == addr.Handle, ""
+		return m.label == addr.Label && m.rec != nil && b.matchesName(holderOfRecord(m.rec), m.label, addr.Handle), ""
 	}
 
 	if q.Resource != "" {
@@ -276,7 +277,7 @@ func (b *Broker) handleWhoHolds(w http.ResponseWriter, r *http.Request, asker No
 	for _, g := range b.sortedGrantsLocked(shownGrant) {
 		hit := len(req.Names) > 0 && repoid.OverlapAny(g.Entries, req.Names)
 		if addr != nil {
-			hit = g.Node == addr.Label && g.Holder.Handle == addr.Handle
+			hit = g.Node == addr.Label && b.matchesName(g.Holder, g.Node, addr.Handle)
 		}
 
 		if hit {
@@ -291,11 +292,11 @@ func (b *Broker) handleWhoHolds(w http.ResponseWriter, r *http.Request, asker No
 
 		switch {
 		case match:
-			ans.Found = append(ans.Found, foundMirror(m, wire.StateMirrored, ""))
+			ans.Found = append(ans.Found, b.foundMirror(m, wire.StateMirrored, ""))
 		case unknown != "":
 			unjudged++
 
-			ans.Found = append(ans.Found, foundMirror(m, wire.StateUnknown, unknown))
+			ans.Found = append(ans.Found, b.foundMirror(m, wire.StateUnknown, unknown))
 		}
 	}
 
@@ -331,7 +332,7 @@ func (b *Broker) handleWhoIs(w http.ResponseWriter, r *http.Request, _ NodeKey) 
 	holders := map[string]bool{}
 
 	for _, g := range b.sortedGrantsLocked(shownGrant) {
-		if g.Holder.Name == req.Name || g.Holder.Handle == req.Name {
+		if g.Holder.Name == req.Name || b.matchesName(g.Holder, g.Node, req.Name) {
 			ans.Found = append(ans.Found, b.foundGrant(g))
 			holders[g.Node+"\x00"+g.Holder.Key] = true
 		}
@@ -344,16 +345,16 @@ func (b *Broker) handleWhoIs(w http.ResponseWriter, r *http.Request, _ NodeKey) 
 			// An unreadable record names no holder, so it cannot be matched. It may be the one asked for.
 			unjudged++
 
-			ans.Found = append(ans.Found, foundMirror(m, wire.StateUnknown, m.why))
+			ans.Found = append(ans.Found, b.foundMirror(m, wire.StateUnknown, m.why))
 
 			continue
 		}
 
-		if m.rec.Holder.Name != req.Name && m.rec.Holder.Handle != req.Name {
+		if m.rec.Holder.Name != req.Name && !b.matchesName(holderOfRecord(m.rec), m.label, req.Name) {
 			continue
 		}
 
-		ans.Found = append(ans.Found, foundMirror(m, wire.StateMirrored, ""))
+		ans.Found = append(ans.Found, b.foundMirror(m, wire.StateMirrored, ""))
 		holders[m.label+"\x00"+holderOfRecord(m.rec).Key] = true
 	}
 
@@ -401,7 +402,7 @@ func (b *Broker) overlapsFor(g *grant, mirrors []mirror) []wire.Overlap {
 		}
 
 		out = append(out, wire.Overlap{
-			ID: g.ID + "/" + m.id, Grant: b.foundGrant(g), Mirror: foundMirror(m, wire.StateMirrored, ""),
+			ID: g.ID + "/" + m.id, Grant: b.foundGrant(g), Mirror: b.foundMirror(m, wire.StateMirrored, ""),
 		})
 	}
 
@@ -427,4 +428,10 @@ func (b *Broker) overlapsForNode(node NodeKey) []wire.Overlap {
 
 func (b *Broker) labelOfLocked(k NodeKey) string {
 	return b.store.Data().Nodes[k.String()].Label
+}
+
+// matchesName reports whether a name a caller typed names the holder: its agent name, its lease
+// handle, or its mail name.
+func (b *Broker) matchesName(h wire.Holder, label, name string) bool {
+	return h.Handle == name || b.holderMailName(h, label) == name
 }

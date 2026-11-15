@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/space-armada/nitipan/internal/wire"
 )
 
 // File names under the state directory. V1 binaries never scan either one.
@@ -134,4 +136,36 @@ func statExec(path string) (fingerprint, error) {
 	}
 
 	return fingerprint{dev: uint64(st.Dev), ino: st.Ino, size: info.Size(), mtime: info.ModTime()}, nil
+}
+
+// ExistingFingerprint returns the fingerprint of the node's key when the key exists. It creates
+// nothing, so a command that promises to write nothing can use it.
+func ExistingFingerprint(dir string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, keyName))
+	if err != nil {
+		return "", false
+	}
+
+	key, err := checkKey(filepath.Join(dir, keyName), data)
+	if err != nil {
+		return "", false
+	}
+
+	return wire.Fingerprint(wire.KeyHash(key)), true
+}
+
+// Fingerprint returns the fingerprint of the node's instance key, creating the key when the node never
+// ran. The user passes it to the broker's approve command. It reveals nothing a hash of the key does
+// not.
+func Fingerprint(dir string) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating the state directory %s: %w", dir, err)
+	}
+
+	key, err := loadKey(dir)
+	if err != nil {
+		return "", err
+	}
+
+	return wire.Fingerprint(wire.KeyHash(key)), nil
 }

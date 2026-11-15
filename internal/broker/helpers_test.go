@@ -224,3 +224,12 @@ func (h *harness) restart(restore []byte) {
 
 	h.t.Cleanup(h.srv.Close)
 }
+
+// data returns the store's current state. The broker swaps whole copies in under its lock, so a copy
+// read here is never written again.
+func (h *harness) data() *Data {
+	h.b.mu.Lock()
+	defer h.b.mu.Unlock()
+
+	return h.store.Data()
+}

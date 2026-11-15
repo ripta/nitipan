@@ -71,6 +71,10 @@ func (n *Node) stream(ctx context.Context) error {
 // an ack was lost, is acked again without running twice. An event whose handler failed is not acked,
 // so it stays queued.
 func (n *Node) handle(ctx context.Context, ev wire.Event) error {
+	if ev.Kind == wire.EventMail || ev.Kind == wire.EventBounce {
+		return n.handleMail(ctx, ev)
+	}
+
 	if _, dup := n.seen[ev.ID]; !dup {
 		if err := n.handleEvent(ev); err != nil {
 			n.warn(fmt.Sprintf("handling event %s (%s): %v", ev.ID, ev.Kind, err))

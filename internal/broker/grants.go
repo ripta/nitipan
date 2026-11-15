@@ -189,6 +189,8 @@ func (b *Broker) sweepLocked() {
 	now := b.cfg.Clock.Now()
 	b.lastSweep = now
 
+	b.sweepMailLocked()
+
 	if now < b.graceUntil {
 		return
 	}

@@ -3,6 +3,7 @@ package proctest
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/space-armada/nitipan/internal/proc"
 	"github.com/space-armada/nitipan/internal/record"
@@ -26,6 +27,10 @@ type Process struct {
 
 // Table is a fake proc.Table. A PID with no entry does not exist.
 type Table struct {
+	// mu guards Procs and StartCalls against a node that reads the table while a test changes it through
+	// Add and Remove. A test that writes the maps directly is on its own.
+	mu sync.Mutex
+
 	PlatformName string
 	SelfPID      int
 	Procs        map[int]*Process
@@ -46,12 +51,26 @@ func New(platform string, selfPID int) *Table {
 
 // Add puts a process in the table and returns it for further changes.
 func (t *Table) Add(pid int, p Process) *Process {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.Procs[pid] = &p
 
 	return &p
 }
 
+// Remove deletes a process, so the PID reads as exited.
+func (t *Table) Remove(pid int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.Procs, pid)
+}
+
 func (t *Table) get(pid int) (*Process, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	p, ok := t.Procs[pid]
 	if !ok {
 		return nil, fmt.Errorf("pid %d: %w", pid, proc.ErrNoProcess)
@@ -68,7 +87,9 @@ func (t *Table) Self() int { return t.SelfPID }
 
 // Start implements proc.Table.
 func (t *Table) Start(pid int) (record.ProcessStart, error) {
+	t.mu.Lock()
 	t.StartCalls[pid]++
+	t.mu.Unlock()
 
 	p, err := t.get(pid)
 	if err != nil {

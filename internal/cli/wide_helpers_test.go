@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/space-armada/nitipan/internal/proc/proctest"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/rootset"
+	"github.com/space-armada/nitipan/internal/tlstest"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
@@ -46,6 +48,9 @@ type wideFixture struct {
 
 	// missing, when set, answers 404 for the path, as a broker that predates the call would.
 	missing atomic.Pointer[string]
+
+	// caFile is the certificate nodes trust when the fixture serves TLS. Empty for plain HTTP.
+	caFile string
 }
 
 type gateRule struct {
@@ -59,6 +64,19 @@ func (g *gateRule) release() { g.once.Do(func() { close(g.open) }) }
 func newWideFixture(t *testing.T) *wideFixture {
 	t.Helper()
 
+	return newWideFixtureWith(t, false)
+}
+
+// newWideFixtureTLS serves the broker over TLS, which mail requires of a node.
+func newWideFixtureTLS(t *testing.T) *wideFixture {
+	t.Helper()
+
+	return newWideFixtureWith(t, true)
+}
+
+func newWideFixtureWith(t *testing.T, useTLS bool) *wideFixture {
+	t.Helper()
+
 	store, err := broker.OpenStore(filepath.Join(t.TempDir(), "broker.json"), broker.StoreOptions{Volume: okVolume{}})
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +87,7 @@ func newWideFixture(t *testing.T) *wideFixture {
 	f := &wideFixture{t: t, store: store, clock: monoclock.NewFake(time.Hour)}
 	f.b = broker.New(broker.Config{Store: store, Term: 5 * time.Minute, Keepalive: 30 * time.Millisecond, Clock: f.clock, Version: "test"})
 
-	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p := f.missing.Load(); p != nil && *p == r.URL.Path {
 			http.NotFound(w, r)
 
@@ -85,7 +103,25 @@ func newWideFixture(t *testing.T) *wideFixture {
 		}
 
 		f.b.Handler().ServeHTTP(w, r)
-	}))
+	})
+
+	f.srv = httptest.NewUnstartedServer(handler)
+
+	if useTLS {
+		files := tlstest.SelfSigned(t, t.TempDir())
+
+		cert, err := tls.LoadX509KeyPair(files.Cert, files.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		f.srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+		f.caFile = files.Cert
+
+		f.srv.StartTLS()
+	} else {
+		f.srv.Start()
+	}
 
 	t.Cleanup(f.srv.Close)
 	t.Cleanup(func() {
@@ -137,7 +173,7 @@ func (m *wideMachine) start() {
 
 	n, err := node.New(node.Options{
 		StateDir: m.w.state, UID: os.Getuid(), User: tester, Machine: m.w.machine, SelfPID: nodePID, SelfStart: startOf(nodePID),
-		Version: "test", Config: config.Node{Broker: m.f.srv.URL}, Heartbeat: 40 * time.Millisecond, Backoff: 10 * time.Millisecond,
+		Version: "test", Config: config.Node{Broker: m.f.srv.URL, CAFile: m.f.caFile}, Heartbeat: 40 * time.Millisecond, Backoff: 10 * time.Millisecond,
 		Clock: m.f.clock, WakeGap: time.Hour, Checker: &liveness.Checker{Procs: table, Local: m.w.machine}, Finder: m.w.finder,
 		Now: func() time.Time { return *m.now.Load() }, ReplyGrace: m.replyGrace,
 		Warn:  func(msg string) { m.w.t.Log("node warning: " + msg) },
@@ -170,7 +206,12 @@ func (m *wideMachine) configureNode() {
 		m.w.t.Fatal(err)
 	}
 
-	body := `{"version":"1.0","broker":"` + m.f.srv.URL + `"}`
+	body := `{"version":"1.0","broker":"` + m.f.srv.URL + `"`
+	if m.f.caFile != "" {
+		body += `,"ca_file":"` + m.f.caFile + `"`
+	}
+
+	body += `}`
 	if err := os.WriteFile(filepath.Join(dir, config.NodeFile), []byte(body), 0o600); err != nil {
 		m.w.t.Fatal(err)
 	}

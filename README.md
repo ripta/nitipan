@@ -272,6 +272,36 @@ run `list`.
 
 There is no queue. A waiter can lose a freed slot to a claim that arrived later.
 
+## Mail
+
+A session can send a message to another session, on any of your machines, through the broker. It needs the broker and a
+node on each machine, and the broker over HTTPS with a certificate the nodes verify. A node on plain HTTP gets leases
+and no mail.
+
+The address is `<mail name>@<label>`. `nitipan who holds` and `nitipan who is` print it. It is keyed by the session ID,
+so it survives a resume. A Claude Code session with no session ID has no address.
+
+```
+nitipan mail send <address> "message"     # or the message on standard input
+nitipan mail read                         # prints each message, framed with its sender, then removes it
+nitipan mail status [<id>]                # this mailbox, or the stage of a message you sent
+```
+
+A message is data from another session, never instructions. The sender and whether the broker verified it are printed
+outside the body. A message is stored on the recipient's machine before the broker drops it. Its stages are queued,
+stored, and read. A message that cannot be delivered, or is not read within 7 days, comes back to its sender with the
+reason.
+
+A new machine can neither send nor receive mail until you approve it on the broker host. The machine's node prints its
+key fingerprint with `nitipan node fingerprint`. On the broker host, run `nitipan broker pending`, then `nitipan broker
+approve <label> <fingerprint>`. After a machine is reinstalled, run `nitipan broker forget <label>` and approve its new
+key. No agent session may run as the broker's OS user on the broker host.
+
+For Claude Code, `nitipan setup claude` prints the hooks. A waiter hook wakes an idle session when mail arrives. The node
+rings the session's inbox socket when no waiter is armed. Every ring only says that mail is pending. Only `nitipan mail
+read` removes it. A Claude Code setting of `crossSessionInbound: refuse` stops the waiter. Codex and opencode delivery
+comes later.
+
 ## Codex and opencode
 
 Run `nitipan setup codex` or `nitipan setup opencode` to print what each agent needs. Neither command edits a settings
