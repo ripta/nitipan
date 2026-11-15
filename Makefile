@@ -16,6 +16,10 @@ GO ?= go
 # Architecture for the Linux cross-compile.
 LINUX_ARCH ?= amd64
 
+# Prefix that receives installed files. BINDIR is where install puts the nitipan binary.
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
+
 # Package import path that carries the injected version string.
 VERSION_PKG ?= github.com/space-armada/nitipan/internal/version
 
@@ -45,6 +49,17 @@ help: ## Show this help
 .PHONY: build
 build: ## Build the nitipan binary into BUILD_DIR
 	$(GO) build -ldflags="-X '$(VERSION_PKG).Version=$(VERSION)'" -o $(BUILD_DIR)/nitipan ./cmd/nitipan
+
+# The binary is copied to a temp file in BINDIR and then renamed over the target. A rename is atomic,
+# so a running git hook or node daemon never sees a partial binary. The node exits when its executable
+# changes, and launchd restarts it on the new one. The path is kept as given and no symlink is resolved,
+# because hooks and the LaunchAgent bake in the PATH location of nitipan.
+.PHONY: install
+install: build ## Install nitipan into BINDIR atomically, e.g. make install PREFIX=/usr/local
+	mkdir -p $(BINDIR)
+	tmp=$$(mktemp $(BINDIR)/.nitipan.XXXXXX) && \
+		{ install -m 755 $(BUILD_DIR)/nitipan "$$tmp" && mv -f "$$tmp" $(BINDIR)/nitipan; } || \
+		{ rm -f "$$tmp"; exit 1; }
 
 .PHONY: clean
 clean: ## Remove build artifacts

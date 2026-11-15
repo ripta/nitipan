@@ -232,7 +232,7 @@ func NewRoot(deps Deps) *cobra.Command {
 func newRoot(a *app) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "nitipan",
-		Short:         "Claim a domain on this machine and see who holds what",
+		Short:         "Claim leases on code and resources, see who holds what across machines, send mail between sessions, and fence pushes",
 		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
