@@ -514,6 +514,32 @@ func TestAcquireHelpTellsCallersToRetryAfterAKill(t *testing.T) {
 	wantContains(t, "stdout", res.Stdout, "--wait", "Retry the same acquire", "run list", "no queue")
 }
 
+// TestAcquireHelpDescribesActingForAsReach proves the --acting-for help line speaks of reach. The
+// --scope flag names a path inside the checkout, so a help line that calls a user's lease space a scope
+// cannot be told apart from it. It catches a reword that brings "scope" back into the --acting-for line.
+func TestAcquireHelpDescribesActingForAsReach(t *testing.T) {
+	w := newWorld(t)
+
+	res := w.run(w.claude(200, "s1"), "acquire", "--help")
+	wantStatus(t, res, exitcode.OK)
+
+	var line string
+
+	for _, l := range strings.Split(res.Stdout, "\n") {
+		if strings.Contains(l, "--acting-for") {
+			line = l
+		}
+	}
+
+	if line == "" {
+		t.Fatalf("help has no --acting-for line:\n%s", res.Stdout)
+	}
+
+	if strings.Contains(line, "scope") || !strings.Contains(line, "reach") {
+		t.Errorf("--acting-for help = %q, want it to say reach and not scope", line)
+	}
+}
+
 func TestWaitDoesNotChangeTheRefusalWithoutTheFlag(t *testing.T) {
 	w := newWorld(t)
 

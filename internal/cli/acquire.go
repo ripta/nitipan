@@ -55,7 +55,7 @@ Retry the same acquire, which reports it as already held, or run list.`,
 	cmd.Flags().String("permission-mode", "", "the session's permission mode, as the agent names it")
 	cmd.Flags().String("description", "", "what this session does with the domain")
 	cmd.Flags().String("reach", "", "how far the lease reaches: machine (the default), user, or shared. user and shared go through the node to the broker")
-	cmd.Flags().String("acting-for", "", "act in this user's scope under their standing delegation to your label; names a user label")
+	cmd.Flags().String("acting-for", "", "claim in this user's user reach under their standing delegation to your label; names a user label")
 	cmd.Flags().StringSlice("replace", nil, "rewrite your lease with this ID to the new domain; repeat to merge several")
 
 	return cmd

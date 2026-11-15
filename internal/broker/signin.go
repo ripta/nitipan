@@ -711,7 +711,7 @@ const actionFormHTML = `<!DOCTYPE html>
         <input type="hidden" name="token" value="{{.Token}}">
         <label>Label:</label>
         <input type="text" name="label" placeholder="e.g. alpha-bravo-charlie-delta" required>
-        <p><strong>You are granting this label permission to act in your scope.</strong></p>
+        <p><strong>You are granting this label permission to claim in your user reach.</strong></p>
         <button type="submit">Confirm Grant</button>
     </form>
     {{else if eq .Action "revoke"}}
@@ -720,7 +720,7 @@ const actionFormHTML = `<!DOCTYPE html>
         <input type="hidden" name="token" value="{{.Token}}">
         <label>Label:</label>
         <input type="text" name="label" placeholder="e.g. alpha-bravo-charlie-delta" required>
-        <p><strong>You are revoking this label's permission to act in your scope. Its leases held for you will be ended.</strong></p>
+        <p><strong>You are revoking this label's permission to claim in your user reach. Its leases held for you will be ended.</strong></p>
         <button type="submit">Confirm Revoke</button>
     </form>
     {{else if eq .Action "mail-grant"}}

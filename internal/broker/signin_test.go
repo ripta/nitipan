@@ -462,6 +462,26 @@ func TestAGrantFromASignerRevokedAfterSignInIsRefused(t *testing.T) {
 	}
 }
 
+// TestTheGrantAndRevokeFormsSpeakOfReachNotScope proves the delegation forms name the user's reach, the
+// word the CLI and the docs use. A scope is a path inside a checkout, so a form that grants permission to
+// act in the user's scope reads as a path grant. It catches a form that brings "scope" back.
+func TestTheGrantAndRevokeFormsSpeakOfReachNotScope(t *testing.T) {
+	_, _, page, _ := newPageWorld(t, true)
+
+	for _, action := range []string{"grant", "revoke"} {
+		t.Run(action, func(t *testing.T) {
+			status, body := page.SignIn(action)
+			if status != http.StatusOK {
+				t.Fatalf("sign-in for %s: %d %s", action, status, body)
+			}
+
+			if strings.Contains(body, "scope") || !strings.Contains(body, "reach") {
+				t.Errorf("the %s form = %s, want it to say reach and not scope", action, body)
+			}
+		})
+	}
+}
+
 // TestAGrantOnThePageMakesTheDelegation proves the grant form, submitted after a sign-in, delegates the
 // signer to the label typed. It catches a grant action that answers success and writes nothing, or writes
 // the delegation under another user.
