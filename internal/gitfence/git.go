@@ -58,6 +58,26 @@ func ExecWith(clean bool, extra ...string) Runner {
 	}
 }
 
+// ExecWithout is ExecWith for a caller that must not pass named variables on. The listed variables
+// are dropped from the process's environment before git starts.
+func ExecWithout(clean bool, drop ...string) Runner {
+	return func(dir string, stdin []byte, args ...string) ([]byte, error) {
+		env := os.Environ()
+
+		if clean {
+			env = cleanEnv(env)
+		}
+
+		env = slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
+			name, _, _ := strings.Cut(kv, "=")
+
+			return slices.Contains(drop, name)
+		})
+
+		return runGit(hookTimeout, env, dir, stdin, args)
+	}
+}
+
 // runGit is the seam a test replaces to see which timeout a runner passes.
 var runGit = run
 

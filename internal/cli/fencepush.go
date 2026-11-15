@@ -52,6 +52,9 @@ type pushGit struct {
 
 func (a *app) newPushGit(clean bool, dir string) *pushGit {
 	base := gitfence.ExecWith(clean)
+	if clean {
+		base = gitfence.ExecWithout(clean, fenceFallbackEnv, fenceNoticeEnv)
+	}
 
 	run := func(d string, stdin []byte, args ...string) ([]byte, error) {
 		if d == "" {
@@ -113,17 +116,6 @@ func (g *pushGit) hasObject(sha string) bool {
 	_, err := g.run("", nil, "cat-file", "-e", sha)
 
 	return err == nil
-}
-
-// atomicOff reports whether the clone records that a remote cannot take an atomic push.
-func (g *pushGit) atomicOff(name string) bool {
-	if name == "" || strings.ContainsAny(name, ":/@ ") {
-		return false
-	}
-
-	out, err := g.run("", nil, "config", "--bool", "--get", "nitipan."+name+".atomic")
-
-	return err == nil && strings.TrimSpace(string(out)) == "false"
 }
 
 // analysis is the plan for one push, with the facts it came from.
@@ -352,9 +344,10 @@ func pathText(p string) string {
 	return p
 }
 
-// leaseCheck is the fallback for a remote that cannot take an atomic push. It renews every lease of
-// the pusher that covers a touched path and waits for the broker. It is a lease check, not fencing.
-func (a *app) leaseCheck(h adapter.Holder, an *analysis) error {
+// leaseCheck is the push without fencing. It renews every lease of the pusher that covers a touched path
+// and waits for the broker. It is a lease check, not fencing. cause says why the push has no fence, and
+// leads the error so the host's reason is the first thing a user reads.
+func (a *app) leaseCheck(h adapter.Holder, an *analysis, cause string) error {
 	seen := map[string]bool{}
 
 	var ids []string
@@ -387,9 +380,8 @@ func (a *app) leaseCheck(h adapter.Holder, an *analysis) error {
 
 	out, err := a.renewNow(stateDir, holderEnv(h, local), ids)
 	if err != nil {
-		return fmt.Errorf("%w: this remote cannot take an atomic push, so the push gets a lease check and not fencing. "+
-			"nitipan could not renew your lease with the broker: %w. This is not a lost lease. Push again once the broker answers",
-			exitcode.ErrCouldNotVerify, err)
+		return fmt.Errorf("%s, so the push gets a lease check and not fencing. nitipan could not renew your lease with the broker, "+
+			"which is not a lost lease: %w: %w. Push again once the broker answers", cause, exitcode.ErrCouldNotVerify, err)
 	}
 
 	var lost []string
@@ -408,8 +400,8 @@ func (a *app) leaseCheck(h adapter.Holder, an *analysis) error {
 	}
 
 	if len(lost) > 0 {
-		return &refusedError{text: "git refused the push by a lease check, which is not fencing, because this remote cannot take an " +
-			"atomic push. " + strings.Join(lost, "; ") + ". Stop pushing in this domain and report to the user"}
+		return &refusedError{text: "git refused the push by a lease check, which is not fencing, because " + cause + ". " +
+			strings.Join(lost, "; ") + ". Stop pushing in this domain and report to the user"}
 	}
 
 	return nil

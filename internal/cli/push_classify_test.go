@@ -185,7 +185,8 @@ type remoteFailureTest struct {
 	// Arrange sets the remote up after the agent committed.
 	Arrange func(r *rig)
 
-	// Refused is set when the push must fail as a host refusal of the fence ref.
+	// Refused is set when the push must read as a host refusal of the fence ref. With the key unset it falls
+	// back to a lease check, which has no broker to renew with in this rig.
 	Refused bool
 
 	// BranchMoves is set when another writer moves the remote branch, so the comparison to the old tip is
@@ -320,8 +321,8 @@ func TestAFencedPushFailsAsTheRulesSayForEachKindOfRemote(t *testing.T) {
 				t.Errorf("rule 4 must fail with %q:\n%s", wantFailure, res.Stderr)
 			}
 
-			if strings.Contains(res.Stderr, "lease check") {
-				t.Errorf("a push that is not a host refusal of atomic push must not fall back:\n%s", res.Stderr)
+			if fellBack := strings.Contains(res.Stderr, "lease check and not fencing"); fellBack != test.Refused {
+				t.Errorf("fell back to a lease check = %v, want %v: only a host refusal of the fence falls back\n%s", fellBack, test.Refused, res.Stderr)
 			}
 
 			if got := r.fenceRefs(); strings.Contains(got, r.fenceName("src")) {
@@ -334,8 +335,10 @@ func TestAFencedPushFailsAsTheRulesSayForEachKindOfRemote(t *testing.T) {
 				}
 			}
 
-			if got := r.user(`cd "$REPO"; git config nitipan.origin.atomic`); got.Status == 0 {
-				t.Errorf("nitipan.origin.atomic = %q, want nothing recorded", got.Stdout)
+			for _, key := range []string{"fence", "atomic"} {
+				if got := r.user(`cd "$REPO"; git config nitipan.origin.` + key); got.Status == 0 {
+					t.Errorf("nitipan.origin.%s = %q, want nothing recorded", key, got.Stdout)
+				}
 			}
 		})
 	}
@@ -389,24 +392,45 @@ func TestAPushToAnUnreachableRemoteFailsBeforeGitPushRuns(t *testing.T) {
 	}
 }
 
+type higherTokenTest struct {
+	Name string
+
+	// Config is the shell the user runs to set the remote's mode.
+	Config string
+}
+
+var higherTokenTests = []higherTokenTest{
+	{Name: "the key unset"},
+	{Name: "the key true", Config: `git config nitipan.origin.fence true`},
+}
+
 // A fence ref with a higher token than the pusher's is refused before git runs, so git never sees the
-// push and the remote is left as it was.
+// push and the remote is left as it was. This holds in the unset and true states, where the fenced
+// attempt would have made it.
 func TestAHigherTokenOnTheRemoteIsRefusedBeforeGitRuns(t *testing.T) {
-	r := newRig(t)
-	r.must(r.user(remoteSetup))
-	r.plantFence("src", `{"version":"1.0","token":9,"path":"src","lease":"X"}`)
+	for _, test := range higherTokenTests {
+		t.Run(test.Name, func(t *testing.T) {
+			r := newRig(t)
+			r.must(r.user(remoteSetup))
+			r.plantFence("src", `{"version":"1.0","token":9,"path":"src","lease":"X"}`)
 
-	alpha := r.agent("alpha")
-	r.plantBrokerLease(alpha.claim("src"), 5, "src")
-	alpha.must(t, `echo x >> src/a.txt; git commit -qam c`)
+			if test.Config != "" {
+				r.must(r.user(`cd "$REPO"; ` + test.Config))
+			}
 
-	res := alpha.run(`nit push origin main`)
-	if res.Status != exitcode.Refused {
-		t.Fatalf("status %d, want %d\n%s%s", res.Status, exitcode.Refused, res.Stdout, res.Stderr)
-	}
+			alpha := r.agent("alpha")
+			r.plantBrokerLease(alpha.claim("src"), 5, "src")
+			alpha.must(t, `echo x >> src/a.txt; git commit -qam c`)
 
-	if strings.Contains(res.Stdout+res.Stderr, "[remote rejected]") || strings.Contains(res.Stdout, "To ") {
-		t.Errorf("git ran:\n%s%s", res.Stdout, res.Stderr)
+			res := alpha.run(`nit push origin main`)
+			if res.Status != exitcode.Refused {
+				t.Fatalf("status %d, want %d\n%s%s", res.Status, exitcode.Refused, res.Stdout, res.Stderr)
+			}
+
+			if strings.Contains(res.Stdout+res.Stderr, "[remote rejected]") || strings.Contains(res.Stdout, "To ") {
+				t.Errorf("git ran:\n%s%s", res.Stdout, res.Stderr)
+			}
+		})
 	}
 }
 

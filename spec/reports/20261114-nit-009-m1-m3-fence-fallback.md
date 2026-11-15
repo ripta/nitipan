@@ -18,7 +18,7 @@ remote's fence mode one key, `nitipan.<remote>.fence`, with three states. It cla
 | Milestone | Run status | Commits |
 |-----------|------------|---------|
 | NIT-009 M1 | DONE | `nitipan: judge a failed fenced push from git's porcelain output` |
-| NIT-009 M2 | QUEUED | |
+| NIT-009 M2 | DONE | `nitipan: give each remote a three-state fence mode with a sanctioned fallback` |
 | NIT-009 M3 | QUEUED | |
 
 ## Approved plan and authorization
@@ -84,3 +84,49 @@ Review findings:
   `pushOnce`'s `ls-remote`. The test is renamed and its comment says the classifier table owns that case. Fixed.
 - The As built block claimed `--porcelain` on every leased push. Fixed to say the fenced push.
 - adr-impact: no conflict. ADR-09 is consistent. No ADR candidate passes the bar.
+
+### NIT-009 M2: Fence modes and the sanctioned fallback
+
+DONE. Commit: `nitipan: give each remote a three-state fence mode with a sanctioned fallback`, which carries the
+proposal and this report. The test-cost bug it found is in its own commit,
+`spec: file the cli test package's closeness to go's test timeout`.
+
+One reader in `internal/cli/fencemode.go` serves the pusher and the hook. It reads `fence`, then the legacy `atomic`
+when `fence` is unset, with `--show-origin`. nitipan writes neither key. Unset falls back on a rule 2 or 3 refusal,
+`true` fails naming the key, and `false` skips the fenced attempt. Only the fallback call carries
+`NITIPAN_FENCE_FALLBACK`. The hook accepts the fallback under the three conditions and runs its own lease check.
+
+Checks: `make fmt` and `make ci` passed after the review fixes, with 0 lint issues. `proposals.py check` and `freeze`
+were clean. Test cost: `internal/cli` took 585 s before the review fixes and 568 s after, in `make ci`. One run in the
+fix round hit go's 600 s package timeout with no failing test. That is filed as
+`spec/bugs/20261114-cli-tests-near-go-timeout.md`.
+
+Implementer best guesses:
+
+- The fallback warning prints after the lease check passes. When the lease check fails or cannot run, the error leads
+  with the host's reason and omits the `fence=false` and `fence=true` advice. The review accepted it.
+- The reinstall hint keys on a shared refusal phrase, `missingFencesPhrase`. It is "and it lacks the fence refs", since
+  the hook's mirror refusal also says "lacks the fence refs".
+- The legacy notice prints once per push. `nitipan push` prints it and marks its git calls with
+  `NITIPAN_FENCE_NOTICE=1`. The hook prints it for an agent's push without the mark. A hand-set mark only loses the
+  line. The proposal's "Replacing `nitipan.<remote>.atomic`" and "Version skew" are amended, with a run-best-guess
+  Decision Log entry.
+- The old-hook skew tests run the real hook binary with `NITIPAN_FENCE_FALLBACK` stripped, in the wide fixture. The
+  shell rig has no broker for the pusher's lease check. For a user's `fence=false`, the old hook also runs with
+  `GIT_CONFIG_GLOBAL=/dev/null`, to model a hook that reads no `fence` key. Test-only variables in `runAsNitipan` let
+  the hook binary see the fixture's agent.
+- Under a user's `fence=false` meeting an old hook, the error names the reinstall step but does not repeat the key.
+
+Review findings:
+
+- The legacy notice printed only from `nitipan push`, so a plain agent push under `atomic=false` was silent. Plan gap.
+  Fixed as above.
+- The old-hook skew test used a stub printing copied text, a shortcut the plan did not approve. Plausible, then
+  confirmed by trace: `verifyUncovered` needs no broker on that path. Fixed with the real hook binary.
+- A remote named with `/`, `@`, `:`, or a space read as unset, so `fence=true` on `team/origin` silently fell back.
+  Confirmed. Fixed: git answers every name but an empty one or one with a newline. Regression tests failed on the old
+  rule first.
+- The reinstall hint matched a hand-copied substring. Fixed with the shared constant.
+- adr-impact: no conflict. It named the fence-mode contract and the `NITIPAN_FENCE_FALLBACK` handshake as possible ADR
+  candidates. Dismissed: NIT-009's Decision Log already weighed and declined who may set the mode, under NIT-005's
+  shipped trust model, and the handshake follows `NITIPAN_FENCE_DELETE`. Neither adds a new principle.

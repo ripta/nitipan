@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/exitcode"
 	"github.com/space-armada/nitipan/internal/fenceplan"
 	"github.com/space-armada/nitipan/internal/fenceref"
@@ -17,6 +18,11 @@ import (
 // fenceDeleteEnv names the one fence ref a `fence delete` run is allowed to delete. The pre-push hook
 // lets only the user's own caller delete a fence ref, and only the ref named here.
 const fenceDeleteEnv = "NITIPAN_FENCE_DELETE"
+
+// missingFencesPhrase is what the hook says when a push lacks the fence refs it needs. The pusher reads
+// the same words to tell that a hook older than itself refused its fence-less push. The words are specific
+// enough that the hook's mirror-push refusal, which also mentions fence refs, does not match.
+const missingFencesPhrase = "and it lacks the fence refs"
 
 // pushedRef is one line of the pre-push hook's input.
 type pushedRef struct {
@@ -108,6 +114,15 @@ func (a *app) runPrePush(remote, url string) error {
 		return nil
 	}
 
+	setting, err := readFenceSetting(g, remote)
+	if err != nil {
+		return fmt.Errorf("git refused the push, because nitipan could not read how %s is fenced: %w", remote, err)
+	}
+
+	if setting.LegacyOrigin != "" && a.deps.Getenv(fenceNoticeEnv) == "" {
+		fmt.Fprintln(a.deps.Stderr, setting.legacyNotice())
+	}
+
 	var ups []refUpdate
 
 	for _, p := range pushed {
@@ -140,20 +155,18 @@ func (a *app) runPrePush(remote, url string) error {
 
 	h := *res.Holder
 
-	if g.atomicOff(remote) {
-		if len(carried) > 0 {
-			return &refusedError{text: fmt.Sprintf("git refused to push fence refs to %s. This remote is recorded as unable to take an "+
-				"atomic push, so it holds no fence refs from this clone", remote)}
+	// A push with no fence refs is a lease check when the user turned fencing off for the remote. It is
+	// also one when nitipan push sanctioned it as the fallback after a host refusal, which only an unset
+	// mode allows. The variable picks the lease-check path and never skips the check.
+	sanctioned := a.deps.Getenv(fenceFallbackEnv) == remote && setting.Mode == fenceUnset && len(carried) == 0
+
+	if setting.Mode == fenceFalse || sanctioned {
+		cause := "nitipan push chose a lease check for this push after " + remote + " refused the fence"
+		if setting.Mode == fenceFalse {
+			cause = setting.offCause()
 		}
 
-		view.Fences = nil
-
-		an, err := a.analyze(g, h, view, ups)
-		if err != nil {
-			return a.failClosedPush(err)
-		}
-
-		return a.leaseCheck(h, an)
+		return a.leaseCheckPush(g, h, remote, view, ups, len(carried) > 0, cause)
 	}
 
 	if err := a.syncFences(g, view, false); err != nil {
@@ -244,8 +257,8 @@ func (a *app) requireFences(g *pushGit, remote string, carried map[string]string
 		return &refusedError{text: fmt.Sprintf("git refused to push to %s. The push carries fence refs that the leases you hold do not "+
 			"call for: %s. Only nitipan push writes fence refs, and only for your own keys", remote, strings.Join(extra, ", "))}
 	case len(lacking) > 0:
-		return &refusedError{text: fmt.Sprintf("git refused to push to %s. The push touches paths that a broker lease fences, and it lacks the "+
-			"fence refs: %s. Push with: nitipan push %s <branch>", remote, strings.Join(lacking, ", "), remote)}
+		return &refusedError{text: fmt.Sprintf("git refused to push to %s. The push touches paths that a broker lease fences, "+missingFencesPhrase+
+			": %s. Push with: nitipan push %s <branch>", remote, strings.Join(lacking, ", "), remote)}
 	}
 
 	return nil
@@ -330,4 +343,21 @@ func mirrorText(remote, ref, what string) string {
 	return fmt.Sprintf("git refused to push %s, because the push %s. A fence ref may only be created or fast-forwarded. "+
 		"If this is a --mirror push from a clone that lacks the fence refs, fetch them first: "+
 		"git fetch %s '+%s:%s'", ref, what, remote, fenceref.Pattern, fenceref.Pattern)
+}
+
+// leaseCheckPush is the hook's check on a push that carries no fence refs, and may not carry any.
+func (a *app) leaseCheckPush(g *pushGit, h adapter.Holder, remote string, view remoteView, ups []refUpdate, carried bool, cause string) error {
+	if carried {
+		return &refusedError{text: fmt.Sprintf("git refused to push fence refs to %s, because %s, so it holds no fence refs from this clone",
+			remote, cause)}
+	}
+
+	view.Fences = nil
+
+	an, err := a.analyze(g, h, view, ups)
+	if err != nil {
+		return a.failClosedPush(err)
+	}
+
+	return a.leaseCheck(h, an, cause)
 }

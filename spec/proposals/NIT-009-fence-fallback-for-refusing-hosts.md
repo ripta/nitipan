@@ -122,6 +122,12 @@ and says it can be renamed to `fence=false` or unset after `nitipan setup git --
 to pick. An older hook binary reads only the old key, which is why the reinstall comes first. The line also prints
 when `fence` is set beside a leftover `atomic`, because an older hook still obeys the old key.
 
+Both `nitipan push` and the hook print the line, since a clone may have no hook and a plain agent `git push` has no
+pusher. `nitipan push` sets `NITIPAN_FENCE_NOTICE` on its own git calls, and the hook stays quiet when it sees the
+variable, so each push prints one line. `nitipan push` strips an inherited copy, as it does for
+`NITIPAN_FENCE_FALLBACK`. An older hook prints nothing, which loses only the line. An older pusher sets no variable, so
+a newer hook prints once. Amended 2026-11-14; see Decision Log.
+
 nitipan does not clear a record it wrote earlier. The clone stays on the lease check until the user changes it. The
 legacy read also stays, and removing it later needs its own skew analysis.
 
@@ -207,6 +213,8 @@ The units are two nitipan binaries that serve one clone. The hook script runs th
   the new hook honors it. On a host that refuses fence refs it fails, as shipped. Under a user's `fence=false`, the old
   pusher's fenced push meets a new hook that refuses fence refs, and fails closed
 - Old binary after new: the new binary writes nothing, so the old binary sees the config as it left it
+- Notice: an older hook prints no notice, and an older pusher sets no `NITIPAN_FENCE_NOTICE`, so a newer hook prints it
+  once. No mix prints it twice
 
 No direction lets a fence-less push land without a lease check.
 
@@ -284,7 +292,7 @@ error, now carrying the host's reason. M2 wires the outcomes to the `fence` key.
 
 ### M2: Fence modes and the sanctioned fallback
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `nitipan push` and the pre-push hook read `nitipan.<remote>.fence` with the three states in the table, and nitipan
   never writes the key
@@ -297,6 +305,8 @@ error, now carrying the host's reason. M2 wires the outcomes to the `fence` key.
 - With `fence` unset, an `atomic=false` in any scope is read as `fence=false` by both the pusher and the hook, and is
   never rewritten or unset. Its notice names its file and says to run `nitipan setup git --install` before renaming
   or unsetting it
+- The notice prints once per push. A plain agent `git push` gets it from the hook. `nitipan push` prints it and marks
+  its git calls with `NITIPAN_FENCE_NOTICE`, so the hook stays quiet there
 - With `fence` set beside a leftover `atomic`, `fence` wins and the notice still fires
 - The hook accepts a fence-less push into fenced paths only under the three conditions in "The hook accepts a sanctioned
   fallback", and runs its own lease check on it
@@ -312,6 +322,33 @@ error, now carrying the host's reason. M2 wires the outcomes to the `fence` key.
 - A test pins what an invalid `atomic` value does, in both the pusher and the hook
 - When a user's `fence=false` meets an old hook that refuses the fence-less push, the pusher's error names
   `nitipan setup git --install`
+
+**As built:**
+
+The pusher and the hook read the mode through one reader. It asks git for `fence` with its origin, and for the old
+`atomic` only when `fence` is unset. A `fence` set beside a leftover `atomic=false` still reports the old key's file, so
+the notice fires and `fence` wins. Git answers the lookup for every remote name, slashes and `@` included. Only an empty
+name or one with a newline has no mode.
+
+- Git does not name the file when it rejects a non-boolean. The reader asks again without the boolean conversion to
+  find it. The error names the key, the value, and the file, and exits 1 in both the pusher and the hook. The hook reads
+  the mode only for an agent. The user's own push is never held to it, so a bad value does not stop that push.
+- The legacy notice prints once per push. The hook prints it for an agent's plain push. `nitipan push` prints it and
+  marks its git calls with `NITIPAN_FENCE_NOTICE`, which keeps the hook quiet. The user's own push prints nothing.
+- The warning prints after the lease check passes and before the fallback push. A lease check that cannot run, or that
+  finds a lost lease, carries the host's reason in its error instead. The warning's key advice is therefore missing
+  from those two errors.
+- The fallback variable and the notice variable are dropped from the environment of every other git call in push,
+  including the runner that asks the remote. `fence delete` shares that runner and is unaffected.
+- The reinstall hint keys on the phrase the hook's `requireFences` refusal uses, defined once as a constant that both
+  sides read. The phrase is specific enough that the hook's mirror-push refusal does not match. The hint fires for the
+  fallback and for a push under `false`.
+- The old-hook tests run the real hook binary as a process of its own, under the wide fixture's agent identity, with
+  `NITIPAN_FENCE_FALLBACK` stripped. For the user's `false`, the old hook also cannot see the user's global
+  configuration, as an older hook would not read `fence`. The shell rig cannot carry these, since the pusher needs a
+  broker before it reaches the hook. The rig covers the hook's refusals for a plain push.
+- The fenced-push table now expects a host refusal of the fence to fall back and then stop at the missing broker, with
+  exit 12.
 
 ### M3: Docs, probe, and NIT-005 markers
 
@@ -411,6 +448,13 @@ error, now carrying the host's reason. M2 wires the outcomes to the `fence` key.
   honoring a user's configuration is the default for every app, not something particular to nitipan.
 - 2026-11-14: The user accepted the proposal. ADR-09 stays proposed, since the user accepted only the proposal.
 - 2026-11-14: Scheduled as M1-M3 in queue.md.
+- 2026-11-14 (run best guess): The legacy notice prints once per push from whichever of `nitipan push` and the hook
+  sees the push first. The text said "every push that the old key affects" but named no printer, and the first
+  implementation had only `nitipan push` print it, so a plain agent `git push` stayed silent. Now the hook prints it for
+  an agent's push, and `nitipan push` marks its git calls with `NITIPAN_FENCE_NOTICE` to keep the hook quiet. The
+  pusher still prints for itself since a clone may have no hook. An inherited copy of the variable is stripped, as for
+  `NITIPAN_FENCE_FALLBACK`. Skew was checked: an older hook prints nothing, and a newer hook with an older pusher
+  prints once. Amended "Replacing `nitipan.<remote>.atomic`", "Version skew", and the M2 checks.
 
 ## References
 
