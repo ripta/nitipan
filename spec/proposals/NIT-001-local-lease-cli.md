@@ -1,8 +1,8 @@
 # NIT-001: Local Lease CLI
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-10-20
+**Updated:** 2026-10-23
 
 ## Dependencies
 
@@ -69,7 +69,7 @@ sandbox allowance".
 
 ### Commands
 
-Amended 2026-10-19; see Decision Log.
+Amended 2026-10-22; see Decision Log.
 
 - `acquire` claims a domain. It fails when a live holder owns an overlapping domain.
 - `release` gives up a lease the caller holds.
@@ -77,7 +77,8 @@ Amended 2026-10-19; see Decision Log.
 - `break` removes another holder's lease. See "Breaking a live lease".
 - `advertise` updates the caller's name, permission mode, or a lease's description. See "Session name and permission
   mode".
-- `setup` prints the sandbox allowance entries for an agent. See "Granting the sandbox allowance".
+- `setup` prints the sandbox allowance entries for an agent. For opencode it also writes the plugin files into a
+  directory the user names. See "Granting the sandbox allowance".
 - `hook` is called only by the agent hooks and plugins that `setup` prints. Its subcommands are `session-start`,
   `session-end`, `presence`, and `execution`. See "Session liveness on shared hosts".
 
@@ -184,9 +185,10 @@ holder's agent, handle, agent name, session ID, and description.
 anyway. When it is false, `break` needs `--force`, like a record of a higher minor.
 
 `break` against a live holder refuses unless `--force` is given. With `--force`, it removes the lease and writes a
-tombstone. The tombstone names the broken lease, who broke it, and when. `break` runs under the same lock as `acquire`.
+tombstone. The tombstone names the broken lease, who broke it, and when. It also lists the lease's paths, so the broken
+holder can recognize the lease. `break` runs under the same lock as `acquire`.
 
-Amended 2026-10-18; see Decision Log.
+Amended 2026-10-20; see Decision Log.
 
 Tombstones are keyed by the broken holder's identity, not by the domain. A tombstone never blocks a claim, so the
 breaker can claim the domain at once, unless another live lease overlaps it. A broken NIT-003 sub-lease's keys return
@@ -201,6 +203,9 @@ nitipan cannot trust the holder identity in a record it cannot use, so it cannot
 
 A tombstone nitipan cannot use, for any cause in "Record evolution and unknown records", never blocks a claim. `list`
 shows it as unknown, and `break --force` removes it by its ID.
+
+A file in `leases/` or `tombstones/` whose name is not an ID has no ID to give `break`. No command removes it. The error
+that reports it says what it is and that a person can delete it by hand.
 
 ### Lease record fields
 
@@ -481,8 +486,11 @@ surface" depends on this. Agents call nitipan from inside their sandboxes. The c
 and a `nitipan setup` command that prints or applies the entries.
 
 Decision (autonomous): `nitipan setup` prints the entries for the detected or named agent, and never writes settings.
-The README documents the same entries. When any nitipan write fails with `EPERM` or `EACCES`, the error names the
-detected agent, says the sandbox likely blocked the state directory, and prints the same text `setup` prints.
+`nitipan setup opencode --install-plugins <dir>` is the one write. It puts nitipan's plugin files into `<dir>/nitipan`,
+with nitipan's absolute path baked in, and nothing else. It refuses to overwrite a file that differs from the one
+nitipan ships unless `--replace` is given. `setup` never prints plugin source. The README documents the same
+entries. When any nitipan write fails with `EPERM` or `EACCES`, the error names the detected agent, says the sandbox
+likely blocked the state directory, and prints the same text `setup` prints.
 
 - "Any write" covers the lock file, temp files, records, and tombstone removal. `list` removes tombstones too, so it can
   hit this error
@@ -490,7 +498,7 @@ detected agent, says the sandbox likely blocked the state directory, and prints 
   write path
 - The message says "likely", because a plain file-mode failure gives the same errno
 
-Amended 2026-10-19; see Decision Log.
+Amended 2026-10-22; see Decision Log.
 
 `setup` also prints what session liveness needs. See "Session liveness on shared hosts".
 
@@ -498,9 +506,9 @@ Amended 2026-10-19; see Decision Log.
   that run `nitipan hook` by absolute path with `timeout: 3`, and `thread_unload_delay_secs = 60`. The text says that a
   thread's background terminals and MCP servers stop 60 seconds after the user switches away from it, and that the
   delay applies after a Codex restart
-- opencode: install steps for nitipan's TUI plugin and server plugin. When the user has tightened opencode's
-  permissions, it also prints a `shell` allow rule for `nitipan *` and an `external_directory` allow rule for the state
-  directory
+- opencode: install steps for nitipan's TUI plugin and server plugin, which `--install-plugins <dir>` carries out. When
+  the user has tightened opencode's permissions, it also prints a `shell` allow rule for `nitipan *` and an
+  `external_directory` allow rule for the state directory
 
 Writing settings with `--apply` was rejected for reasons beyond effort. Claude Code's sandbox denies writes to its own
 settings file, so `--apply` would fail from inside a session. Codex's config is TOML and opencode's is JSONC. A
@@ -635,8 +643,9 @@ Decision (autonomous): `list --json` is the supported read interface. The record
   entries
 - `list` takes the same domain arguments as `acquire`, and returns the leases that overlap them, using nitipan's own
   canonicalization and overlap rule
-- Tombstones that `list` delivers or reaps appear in the output, and on stderr too. A guardian that discards them still
-  leaves a trace
+- Tombstones that `list` delivers or reaps appear in the output with a one-sentence `summary`, and on stderr too. A
+  guardian that discards them still leaves a trace. A tombstone nitipan cannot use appears with action `unknown` and is
+  left in place. Amended 2026-10-20; see Decision Log
 - `list` writes its read output first. A failed tombstone removal is reported, not fatal
 
 Files only was rejected: a reader cannot apply liveness or the unknown-record rule. Documenting the files too was
@@ -659,7 +668,8 @@ the caller did not name.
 - `--all` releases every lease the caller holds. Subagents share their parent's holder, so `--all` from a subagent
   releases the parent's leases too. Its help text says so
 - An ID that names another holder's lease reports "not yours"
-- An ID with an undelivered tombstone for the caller reports "broken", with who broke it
+- An ID whose tombstone for the caller this call delivers reports "broken", with who broke it. Amended 2026-10-20; see
+  Decision Log
 - Any other ID reports "no such lease" and lists the caller's current lease IDs. A released ID leaves no trace, so
   nitipan cannot tell it from a mistyped one, and never claims "already released"
 - Each of these has its own exit status
@@ -824,6 +834,8 @@ Each record carries a liveness kind in its envelope. `process` means the holder 
 `session` means the agent's rule below decides. An unknown kind reads as unknown liveness. See "Record evolution and
 unknown records".
 
+Amended 2026-10-22; see Decision Log.
+
 Codex, kind `session`:
 
 - `setup` prints a SessionStart hook and a SessionEnd hook, both running `nitipan hook`. It also prints
@@ -838,8 +850,16 @@ Codex, kind `session`:
   call delivers it
 - The first registration under a host records two checks of the config in force. One is the unload delay. The other is
   whether a SessionEnd entry runs `nitipan hook`. It trusts the config file only when the file is older than the host's
-  start, since a change needs a restart. Otherwise both checks record unknown. Later registrations under that host reuse
-  them
+  start, since a change needs a restart. Whenever it trusts the files that way, it remembers the two values under the
+  state directory, in `sessions/config/`, one versioned file per `CODEX_HOME`, written atomically under the lock. A
+  higher major or an undecodable file reads as no memory, and is never overwritten, nor is one of a higher minor. The
+  SessionEnd value is remembered with the executable it matched. A file newer than the host is trusted for a value
+  only when the value it now parses equals the remembered one. Codex rewrites `config.toml` when a TUI starts, which
+  makes the file newer without changing either value. A changed value, or nothing remembered, records unknown for that
+  check.
+  Only a macOS start converts to wall-clock time, so on Linux nothing is ever confirmed or remembered, and both checks
+  record unknown. A brand-new embedded-only setup fails closed until some host starts after the config is written.
+  Later registrations under that host reuse the checks
 - `acquire` from a Codex session needs a registration under a live host, a recorded delay of 60 seconds or less, a
   recorded SessionEnd entry, and the session's own writer-lock file. The lock file proves the veto below works for this
   Codex version. An `acquire` runs mid-turn, when the writer is certainly live. Without all four, `acquire` fails
@@ -852,7 +872,10 @@ Codex, kind `session`:
 - A session is judged by its newest registration whose host is alive. It is dead when an end mark names it under that
   host and Codex's writer-lock file for the session is absent. Only `ENOENT` counts as absent. Any other error reads
   unknown. While the file exists, the session is alive. The file guards against a late SessionEnd that lands after a
-  resume
+  resume. A lease is judged by that registration only when it is under the lease's recorded host. When the lease
+  records another host, it reads unknown with a reason naming both hosts. The exception is a live registration under
+  the recorded host itself, which judges the lease. A lease that has not yet followed its session to a new host is
+  never read alive from the new host's registration
 - Every lock holder, before its sweep, checks each end mark under a live host. When the session's writer-lock file is
   absent, it marks that session's registration ended. An ended registration outlives its host, and stays while any
   lease names the session. A session whose newest registration is ended is dead, with one exception. When that
@@ -874,17 +897,22 @@ while it lives, so `/new` inside it ends the old session after the unload delay.
 opencode, kind `session`:
 
 - `setup` prints install steps for two plugins that nitipan ships. Both call `nitipan hook`
-- The TUI plugin marks each session it has open: one in the shared tab list, the TUI's current route, or running in
-  that TUI. Child sessions from the subagent tool follow their root. The plugin removes the mark when the session leaves
-  all three. Its cleanup never removes marks, since cleanup also runs on a hot reload. It republishes them on load. A
-  presence mark names the TUI process, which the walk from the plugin's subprocess finds by its signature
-- The server plugin marks a session while it holds an execution claim
+- The TUI plugin marks each session it has open: one in its own tab list, or the TUI's current route. Running state is
+  not a source, because a TUI on the shared service sees every session's status and events. Child sessions from the
+  subagent tool follow their root. The plugin removes the mark when the session leaves both. Its cleanup never removes
+  marks, since cleanup also runs on a hot reload. It republishes them on load. A presence mark names the TUI process,
+  which the walk from the plugin's subprocess finds by its signature
+- The server plugin marks a session while it holds an execution claim. It also asks opencode which recent sessions are
+  running when it loads, and again a few times in the next minute. It marks each running one, and removes the mark when
+  that session's turn ends. A turn that a restarted service resumes raises no execution event the plugin sees, and this
+  scan covers it. Amended 2026-10-23; see Decision Log
 - `acquire` from an opencode session needs a presence mark from a live TUI. An execution mark alone never admits a
   claim. It only extends a lease. A session with no TUI, such as one from `opencode run`, the desktop app, or the API,
   cannot `acquire`. Its error says the session needs a TUI with nitipan's plugin loaded
 - A session is alive while a presence mark names it from a live TUI, or an execution mark names it under a live host
 - An execution mark under a dead host reads `time_suspended` from opencode's database, read-only. Set means unknown,
-  since the next service boot resumes that turn. Clear means the turn ended. A failed read means unknown
+  since the next service boot resumes that turn. Clear means the turn ended, and so does a session the database does
+  not know, which has no turn to resume. A failed read means unknown
 - Otherwise the session is dead
 
 Shared rules:
@@ -897,8 +925,10 @@ Shared rules:
 - `hook` is never named in an error message
 - A session file nitipan cannot use, or one of a higher major version, makes the session it names unknown. See
   "Record evolution and unknown records"
-- Clearing a session's end mark, or moving its leases to a new host, is reported to that session like a tombstone. It
-  names the time, and any lease another session claimed meanwhile
+- Clearing a session's end mark, or moving its leases to a new host, is reported to that session like a tombstone. A
+  clearing is stored as a tombstone addressed to the session, with a `kind` field and a `detail` sentence, and the
+  session's next call delivers it. It names the time, and any lease another session claimed meanwhile. A move happens in
+  the session's own call, so that call reports it at once and stores nothing
 - `list` flags a Codex session as "likely ended" when it holds a lease, has a live registration, and has no writer-lock
   file. It never clears the lease on that hint. It also names an opencode database it could not read
 
@@ -932,11 +962,18 @@ None.
   `break --force` removes the lease, but nothing stops the old holder from committing in the meantime. Accepted
   (autonomous): V1 has no fencing, and a tombstone is the only signal until NIT-005 lands. `break --force` already needs
   an explicit flag and an exact ID.
+- **A newer Codex config can be trusted while a different setting is in force** — likelihood: low, impact: medium.
+  The config checks trust a file newer than its host when its values equal the remembered ones. Suppose the delay is
+  edited and a host starts with the new value. If the file is reverted before that host's first registration, the
+  registration records the old value while the host runs the new one. Accepted: the user chose comparing settings over
+  comparing modification times. It needs an edit and a revert inside one host start. The remembered SessionEnd value
+  also names the nitipan executable it matched, so a changed hook path never compares equal.
 - **Linux liveness inside an agent's sandbox is untested** — likelihood: medium, impact: high.
   If Claude Code's Linux sandbox unshares the PID namespace per command, every record reads as unknown, which counts as
-  alive, and dead holders are never reclaimed without `break`. Mitigation: milestone 1 checks liveness inside the
-  Claude Code sandbox on Linux, and milestone 4 inside the Codex and opencode sandboxes. The failure is safe: claims are
-  refused, never stolen.
+  alive, and dead holders are never reclaimed without `break`. Accepted: the user does not run Linux, so no milestone
+  checks Linux at runtime. Milestone 1 checks the Linux code against fixtures only, and milestone 4 checks the Codex and
+  opencode sandboxes on macOS. The first real Linux run is the check, and a milestone is added then. The failure is
+  safe: claims are refused, never stolen. Amended 2026-10-20; see Decision Log.
 - **opencode and Codex session liveness rests on plugin and hook behavior not yet run** — likelihood: medium, impact:
   medium. Live tests confirmed the session variables and the host processes. The plugins' reactive reads, execution
   events on resume, and hook trust are source readings. Mitigation: milestone 4 checks each one. Every failure found so
@@ -993,7 +1030,7 @@ None.
 
 ### M1: Record format and liveness
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - The repo has a Makefile per the Makefile standard, with `build`, `test`, `lint`, and `ci` targets
 - Lease records encode and decode every field in "Lease record fields". A higher major, an undecodable envelope, or a
@@ -1019,15 +1056,52 @@ None.
 - With stray agent variables and no matching ancestor, `acquire`, `advertise`, and `release` fail closed, while `list`
   and `break` run as an anonymous caller
 - A lock held past the retry budget gives its own exit status, and the error names the holder and whether it is stopped
-- The liveness check reports alive, dead, and PID-reused correctly on macOS and on Linux
+- The liveness check reports alive, dead, and PID-reused correctly on macOS, and on Linux against fixture `/proc` trees
 - On Linux, the liveness check reports unknown for an unreadable `boot_id` or `stat` file and for a PID-namespace
   mismatch, and parses a `stat` line whose process name contains spaces and parentheses
-- The liveness check works inside the Claude Code sandbox on macOS and on Linux, and the Linux result is recorded in the
-  As built block
+- The liveness check works inside the Claude Code sandbox on macOS
+
+Amended 2026-10-20; see Decision Log.
+
+**As built:**
+
+- Linux was never run. The Linux code is verified by fixture tests over a `/proc` tree, and by `go vet` cross-compiled
+  with cgo off. A real Linux build must use cgo, and no Linux binary has been built or run. See the 2026-10-20 Decision
+  Log entry.
+- The macOS sandbox check was met by running the tests inside Claude Code's sandboxed Bash on macOS. The process-table
+  reads, the machine ID, the canonical-case lookup, and the case-sensitivity query all worked there. A live child
+  process read alive, then dead after it was killed, and a recorded start one microsecond off read as a reused PID.
+- The macOS process-table query returns zero bytes for a dead PID. The `x/sys` single-process wrapper reports that as
+  a generic I/O error, which cannot be told from a real failure. The reader uses the slice variant, so an empty result
+  means "no such process" and every other error reads unknown.
+- A PID that is absent locally reads dead only when the record's platform is known and is the reader's own, and on
+  Linux when the record's PID namespace is the reader's. Otherwise the holder may run where the reader cannot see it,
+  and it reads unknown.
+- Reading a process's arguments on macOS works for every ancestor of the sandboxed shell here. Only the init process
+  fails, so the walk ignores an unreadable init process. An unreadable ancestor still fails the walk closed, and the
+  error names the agent variables that could not be matched.
+- The macOS machine ID uses cgo, because the direct system call is deprecated in `x/sys`. A macOS build with cgo off
+  has no machine ID, and records compare by host name.
+- Volume sensitivity: every macOS volume counts as normalization-insensitive, case-sensitive APFS included. On Linux
+  the casefold flag of the deepest existing directory decides. A filesystem with no casefold support reads sensitive,
+  and any other failure reads insensitive, so it can only add overlaps. That Linux decision logic is tested through an
+  injected flag reader on macOS. The Linux flag read itself has never run. Two keys on different volumes fold when
+  either volume does.
+- Submodule detection asks git with literal pathspecs and NUL-separated output, with the repo-locating environment
+  variables removed. It is tested against a real repo, including glob characters and non-ASCII names.
+- The Codex and opencode adapters recognize their hosts by environment variables and argument lists, so the walk has
+  real signatures to test. Their session rules are still M4 work. Until then their records read unknown and their
+  `acquire` fails closed.
+- All six user commands and `hook` are registered as stubs that exit with the generic status. Behavior lands in M2 and
+  M3. The stray-variable fail-closed check and the lock-busy exit status are tested at the resolver and state level
+  because the commands are stubs. Command-level tests come with M2 and M3. `list --json` is covered at the encoder level
+  only.
+- Module downloads failed inside the sandbox with an x509 error from Go's macOS verifier. The dependencies came from the
+  local module cache with the checksum database off.
 
 ### M2: Acquire, release, and list
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `acquire` claims a domain under the lock, and publishes its record through a temp file and `link(2)`
 - A reader never sees a partly written record, and a lock holder removes temp files left by a crashed writer
@@ -1042,11 +1116,11 @@ None.
 - The self-overlap refusal names `--replace` only when the replace drops no keys
 - `release` takes IDs or domain arguments, refuses with no argument, refuses a partial match and names the candidates,
   releases a deleted worktree's lease by its stored keys, and gives distinct results for an ID that is not found
-- `list --json` emits its versioned schema with liveness per lease, filters by domain arguments, and includes the
-  tombstones it delivered or reaped
+- `list --json` emits its versioned schema with liveness per lease, filters by domain arguments, and carries a
+  `tombstones` array that stays empty until M3 writes tombstones
 - The state directory comes from the user database, ignores `HOME` and `XDG_STATE_HOME`, fails closed when the lookup
   fails, and is created with mode 0700
-- A caller with no adapter can run `list` and `break`, is recorded as an anonymous process, and cannot `release`
+- A caller with no adapter can run `list`, is identified as an anonymous process, and cannot `release`
 - A flag left out keeps its stored value
 - `advertise`, or a name or mode given to `acquire`, rewrites that field in every live lease the caller holds
 - `advertise` with no live lease refuses, and says to pass `--name` to `acquire`
@@ -1071,9 +1145,54 @@ None.
 - A multi-session or unknown adapter matches only when the session ID matches too, and fails `acquire` without one
 - A write blocked with `EPERM` or `EACCES` prints the detected agent's entries, the same text `nitipan setup` prints
 
+Amended 2026-10-20; see Decision Log.
+
+**As built:**
+
+- The proposal does not spell the domain arguments. `acquire`, `list`, and `release` take `--checkout` and a repeatable
+  `--scope`. `acquire` and `list` default the checkout to the working directory when neither flag is given. `release`
+  takes lease IDs as positional arguments and reads the same flags as a domain, so an ID and a path can never be
+  confused. A bare `release` has no default checkout, because it must never act on an unnamed target.
+- An explicit `--replace` may release keys the new claim does not contain. Only the refusal withholds the suggestion in
+  that case, and it lists the keys and the claim that adds only what the caller lacks. The proposal does not say whether
+  the flag itself refuses. A replace that releases keys prints them, so a holder never loses keys silently.
+- `list` takes the lock so a locked call can finish a crashed merge. When the lock is busy, or the sandbox blocks the
+  lock file, it reads without the lock and prints a warning, and exits 0. The blocked case prints the same sandbox text
+  a blocked write prints. `list` also resolves its caller, as M3's tombstone delivery will, and warns when it cannot.
+  The `tombstones` array is always emitted, and `name_shared` marks a name that more than one
+  live holder reports. Both joined schema 1.0, since nothing had released it.
+- `release` reports "broken" for an ID with a tombstone addressed to the caller. M3 made `release` deliver and remove
+  that tombstone first, through the shared locked path. Corrected 2026-10-20; see Decision Log.
+- A file in `leases/` whose name is not a lease ID, or whose body names a different ID, is an unusable record. It blocks
+  `acquire` and shows in `list`. It cannot be addressed by ID. M3's `break --force` must say how a person removes it.
+- Housekeeping rewrites, which refresh a rotated session ID and bring the name and mode of a holder's records back in
+  line after a crash, are skipped on a record of a newer minor. A requested name or mode change refuses the whole call
+  before the first rename. After a crash mid-rewrite the first record by lease ID wins, because rewrites go in that
+  order.
+- The kill-mid-replace check injects the crash between the rename and the removal of the merged leases, which is the
+  only window that leaves two records. A crash before the rename leaves the old record and a temp file, which the next
+  locked call sweeps. No process was killed at that point.
+- The concurrency check re-executes the test binary as eight separate processes per round, over six rounds, with
+  overlapping claims. Exactly one succeeds each round. Each child's fake process table holds every child's agent as
+  alive.
+- No shipped adapter is a multi-session agent judged by process, so the same-process refusal is tested with a test-only
+  adapter. Codex and opencode are kind `session`, and their `acquire` fails with "session liveness for <agent> is not
+  supported yet" before anything is read. Their `setup` text says only that they cannot claim leases yet and how to
+  create the directory. Both belong to M4.
+- The Claude Code permission modes are a guess: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, and
+  `bypassPermissions`. The agent reports the value, so it is advisory.
+- `setup` for Claude Code prints the `Edit` allow rule and the sandbox write path that `setup_permissions.py` manages,
+  the `mkdir` command, and a `Bash(nitipan *)` allow rule that the script does not manage.
+- The BIP-39 word list was written from memory. Tests check it is 2048 words, unique, lowercase ASCII, and sorted. It
+  was not compared with a reference copy, so a later correction would change every handle.
+- A manual run in Claude Code's sandbox on macOS acquired, listed, and released a lease against the real state
+  directory, with the real process table.
+- No new exit status. A handle collision, a missing session ID, and an unsupported agent exit with the generic status.
+  The refused status now also covers a claim that overlaps the caller's own leases.
+
 ### M3: Break and tombstones
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `break` removes a dead holder's lease without `--force`
 - `break` refuses a live holder's lease without `--force`, and names the holder
@@ -1082,16 +1201,56 @@ None.
 - `release` removes the caller's own record of a higher minor, and the other-holder check runs before the coverage
   check
 - A broken holder's next nitipan call reports that its lease was broken, and by whom, then removes the tombstone
-- `list` reports a tombstone whose holder is dead once, then removes it
+- `list` reports a tombstone whose holder is dead once, then removes it, and `list --json` includes every tombstone it
+  delivered or reaped
+- A caller with no adapter can run `break`, and a tombstone it writes records it as an anonymous process
 - A broken holder that calls `acquire` next is told its lease was broken
 - `break --force` removes a record nitipan cannot use, writes no tombstone, and says so
 - `list` shows a record nitipan cannot use as unknown, and `release <id>` on one reports an unusable record
 - An unusable tombstone never blocks a claim, shows as unknown in `list`, and is removable with `break --force`
 - No error message names `break --force` as its fix
 
+Amended 2026-10-20; see Decision Log.
+
+**As built:**
+
+- A file whose name is not an ID cannot be addressed, so `break` refuses it with a usage error and nothing removes it.
+  The error that reports it, from `acquire` or `list`, says a person can delete it by hand. See the 2026-10-20
+  Decision Log entry on file names that are not IDs.
+- Every nitipan call except `hook` delivers the caller's tombstones: `acquire`, `release`, `advertise`, and `break`
+  through the locked path, and `list` through its own. A delivered tombstone is reported on stderr before it is removed,
+  so a crash between the two repeats the notice. A failed removal is a warning, not a failure. `release` reports
+  "broken" for an ID whose tombstone it just delivered, and the next call says "no such lease".
+- The tombstone is published before the lease is removed. A crash between the two can leave a notice for a lease that
+  still exists. The other order could lose the only signal the holder gets.
+- A tombstone gained an optional `paths` field, the broken lease's canonical keys. `list --json` tombstones gained a
+  `summary` sentence and the action `unknown` for a tombstone nitipan cannot use. Both are minor additions to formats
+  nothing had released.
+- `list` reports a tombstone as reaped when its holder is dead and `clear_when_dead` is true. It leaves a dead holder's
+  tombstone with `clear_when_dead` false, and any tombstone addressed to a live holder other than its caller. A listing
+  that cannot take the lock does not deliver, and says so in a warning.
+- `break` on a tombstone it can read is refused as "not a lease". Only an unusable tombstone is removable.
+- A break of the caller's own lease is a usage error that points to `release`. Several IDs resolve first, and nothing is
+  removed unless every one resolves.
+- A break with `--force` on a dead holder's lease writes no tombstone, because nobody can receive it. `break` that needs
+  a tombstone fails when the caller cannot be identified, and says so.
+- The "other-holder check before the coverage check" in `release` held already. `release` only removes, so it has no
+  coverage check, and ownership alone decides. A test pins that another holder's record of a higher minor reports "not
+  yours".
+- No new exit status. The existing broken, no-such-lease, unusable, and refused statuses cover every result.
+- Delivery happens when the call takes the lock, before it validates the request. A call that fails on a bad
+  permission mode, a bad domain, a bad scope, or an unresolvable release target still delivers and removes the
+  caller's tombstones. Delivery is impossible when the holder cannot be identified. A missing session ID, and an agent
+  with no supported session-liveness rule, fail before the lock and deliver nothing. A caller with no adapter holds
+  nothing and has no tombstones to receive.
+- Only files named `<something>.json` count as records in `leases/` and `tombstones/`. A `.tmp-` file and any other
+  name, such as `.DS_Store` or `foo.txt`, are ignored. They never block a claim and never show in `list`. A
+  `<something>.json` file whose name is not an ID is an unusable record. Treating every foreign file as unusable would
+  let one stray file block every claim.
+
 ### M4: Codex and opencode adapters
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - The opencode adapter's session ID and PID are verified from inside an opencode bash tool call
 - The Codex adapter's PID, `CODEX_THREAD_ID`, and `CODEX_SESSION_ID` are verified from inside a Codex shell command
@@ -1103,7 +1262,8 @@ None.
 - The Codex and opencode adapters' session declarations match what those checks found
 - With the entries `nitipan setup` prints, `acquire` succeeds inside each agent. Without them, the sandbox error appears
 - The Codex and opencode adapters each define their list of `permission_mode` values
-- nitipan ships the opencode TUI and server plugins, and `setup` prints their install steps and the Codex hook entries
+- nitipan ships the opencode TUI and server plugins, `setup opencode --install-plugins <dir>` writes them, and `setup`
+  prints their install steps and the Codex hook entries. Amended 2026-10-22; see Decision Log
 - With no matching adapter, `acquire` fails and names the agents nitipan recognizes
 - Each adapter recognizes its host process by its argument list, in daemon, embedded, shared-service, and standalone
   modes. Whether the shell's ancestry reaches the TUI under `codex --no-daemon` is recorded in the As built block
@@ -1130,8 +1290,8 @@ None.
 - A late SessionEnd after a resume does not mark the live session ended while its writer-lock file exists. The order of
   the lock file and the hook is recorded in the As built block
 - The SessionStart hook sees the host's `CODEX_HOME`. Whether trusting one hook trusts the other is recorded
-- The opencode TUI plugin's marks follow the tab list, the current route, and running state, and survive a hot reload.
-  The As built block records whether the plugin can read the tab list and route as they change
+- The opencode TUI plugin's marks follow its own tab list and current route, never running state, and survive a hot
+  reload. The As built block records whether the plugin can read the tab list and route as they change
 - The opencode server plugin sees execution events, including for a turn resumed after a service restart
 - An opencode session whose TUI died mid-turn reads alive until the turn ends. After a service restart, a set
   `time_suspended` reads unknown, and an unreadable database reads unknown
@@ -1146,6 +1306,99 @@ None.
   is dead
 - A session file of a higher major, or one nitipan cannot decode, makes its session unknown
 - `list` shows the "likely ended" hint and names an unreadable opencode database
+
+**As built:**
+
+The live checks now run from `make live-codex` and `make live-opencode`. They drive a private Codex app-server and a
+private opencode serve against a fake model server. They spend 0 real model calls and never touch the user's own Codex
+or opencode. These results come from those runs on 2026-10-23, against Codex 0.163.0 and opencode 2.1.0.
+
+The harness results are in `spec/reports/2026-10-22-nit-001-m4-codex-harness-results.md` (68 PASS, 1 SKIP) and
+`spec/reports/2026-10-22-nit-001-m4-opencode-harness-results.md` (47 PASS, 3 SKIP). The earlier manual runs are in
+`spec/reports/2026-10-22-nit-001-m4-codex-live-results.md` and
+`spec/reports/2026-10-22-nit-001-m4-opencode-live-results.md`. Step numbers below name the harness steps unless the
+row says manual.
+
+Every row reads `live` or `tested`. `live` means the harness or the manual run verified it. `tested` means unit tests
+cover it. The fixes behind rows that failed in the manual runs are in the Decision Log entries of 2026-10-22 and
+2026-10-23.
+
+| Check | Status | Evidence |
+|---|---|---|
+| opencode session ID and PID in a bash tool call | live | opencode step 1: session ID and server PID |
+| Codex PID and session variables in a shell command | live | Codex step 1: both variables are the thread ID |
+| Session variables left by each environment policy | live | Codex step 2: core, include_only, and none keep both |
+| Liveness sysctl inside each tool | live | Codex step 3a, in the sandbox. opencode step 1, no sandbox |
+| MCP variable passing, and opencode sessions per process | live | Codex step 6: no variable. opencode step 3, manual 3 and 4 |
+| Codex sessions per process | live | Codex step 5: many sessions, one host PID |
+| Session declarations match the findings | live | Codex step 5. `TestAdaptersDeclareSessionModel` |
+| `acquire` with and without the printed entries | live | Codex steps 3a and 3b. opencode step 2 |
+| Permission mode lists | live | Codex step 15, opencode step 12. No list changes |
+| Plugins shipped, `--install-plugins`, and printed steps | live | opencode steps 0, 6, and 13. `TestInstallOpencode*`, `TestSetup*` |
+| No matching adapter names the agents | tested | `TestResolveWithNoAgentVariablesIsAnonymousAndNeverWalks` |
+| Host recognition in four modes, and `--no-daemon` ancestry | live | Codex steps 0, 4a, 4b, and 4c. `TestCodexHostMode`, `TestHost*` |
+| Codex `acquire` fails closed without a registration or delay | live | Codex steps 7 and 14. `TestCodexAcquireFailsClosed*` |
+| Codex reads dead after window close and `/new` | live | Codex steps 9A, 9B, and 9C: dead in 3.1 to 3.2 s |
+| Daemon restart, move, ended stays dead | live | Codex step 11. A graceful stop reads unknown |
+| Embedded Codex session reads dead at TUI exit | live | Codex step 13: `codex exec` and the TUI, exit and `kill -9` |
+| Second SessionEnd succeeds, a registration clears ends | tested | `TestCodexSecondSessionEnd*`, `TestCodexResume*` |
+| Non-ENOENT lock reads unknown, missing lock fails | live | Codex steps 8 and 14. Order: lock file first, in facts below |
+| Dead then resumed reads unknown after a restart | tested | `TestCodexSessionFoundDeadThenResumed*` |
+| Newest registration ended, host and lock live, reads alive | tested | `TestCodexSessionWhoseNewest*` |
+| Move fails and leaves leases unknown without the lock file | live | Codex step 11. `TestCodexLeasesStayOnTheOldHost*` |
+| Non-TUI Codex host recorded as a daemon | live | Codex steps 0 and 4a. `TestCodexHostThatIsNotTheTUI*` |
+| Session ID outside the allowed set refused | tested | `TestCodexHookRefusesASession*`, `TestParseKey` |
+| Dead embedded host's sessions read dead, registration kept | tested | `TestCodexEmbeddedHost*` |
+| Every lock holder converts end marks before it sweeps | tested | `TestAfterLock*`, `TestCodexSessionReadsDead*` |
+| Config-check error names the daemon's PID | live | Codex step 14. `TestCodexAcquireFailsClosedWhenARecordedCheckFails` |
+| No SessionEnd entry fails, no registration names the timeout | live | Codex step 14, the timeout text included |
+| Late SessionEnd after a resume, hook order | tested | `TestCodexSessionWhoseNewest*`. Step 10 live: the hook fires at unload, and Codex refuses resume while a thread is closing, so the late window cannot be reached |
+| Hook sees `CODEX_HOME`, and hook trust | live | Codex steps 7 and 12: one trusted hook does not trust the other |
+| TUI plugin marks follow its tabs and route, survive reload | live | opencode steps 5, 6, 11. Fixed 2026-10-22. Route without a tab: 2.1.0 never has one |
+| Server plugin sees events, including a resumed turn | live | opencode steps 7, 8, and 8.3. Fixed 2026-10-23 |
+| TUI dies mid-turn | live | opencode steps 9.2 and 9.3 |
+| `time_suspended` set, and an unreadable database, read unknown | tested | `TestSqliteCLIReadsTimeSuspended`, `TestOpencodeExecutionMarkUnder*`, `TestOpencodeUnreadable*` |
+| Hook input, fail closed, no tombstones, no error naming it | tested | `TestCodexHook*`, `TestHookMistakes*` |
+| Presence ties to the TUI, `run` and `acp` safe | live | opencode steps 7 and 10. Fixed 2026-10-22 |
+| `acquire` with no TUI fails and says why | live | opencode step 2. Fixed 2026-10-22 |
+| Sweep keeps what it must and removes dead files | tested | `TestOpencodeExecutionMarkUnder*`, `TestCodexSession*`. Stale mark gone, opencode 8 |
+| Higher major or undecodable file reads unknown | tested | `TestCodexSessionFileOfAHigherMajor*`, opencode twin |
+| `list` shows the hint and names an unreadable database | tested | `TestCodexListFlags*`, `TestOpencodeUnreadable*`. Hint seen, Codex 14 |
+
+Live facts that change the design's assumptions:
+
+- The opencode service's parent is whatever ran `opencode service restart`: PID 1 from a terminal, or the TUI when a
+  session in that TUI ran it. No LaunchAgent plist exists. A service started from a TUI dies with it, so its PID can
+  change.
+- In opencode 2.1.0 each TUI has its own tab list. Every session opens in a tab, so a route without a tab cannot
+  happen. A new empty tab has no session until its first message.
+- Both opencode plugins autoload from `~/.config/opencode/plugins/nitipan` with no config entry. `opencode plugin list`
+  shows only the server plugin. A hot reload republishes every mark, and no lease went dead.
+- `time_suspended` is set for every turn in flight, and cleared at idle. It is not set only by a suspension. Under the
+  rule it matters only for a dead host's execution mark, where a set value still means a turn that a restart resumes.
+- The 2.1.0 plugin context has no active-session list. The server plugin finds running sessions by listing the newest
+  ones and probing each with `session.wait`. A turn resumed after a restart then gets an execution mark under the new
+  service PID (harness step 8.3). A lease's `holder.pid` stays on the old service until that session's next call.
+- opencode's resume sweep runs only on a managed `--service` server. The harness restarted its private server with
+  `--service` to see a turn resume.
+- `opencode run --standalone` and `opencode acp` run on a private server child. The child can die before its mark-off
+  lands, and the sweep removed the stale mark. `opencode run` without `--standalone` uses the shared service.
+- Trusting one Codex hook does not trust the other (harness step 12). With only SessionStart trusted, the session
+  registers and no SessionEnd runs. With only SessionEnd trusted, `acquire` is refused for lack of a registration, and
+  the end hook still runs at unload.
+- The writer-lock file exists once `thread/start` returns, so SessionStart runs after it (harness step 8). The first
+  turn's `acquire` works.
+- Codex rewrites `config.toml` when a TUI starts. That is why the settings memory exists.
+- `codex exec` is an embedded host. Its argument list reads as the TUI mode, and the lease's `holder.pid` is the exec
+  process.
+- Codex refuses `thread/resume` while a thread is closing, so a late SessionEnd cannot land on a resumed session
+  through the host API.
+- Neither Codex nor opencode passes its session variable to MCP servers. Both are observed.
+- Commands the user runs with `!` fire no SessionStart, so their `acquire` fails with no registration. Model turns
+  register. A Codex `-c` override forces embedded mode.
+- `--permission-mode` on one `acquire` applies to the holder's other leases, as "Session name and permission mode"
+  says.
+- `list --json` showed no tombstones while one for a dead holder was on disk. It was removed later. `break` refuses it.
 
 ## Decision Log
 
@@ -1329,6 +1582,125 @@ None.
 - 2026-10-19: Accepted again, on the user's choice at the review gate. ADR-04 became accepted and ADR-02 superseded in
   the same change.
 - 2026-10-20: Scheduled as NIT-001 M1-M4 in queue.md.
+- 2026-10-20: Amended M1 and the Linux sandbox risk, on the user's choice. M1 said "The liveness check works inside the
+  Claude Code sandbox on macOS and on Linux, and the Linux result is recorded in the As built block", and "reports
+  alive, dead, and PID-reused correctly on macOS and on Linux". The risk's mitigation said milestone 1 checks liveness
+  inside the Claude Code sandbox on Linux. The user does not run Linux and did not allow a Linux dependency, so the
+  runtime Linux check is skipped. The macOS sandbox check is met by running the tests in Claude Code's sandbox. The
+  Linux code paths are verified only by fixture tests over a `/proc` tree and by cross-compilation with `go vet`. The
+  risk is now accepted, with the first real Linux run as its check.
+- 2026-10-20: ADR candidate (hard to reverse): the state directory's location and layout. The home directory comes
+  from the user database, never `HOME` or `XDG_STATE_HOME`. Under it sit `leases/`, `tombstones/`, `lock`, and
+  `format`. Every binary on a machine must agree, or two sessions scan different directories. Undecided. Found in
+  NIT-001 M1.
+- 2026-10-20: ADR candidate (hard to reverse): the CLI's exit-status table. Scripts and agents test the numbers, so
+  changing a value breaks them. Undecided. Found in NIT-001 M1.
+- 2026-10-20: Amended M2 and M3 checks, because the original M2 checks depended on `break` and tombstones, which M3
+  builds. That was a plan inconsistency. M2 said "`list --json` ... includes the tombstones it delivered or reaped" and
+  "A caller with no adapter can run `list` and `break`, is recorded as an anonymous process, and cannot `release`". M2
+  now requires the `tombstones` array, empty until M3, and the anonymous identity without `break`. M3 gains the two
+  matching checks: `list --json` includes the tombstones it delivered or reaped, and an anonymous `break` caller is
+  recorded in the tombstone.
+- 2026-10-20: Amended "Breaking a live lease", "A supported read path for guardians", and "Releasing" while building M3.
+  The tombstone text said it names the lease, the breaker, and the time. It now also lists the lease's paths, so the
+  broken holder can recognize a lease it may not remember by ID. The read-path bullet said delivered and reaped
+  tombstones appear in the output. It now adds a `summary` sentence and the action `unknown` for an unusable tombstone.
+  The Releasing bullet said an ID "with an undelivered tombstone" reports "broken". Every call now delivers before it
+  resolves its targets, so the bullet says the tombstone this call delivers. All three are additive to formats nothing
+  had released.
+- 2026-10-20: Best guess: a file whose name is not an ID cannot be removed by any nitipan command. The "Breaking a live
+  lease" text said `break --force` removes an unusable tombstone by its ID, and M2 left open how a person removes a
+  stray file. The candidates were letting `break --force` take the exact file name that `list` prints, and refusing it.
+  Refused won. "Callers with no adapter" says `break` takes lease IDs only so that it always names its exact target,
+  and a file name is a path that a caller could mistype into another file. The error that reports a stray file says a
+  person can delete it by hand after checking what it is. If the user wants `--force` to take a file name, `break`
+  gains a second kind of argument and the guard against a mistyped target weakens.
+- 2026-10-20: ADR candidate (cuts across the system): tombstone delivery. Every call except `hook` delivers and
+  removes the tombstones addressed to its caller. `break --force` publishes the tombstone before it removes the lease,
+  so a crash repeats a notice and never loses one. Undecided on 2026-10-23 (settled by M4, which settled the `hook`
+  exception and the notices for sessions that move to a new host). Found in NIT-001 M3.
+- 2026-10-20: Correction of fact in the M2 As built block. It said `release` "does not deliver or remove that
+  tombstone. Delivery and removal belong to M3 with `break`." M3 shipped delivery and removal in the shared locked
+  path, so `release` delivers and removes first and then reports "broken". The bullet now says so.
+- 2026-10-20: Final-review fixes to M3. Delivery now runs before request validation wherever the holder is known, so a
+  call that fails on a bad permission mode, a bad domain, or a release target still delivers. Where the holder cannot
+  be identified, delivery is impossible. Recorded in the M3 As built block.
+
+- 2026-10-22: Amended "Commands", "Granting the sandbox allowance", and the M4 plugin check, on the user's choice at M4
+  planning. They said `setup` never writes settings and prints the plugin install steps. `setup opencode
+  --install-plugins <dir>` now also writes the embedded plugin files into `<dir>/nitipan`, with nitipan's absolute path
+  baked in, and refuses to overwrite a differing file without `--replace`. The user's reason: printing long plugin
+  source to stdout and expecting a redirect is unacceptable. The scope is plugin files only. No settings file is ever
+  written, and `setup` never prints plugin source.
+- 2026-10-22 (autonomous, M4 best guesses): Amended "Session liveness on shared hosts". Before, the config check
+  trusted a file older than the host's start on every platform. Only a macOS start converts to wall-clock time, so on
+  Linux both checks record unknown. Before, a session missing from opencode's database was unspecified. It reads clear,
+  since it has no turn to resume. Before, the Codex end-mark clearing and a host move were both "reported like a
+  tombstone". A clearing is stored as a tombstone with a new optional `kind` and `detail`, and a move is reported by the
+  call that makes it and not stored. The `kind` field is a minor addition to a format nothing has released, and an empty
+  `kind` still means a break, so an old reader is no more permissive.
+- 2026-10-22 (autonomous, M4 best guesses): `time_suspended` is read by running `sqlite3 -readonly`, with no Go SQLite
+  dependency. Any failure reads unknown. The upkeep sweep reads the database once for all dead execution marks, within
+  800ms, so it fits the Codex hook's 3 seconds, and a failed or slow read keeps every mark. The Codex config checks scan
+  `config.toml` and `hooks.json` under the Codex home with a small reader of the documented shapes, because nitipan
+  takes no TOML dependency. A shape it cannot classify records unknown. The acquire gates run after the call takes the
+  lock and delivers tombstones, so a refused gate still delivers. Every lock holder runs the end-mark conversion and
+  the sweep through a hook on the lock, so no command can skip them. The Codex permission modes are the sandbox modes
+  and approval policies from `codex --help`. The opencode modes are `build`, `plan`, and `auto`. The plugins are
+  TypeScript, embedded from `plugins/opencode/nitipan`, and poll the tab list and route every 2 seconds, because
+  reactive reads from a plugin are unconfirmed. They log failures to `plugin.log` in the state directory, and a refused
+  call is retried. A registration publishes its notice before it clears an end, and an old binary never removes a
+  registration or mark of a higher minor.
+- 2026-10-22: Corrected the TUI plugin's sources, after the live opencode checks (opencode 2.1.0). The TUI plugin
+  marked a session present when it ran anywhere on the shared service, and the text said the tab list was shared. A TUI
+  on the shared service sees every session's status and events, so any open TUI marked a headless `opencode run`
+  session, and that session's `acquire` succeeded. That broke the check that a session with no TUI cannot acquire, and
+  it hid the execution-mark path, because the session read alive from another TUI's presence mark. Each TUI's tab list
+  is its own in 2.1.0, and every session opens in a tab. Before, the plugin marked sessions in the shared tab list, the
+  route, or running in that TUI. Now it marks only sessions in its own tab list and its current route, with children
+  following their root, and running state comes only from the server plugin's execution marks. Evidence:
+  `spec/reports/2026-10-22-nit-001-m4-opencode-live-results.md`, steps 2.3, 5, 9, and 10.1.
+- 2026-10-22: Corrected Codex liveness for a lease left on its old host, after the live Codex check 11. A session that
+  resumed under a new host without its writer-lock file kept its lease on the old host, as the move rule says. But
+  `list` read the lease alive, because the session was judged by its newest live registration whatever host the lease
+  recorded. The two rules conflicted. Before, the newest live registration judged every lease of the session. Now it
+  judges a lease only when it is under the lease's recorded host. Otherwise the lease reads unknown with a reason
+  naming both hosts, unless a live registration is under the recorded host itself. The acquire gate and the move check
+  already require a registration under the calling host, and the `list` hint shares this rule, so no other path needed
+  a change. Evidence: `spec/reports/2026-10-22-nit-001-m4-codex-harness-results.md`, check 11.
+- 2026-10-22: Compare settings, not mtime, for the Codex config checks. The user chose this after the live Codex check
+  4b. Codex rewrites `config.toml` on TUI start, adding `[tui] screen_reader_detection_done` and
+  `[tui.model_availability_nux]`. The file was then newer than the host, so the unload delay and SessionEnd checks read
+  unknown and `acquire` failed closed. For an embedded TUI this always happens. Before, a file was trusted only when
+  older than the host's start. Now a scan that trusts every file also remembers the two values, and a newer file is
+  trusted for a value that equals the remembered one. A changed value, or none remembered, still reads unknown. The
+  user accepted that a brand-new embedded-only setup fails until some host starts after the config is written. Best
+  guesses: the memory is one file per Codex home, `sessions/config/<digest of the home>.json`, because the config path
+  follows the home. It covers `hooks.json` too, since both are read. Each value is compared on its own. The write
+  happens in the registration's lock, only when the values changed, so it adds one small atomic write to the hook's
+  2-second budget. A failed write fails the registration like any other write. Evidence:
+  `spec/reports/2026-10-22-nit-001-m4-codex-harness-results.md`, check 4b.
+- 2026-10-22: Review fixes to the config memory. A memory file that is undecodable, of a higher major, or of a higher
+  minor is never overwritten, as the evolution rules require. Before, the first two read as no memory and were
+  replaced. The memory records the executable beside SessionEnd, so a changed hook path reads unknown. With no
+  wall-clock host start, the scan reads unknown even when a memory exists, as the text says for Linux. The stale-trust
+  residual is recorded in Risks.
+- 2026-10-22: ADR candidate (hard to reverse): the `sessions/` layout, the session-file name grammar, and the end-mark
+  name. They are on-disk formats that every binary on a machine must agree on, and the grammar is part of the V1
+  contract. Extends the Undecided state-directory candidate of 2026-10-20. Undecided. Found in NIT-001 M4.
+- 2026-10-23: The opencode server plugin marks sessions that are already running when it loads. This is the user's
+  choice for the resumed-turn gap. Before, the plugin marked a session only on a `session.execution.started` event. A
+  turn that a restarted service resumes raised no such event the plugin saw, so its mark named the dead service until
+  the turn ended. Now the plugin lists the 200 newest sessions at load and again at 2, 5, 15, and 45 seconds. A session
+  whose wait call has not returned after 300 ms counts as running. The plugin marks it on, and marks it off when the
+  wait call returns. Only the latest marker for a session may mark it off, so a late wait never removes a newer turn's
+  mark. The plugin API offers no active-session list, which is why wait is the probe. The list is not limited to the
+  plugin's own location. Evidence: the manual step 8.3 in `spec/reports/2026-10-22-nit-001-m4-opencode-live-results.md`
+  and the first harness rerun, where opencode resumed the turn and the plugin saw no execution event. After this change
+  the harness check "the resumed turn has an execution mark under the new server" passed.
+  Each scan also reads `sessions/executing` for marks under the plugin's own PID. A session with such a mark and no
+  owner, whose wait returns at once, lost its end event while an earlier instance was torn down, so the plugin marks it
+  off.
 
 ## References
 

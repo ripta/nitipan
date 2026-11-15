@@ -8,8 +8,10 @@ It supports Claude Code, Codex, and opencode.
 
 ## Status
 
-Design only. No code yet. The first version is
-[NIT-001](spec/proposals/NIT-001-local-lease-cli.md), which is accepted.
+The first version is [NIT-001](spec/proposals/NIT-001-local-lease-cli.md). The commands, the Claude Code adapter, and
+the Codex and opencode session rules are built. The Codex and opencode hooks and plugins pass automated live checks.
+`make live-codex` and `make live-opencode` drive a private Codex app-server and a private opencode server against a
+fake model server. They need no manual steps and cost no model tokens.
 
 ## First version
 
@@ -37,6 +39,20 @@ allowance for it.
 Later versions add resource leases, such as `cpu:heavy`, and a self-hosted broker that works across machines. Callers
 will not change when the broker arrives. See the
 [broker research](spec/reports/2026-10-18-lease-broker-research.md).
+
+## Codex and opencode
+
+Run `nitipan setup codex` or `nitipan setup opencode` to print what each agent needs. Neither command edits a settings
+file.
+
+For Codex, `setup` prints the sandbox write path, a SessionStart hook and a SessionEnd hook that run `nitipan hook`,
+and `thread_unload_delay_secs = 60`. Codex fires SessionEnd only when it unloads a thread. The short delay means a
+thread's background terminals and MCP servers stop 60 seconds after you switch away from it. Restart the Codex daemon
+after you change the config. `acquire` refuses until the hooks and the delay are in force.
+
+For opencode, `nitipan setup opencode --install-plugins <dir>` writes the TUI and server plugins into `<dir>/nitipan`,
+with nitipan's absolute path baked in. It writes plugin files and nothing else. A session needs a TUI with the plugin
+loaded before it can `acquire`.
 
 ## Relationship to coding_agent_standards
 

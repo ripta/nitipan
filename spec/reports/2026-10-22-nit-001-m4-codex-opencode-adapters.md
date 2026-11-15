@@ -1,0 +1,307 @@
+# NIT-001 M4: Codex and opencode adapters work-queue run
+
+Date: 2026-10-22. Trigger: a `/work-queue` run with no arguments, which means `next 1`. It picked queue row
+`NIT-001 M1-M4` from `spec/proposals/queue.md`, whose only unfinished milestone is M4. NIT-001 is the proposal for
+nitipan's local lease CLI (`spec/proposals/NIT-001-local-lease-cli.md`). Environment: macOS (darwin arm64), run from
+Claude Code's sandboxed Bash in `/Users/ripta/projects/nitipan`. Codex 0.163.0 and opencode are installed under
+`/opt/homebrew/bin`.
+
+The previous run, which built M1 to M3 and held M4, is reported in
+[2026-10-20-nit-001-m1-m4-local-lease-cli.md](2026-10-20-nit-001-m1-m4-local-lease-cli.md).
+
+## TL;DR
+
+M4 is DONE and NIT-001 is `implemented`. The Codex and opencode adapters pass automated live checks, `make
+live-codex` and `make live-opencode`, which need no manual steps and spend no model quota. The manual handoffs ran
+partway first. Their gaps led to the harnesses, and the harnesses found three bugs, all fixed.
+
+## Run state
+
+- Code repo base commit for the run and for this row's review: `d9dbcdc`. M1 to M3 (`4cde8a9..2b1f280`) were
+  reviewed on 2026-10-20
+- Specs live in the code repo, so the specs commits are the code commits listed below
+
+| Milestone | Run status | Commits |
+|-----------|------------|---------|
+| NIT-001 M4 | DONE | `a0c9f30`, `90e4903`, `afe6aea`, `15ad3d4`, `c33f6ee`, `6b8d637` |
+
+M4 lands as two commits. The pre-gate commit carries the code, tests, plugins, and handoffs, with M4 `IN PROGRESS`.
+The run then pauses at one gate while the user runs the live checks in real Codex and opencode sessions. The
+post-gate commit carries the live fixes and the As built block, and sets M4 `DONE`.
+
+## Decisions the user made at plan time
+
+- Live checks: build with automated tests, then pause at one gate for the user to run handoffs in real Codex and
+  opencode sessions. Live failures are fixed before M4 is `DONE`.
+- Plugins: embedded in the binary, and `setup` writes them to a directory the user names. Printing long plugin source
+  to stdout and expecting a redirect is not acceptable. This amends "Granting the sandbox allowance". `setup` still
+  never writes a settings file.
+
+## Best guesses made at plan time
+
+1. `time_suspended` is read by running `sqlite3 -readonly`, with no Go SQLite dependency. Any failure reads unknown.
+   If wrong, a dependency is added.
+2. The Codex hook config format, SessionStart payload, and hook trust come from Codex 0.163.0 docs and source, since
+   no report covers them.
+3. opencode cannot run inside this sandbox, which gives EPERM on its log file. The plugin API comes from source reading
+   of opencode 2.0.32. The gate proves it.
+4. The plugins are TypeScript, which opencode loads directly.
+5. The plugin-writing flag is `nitipan setup opencode --install-plugins <dir>`. It refuses to overwrite a differing
+   file without `--replace`.
+6. Notices for a moved host or a cleared end mark reuse the tombstone record with a new optional kind field. That is a
+   minor addition to a format nothing has released.
+7. The `sessions/` layout extends the existing Undecided ADR candidate on the state directory layout.
+
+## Milestones
+
+### NIT-001 M4
+
+#### Pre-gate implementation
+
+The implementer built the `internal/session` package, `nitipan hook` (subcommands `session-start`, `session-end`,
+`presence`, and `execution`), the Codex and opencode rules and `acquire` gates, the host move in holder sync, the
+`setup` text, `setup opencode --install-plugins <dir> [--replace]`, the plugins under `plugins/opencode/nitipan/`,
+and the two handoff files:
+
+- [2026-10-22-nit-001-m4-codex-live-checks.md](2026-10-22-nit-001-m4-codex-live-checks.md)
+- [2026-10-22-nit-001-m4-opencode-live-checks.md](2026-10-22-nit-001-m4-opencode-live-checks.md)
+
+Checks: `make ci` passed for the implementer, with 0 lint issues. `proposals.py check` and `proposals.py freeze`
+returned `[]`. The implementer ran no Codex or opencode session and no lease smoke test. `build/nitipan list` against
+the real state directory printed "no leases".
+
+Best guesses the implementer made. They are also in the proposal's Decision Log, marked autonomous:
+
+1. The plugin sources live in `plugins/opencode/nitipan/`, with an embed package at `plugins/embed.go`. `go:embed`
+   cannot reach above `internal/`. The plan's path changes only in depth.
+2. The plugins export plain `{id, setup}` objects and import nothing from opencode. `index.ts` is the server plugin
+   and `tui.ts` is the TUI plugin. Session IDs are read from `data.sessionID`, `sessionID`, or
+   `properties.sessionID`. The TUI plugin polls the tab list and route every 2 seconds and also subscribes to events.
+   If any of this is wrong, only the TypeScript files change.
+3. It is unverified whether the global `plugins/` directory loads the server plugin. `setup` also prints the
+   `plugins` config fallback. The opencode handoff's steps 0 and 13 settle it.
+4. A session absent from opencode's `session_v2` reads clear, since there is no turn to resume.
+5. On Linux, both Codex config checks record unknown, because only macOS process starts convert to wall-clock time.
+   Codex `acquire` then fails closed on Linux.
+6. The cleared-end-mark notice is a tombstone with new optional fields `kind` ("revived") and `detail`. A host move
+   is reported by the call that moves it and is not stored. "Claimed meanwhile" means other holders' leases acquired
+   after the end was recorded.
+7. The session gates run after `begin()`, so tombstones still deliver.
+8. Permission modes. Codex: `read-only`, `workspace-write`, `danger-full-access`, `on-request`, `never`, from
+   `codex --help`. opencode: `build`, `plan`, `auto`.
+9. The hook finds Codex's home from `CODEX_HOME`, then `$HOME/.codex` from the hook's environment, then the
+   user-database home.
+10. A registration or mark write refuses to overwrite or remove a session file that is unusable or of a higher minor.
+11. Hook input is stdin JSON, `{"session_id", "present"?, "executing"?}`. Codex's extra fields are ignored.
+12. A registration is written only while the session holds a lease. The sweep removes an unended daemon registration
+    whose host is dead.
+13. That the Codex hook payload's `session_id` equals `CODEX_SESSION_ID`, and the SessionEnd payload shape, rest on
+    docs and source only. The handoff checks them.
+14. `opencode service restart` in the opencode handoff is hedged. Only `opencode service` and `opencode reload` were
+    confirmed to exist.
+
+Amendments, each marked "Amended 2026-10-22; see Decision Log": "Commands", "Granting the sandbox allowance" (the
+user's plugin decision), the M4 plugin bullet, and "Session liveness on shared hosts" (the Linux unknown, a session
+absent from the database, and the notice shape).
+
+ADR candidates the implementer named: the `sessions/` layout and its name grammar, logged as Undecided as an extension
+of the state-directory candidate. The hook stdin contract is a possible candidate, not logged.
+
+#### Pre-gate review
+
+The reviewer ran `make ci`, which passed, and `proposals.py check` and `freeze`, which returned `[]`. adr-impact found
+one conflict with ADR-04. Dispositions, before the fixes land:
+
+1. Fix (CONFIRMED). The TUI plugin marked a session before its hook call ran. A failed call was never retried.
+2. Fix (adr-impact CONFIRMED, ADR-04; reviewer PLAUSIBLE). The sweep and the end-mark clear removed decoded session
+   files of a higher minor. ADR-04 says an old binary never removes a session file of a higher version.
+3. Trace (PLAUSIBLE). Each dead execution mark ran its own `sqlite3` call, with a 3-second timeout, under the lock.
+   That could exceed the Codex SessionStart hook's 3-second limit.
+4. Trace (PLAUSIBLE). A Codex re-registration cleared end marks before publishing its notice, so a failed publish
+   lost the notice.
+5. Fix (CONFIRMED). Stray punctuation in the Codex `setup` text.
+6. Trace (PLAUSIBLE). The opencode config fallback may name the wrong key, `plugins` instead of `plugin`.
+7. Fix. The opencode `setup` text printed the executable path without shell quoting.
+8. Trace (PLAUSIBLE, security). The plugins logged to a predictable file in the temp directory.
+9. Fix. Three proposal lines ran past 120 columns.
+10. Fix. A comment on session-file upkeep contradicted the sweep.
+11. Fix. A one-line method only forwarded to another.
+12. Fix. Two opencode handoff steps needed caveats: one makes the live database unreadable, and one kills the TUI of
+    the session running it.
+13. Deferred to the final review. The 2026-10-20 ADR candidate on tombstone delivery still reads "Waits on NIT-001
+    M4". M4 now settles the `hook` exception and the notice kinds.
+
+Outcomes of the fix round:
+
+- 1, 2, 5, 7, 9, 10, 11, and 12 are fixed. For 1, the server plugin, which has no poll, retries each execution call 3
+  times, 2 seconds apart. The TypeScript was not run. Only the embedded-source checks cover it.
+- 3 was confirmed by trace and fixed. The sweep makes one `sqlite3` read for all dead execution marks, bounded at 800
+  ms. A failed or slow read keeps every mark.
+- 4 was confirmed by trace and fixed. The notice is published before anything is removed. A failed publish aborts the
+  registration and leaves the end in place.
+- 6 was partly confirmed. The opencode 2.0.32 TUI config source uses `plugins` (plural), so the key was right. The
+  global `plugins/` directory autoloads subdirectories for the TUI, so `plugins/nitipan/` is right. Server-side
+  discovery is unverified. The printed text now says where each plugin goes. Handoff steps 0.5 and 13 record what
+  worked.
+- 8 was confirmed and fixed. Both plugins log to `<state dir>/plugin.log`, opened with `O_NOFOLLOW` and mode 0600.
+
+Checks after the fixes: the coordinator ran `make ci`, which passed with 0 lint issues. `proposals.py check` and
+`freeze` returned `[]`.
+
+The pre-gate work was committed as `a0c9f30` (nitipan: judge Codex and opencode leases by session). The handoffs at
+first told each session to start in a scratch checkout. Their results path is relative, and Codex's sandbox blocks
+writes outside the workspace, so `90e4903` (spec: start the NIT-001 M4 live-check sessions in the repo) moved the
+start to the repo.
+
+#### Gate setup, 2026-10-22
+
+The user ran two wrapper scripts from the run's scratchpad, since this sandbox cannot read or write `~/.codex` or
+`~/.config/opencode`.
+
+Codex:
+
+- The setup script backed up `~/.codex/config.toml` to `config.toml.bak-nitipan-20261022212658`. It added
+  `thread_unload_delay_secs = 60` at the top, the state directory under `[sandbox_workspace_write] writable_roots`,
+  and both hooks with `timeout = 3`. None of these existed before.
+- Starting `codex` showed "Hooks need review: 2 hooks are new or changed", with three choices: review, trust all, or
+  continue without trusting.
+- In `/hooks`, both rows started at Installed 1, Active 0, Review 1. Trusting SessionStart alone left SessionEnd at
+  Active 0, Review 1. Trusting one hook does not trust the other. Both were then trusted, and both read Active 1.
+- `codex app-server daemon restart` ran after the trust. It returned `"status":"restarted"`, pid 87537, version
+  0.163.0, with socket `~/.codex/app-server-control/app-server-control.sock`.
+
+opencode:
+
+- The installed opencode is v2.1.0. The 2026-10-18 research and the plugin source reading used 2.0.32.
+- `setup opencode --install-plugins ~/.config/opencode/plugins` wrote `nitipan/index.ts`, `package.json`, and
+  `tui.ts`, and exited 0.
+- Before any restart, `opencode plugin list` showed `nitipan.server local
+  /Users/ripta/.config/opencode/plugins/nitipan/index.ts`. The server plugin autoloads from the plugins directory with
+  no config entry. The TUI plugin was not listed. The handoff's step 5 settles whether it loaded.
+- `opencode service restart` replaced service PID 10041 with PID 2163, `opencode serve --service`. In `ps -ef`, both
+  had parent PID 1 (launchd), not a TUI. Later, the opencode session ran `opencode service restart` from its own
+  shell. The new service, PID 50404, had that session's TUI (30555) as its parent (opencode results, step 8.3). The
+  service's parent is whatever ran the restart, and no LaunchAgent plist exists. Recognizing the host does not depend
+  on the parent, since the walk matches by argument list.
+
+The user then started one Codex session and one opencode TUI session in the repo, and handed each its handoff.
+
+#### Live results, first pass
+
+Codex ran out of quota partway through. Its results are in
+[2026-10-22-nit-001-m4-codex-live-results.md](2026-10-22-nit-001-m4-codex-live-results.md). Steps 1, 2, 3a, 4a, 6,
+7, 12, and 15 passed. Steps 3b, 5, 8, 9, 10, 11, 13, and 14 did not run. The user cannot rerun everything, so M4's
+As built block will track each check's status, and only the unrun checks run next time.
+
+The opencode results are in
+[2026-10-22-nit-001-m4-opencode-live-results.md](2026-10-22-nit-001-m4-opencode-live-results.md). Most steps passed.
+Both plugins autoloaded from `~/.config/opencode/plugins/nitipan` with no config entry. Two findings:
+
+1. Fixed. The TUI plugin marked every session running anywhere on the shared service as present. So a headless
+   `opencode run` session could `acquire` while any TUI was open (steps 2.3 and 10.1). It also hid the execution-mark
+   path in step 9. A TUI now marks only the sessions in its own tab list and its current route. The proposal's TUI
+   plugin bullet and the matching M4 check are amended in place, with a Decision Log entry. The fix has not run live.
+   The user's installed copy of the plugin still predates it.
+2. No change needed. `opencode run --standalone` left a stale execution mark when its private server died. The sweep
+   removes such a mark and the rule reads it dead. A new test pins both.
+
+A review of the fix found only lines past the width limits, and they are rewrapped. `make ci` passed and
+`proposals.py check` returned `[]`.
+
+The opencode session was still running when this was written. Its results file may gain more steps. The As built
+counts below reflect the file at that time.
+
+M4's As built block in the proposal now holds one row per check, 38 in all. Each row carries one status:
+
+- `live`: 5
+- `tested`: 16
+- `tested, live pending`: 11
+- `not run`: 2
+- `failed, fixed`: 3, none rerun live
+- `failed, not fixed`: 1. A turn that resumes after an opencode service restart gets no execution mark under the new
+  service PID.
+
+The next live pass reruns only the rows not `live` or `tested`. The block also records live facts that change the
+design's assumptions:
+
+- `time_suspended` is set for every in-flight turn.
+- Codex `-c` overrides force embedded mode.
+- A user `!` shell command in Codex fires no SessionStart.
+- `list --json` hid a stuck tombstone of a dead holder.
+
+#### Automated live checks, 2026-10-23
+
+The user refused further manual checks. The run replaced the handoffs with two harnesses, `make live-codex` and
+`make live-opencode`, in `scripts/live-checks/`. They are Python with the standard library only, the user's choice.
+
+- Each harness runs a private Codex app-server or `opencode serve`, with its own CODEX_HOME or XDG directories. A
+  fake model server answers every model request with scripted tool calls. No run calls a real model, and none
+  touches the user's own Codex or opencode.
+- They share the real nitipan state directory, which has no override by design. They release only their own leases
+  and remove only their own session and config-memory files.
+- They run outside the sandbox, which blocks local ports and ptys.
+- Results: [codex harness results](2026-10-22-nit-001-m4-codex-harness-results.md) and
+  [opencode harness results](2026-10-22-nit-001-m4-opencode-harness-results.md).
+
+The harness runs found these nitipan problems, all fixed and rerun clean:
+
+1. A Codex lease left on its old host, when its session resumed under a new host without its writer-lock file, read
+   alive. It now reads unknown and names both hosts.
+2. Codex rewrites `config.toml` when a TUI starts, so the config was newer than its host and `acquire` failed. The
+   user chose to compare settings: nitipan remembers the confirmed unload delay and SessionEnd entry, and trusts a
+   newer file whose values match. The review found the memory could overwrite a newer version's file, and that
+   nothing was trusted only by rule on Linux. Both are fixed. A narrow stale-trust case is accepted in Risks.
+3. opencode resumes a turn after a managed-service restart but gives the server plugin no execution event. The user
+   chose to mark running sessions at plugin load. The plugin scans with `session.wait`, keeps the mark when a wait
+   fails, ignores events after a hot reload, and clears its own stale marks.
+
+The user decided that unit tests suffice for the opencode `time_suspended` and unreadable-database checks. The
+harness cannot reach the real database path.
+
+Final runs, outside the sandbox: Codex 68 PASS and 1 SKIP. opencode 47 PASS and 3 SKIP. 0 real model calls. M4's As
+built table has 39 rows, all `live` or `tested`, and M4 is DONE.
+
+Left for the user: 11 config-memory files from earlier harness runs remain in
+`~/.local/state/nitipan/sessions/config/`. The permission check blocked their removal. They are harmless.
+
+The user gave feedback on the gate design. It needed too much manual work, and the user should never be asked to edit
+config files. Future live checks are to be scripted.
+
+adr-impact also named the per-lock upkeep run by every lock holder as a possible ADR candidate. Declined: the
+proposal's "Session liveness on shared hosts" already says every lock holder runs it, and it shapes only nitipan's
+internals.
+
+## Row and final reviews
+
+The row review covered `d9dbcdc..6b8d637`. It found no code defects. Two texts were stale: the README's Status line,
+and the tombstone delivery ADR candidate, still "Waits on NIT-001 M4". Both were fixed in `c0fe185`. The candidate
+now reads Undecided. adr-impact found no conflicts with ADR-01 through ADR-04.
+
+NIT-001 was then marked `implemented` in the proposal and the index, in `4debea7`. Row `NIT-001 M1-M4` already sat
+above every unfinished row in `queue.md`.
+
+The final review covered `d9dbcdc..4debea7` and was also the ADR review. The range adds no ADR. `make ci` passed,
+and `proposals.py check` and `freeze` returned `[]`.
+
+## Status
+
+The run is finished. Commits in this repo, in order:
+
+1. `a0c9f30` nitipan: judge Codex and opencode leases by session
+2. `90e4903` spec: start the NIT-001 M4 live-check sessions in the repo
+3. `afe6aea` nitipan: mark only a TUI's own opencode sessions as present
+4. `15ad3d4` spec: record NIT-001 M4 live-check progress per check
+5. `c33f6ee` spec: record the NIT-001 M4 opencode live results
+6. `6b8d637` nitipan: verify Codex and opencode liveness with automated live checks
+7. `c0fe185` nitipan: describe the automated live checks in the README
+8. `4debea7` spec: mark NIT-001 implemented
+9. This report's last amendment, committed on its own
+
+No stashes were made. Open for the user:
+
+- Undecided ADR candidates in NIT-001's Decision Log: the state directory layout (now including `sessions/`), the
+  exit-status table, and tombstone delivery.
+- 11 config-memory files from early harness runs in `~/.local/state/nitipan/sessions/config/`. They are harmless.
+  The permission check blocked their removal.
+- Best guesses worth a look: plugin `session.wait` timing (300 ms probe, rescans at 2, 5, 15, and 45 s), and the
+  config memory keyed by a hash of CODEX_HOME.
