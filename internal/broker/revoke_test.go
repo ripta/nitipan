@@ -1,8 +1,10 @@
 package broker
 
 import (
+	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -380,5 +382,48 @@ func TestForgetAndRevokeClosesStreamAndRefusesReconnect(t *testing.T) {
 	resp := h.do(http.MethodGet, wire.PathStream, n, nil)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("reconnect status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// TestRevokeUserRefusesBrokerOwner proves "revoke user" refuses the broker owner's own user ID, leaves the
+// owner's labels pinned, and reports a bad request on the admin socket. It catches a revoke that unpins every
+// machine the owner approved. It cannot prove that no other path forgets the owner's labels.
+func TestRevokeUserRefusesBrokerOwner(t *testing.T) {
+	h := newCrossUserHarness(t)
+
+	ownerID := h.data().OwnerID
+	if ownerID == "" {
+		t.Fatal("the harness broker has no owner")
+	}
+
+	n := nodeID{Machine: "machine1", UID: 1000, Key: "key1"}
+
+	h.register(n)
+
+	label := h.bindNode(t, n, ownerID)
+
+	_, err := h.b.RevokeUser(ownerID)
+	if !errors.Is(err, ErrOwnerUser) {
+		t.Fatalf("RevokeUser(owner) = %v, want ErrOwnerUser", err)
+	}
+
+	if !strings.Contains(err.Error(), "broker forget") {
+		t.Errorf("error %q does not point at broker forget", err)
+	}
+
+	if h.data().Pins[label].Forgotten {
+		t.Error("the owner's label was forgotten")
+	}
+
+	if _, ok := h.data().Users[ownerID]; !ok {
+		t.Error("the owner's record is gone")
+	}
+
+	rec := httptest.NewRecorder()
+
+	h.b.adminResult(rec, err)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("admin status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }

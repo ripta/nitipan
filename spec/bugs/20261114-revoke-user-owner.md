@@ -1,6 +1,10 @@
 # `broker revoke-user` accepts the broker owner's own user ID
 
-**Status:** open
+**Status:** fixed 2026-11-15
+
+**Fixed:** 2026-11-15
+
+**Estimate:** small; no open design decisions
 
 ## Observed
 
@@ -28,3 +32,10 @@ Refuse the owner's ID in `RevokeUser` with an error that says the owner cannot b
 
 Whether the owner should ever be revocable is a design question. Today no flow hands ownership to another user, so a
 revoked owner leaves a broker whose owner has no labels. The refusal is the narrow fix until such a flow exists.
+
+## Fix note
+
+`Broker.RevokeUser` in `internal/broker/user.go` now refuses the owner's ID with `ErrOwnerUser`. The error points at
+`broker forget <label>`. The admin handler maps it to a bad request in `internal/broker/pin.go`. The regression test is
+`TestRevokeUserRefusesBrokerOwner` in `internal/broker/revoke_test.go`. The warning in
+`docs/operations/users-and-access.md` is replaced by the refusal.

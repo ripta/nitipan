@@ -165,7 +165,7 @@ Offboards a user in one store write. It:
 Each ended lease's holder gets a notice from its node. An ended lease is never revived. The command prints the labels
 it forgot, the leases it ended, and how many admissions, delegations, and mail grants it removed.
 
-The command does not refuse the broker owner's own user ID. Check the ID with `bindings` before you run it.
+The command refuses the broker owner's own user ID. Use `broker forget <label>` to unpin one of the owner's machines.
 
 ### cross-user
 
