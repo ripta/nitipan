@@ -30,12 +30,19 @@ type ReleaseRequest struct {
 // ReleaseResult lists the leases that were removed.
 type ReleaseResult struct {
 	Released []*record.Record
+
+	// Standing lists the sub-leases of a released lease. They stand alone now, each as an ordinary
+	// lease of its sub-lessee.
+	Standing []*record.Record
 }
 
 // Release removes leases the caller holds.
 //
 // Targets are resolved first, and nothing is removed unless every one of them resolves. A lease of a
 // newer minor version is removed like any other, because removing is not a rewrite.
+//
+// Releasing a parent removes only the parent. Its live sub-leases are told and rewritten without the
+// link in the same call. Releasing a sub-lease returns its keys to the parent, and tells the parent.
 func (e *Engine) Release(req ReleaseRequest) (*ReleaseResult, error) {
 	h := req.Holder
 
@@ -78,11 +85,23 @@ func (e *Engine) Release(req ReleaseRequest) (*ReleaseResult, error) {
 	res := &ReleaseResult{}
 
 	for _, en := range targets {
-		if err := c.l.Remove(state.LeasesDir, en.ID); err != nil {
+		kids, err := c.beforeRemoval(en, "was released by its holder", "its sub-lessee released it")
+		if err != nil {
+			return res, err
+		}
+
+		if err := c.removeLease(en); err != nil {
 			return res, fmt.Errorf("releasing %s: %w", en.ID, err)
 		}
 
 		res.Released = append(res.Released, en.Rec)
+
+		standing, err := c.afterRemoval(en, kids)
+		res.Standing = append(res.Standing, standing...)
+
+		if err != nil {
+			return res, err
+		}
 	}
 
 	return res, nil

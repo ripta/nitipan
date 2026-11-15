@@ -85,7 +85,7 @@ func TestHelpListsUserCommandsAndHidesHook(t *testing.T) {
 		t.Fatalf("status = %d", got)
 	}
 
-	for _, name := range []string{"acquire", "release", "list", "break", "advertise", "setup"} {
+	for _, name := range []string{"acquire", "release", "list", "break", "advertise", "request", "grant", "decline", "revoke", "setup"} {
 		if !strings.Contains(stdout.String(), name) {
 			t.Errorf("help does not list %s:\n%s", name, stdout)
 		}
@@ -100,7 +100,7 @@ func TestEverySubcommandIsRegistered(t *testing.T) {
 	deps, _, _ := testDeps()
 	root := NewRoot(deps)
 
-	for _, name := range []string{"acquire", "release", "list", "break", "advertise", "setup", "hook"} {
+	for _, name := range []string{"acquire", "release", "list", "break", "advertise", "request", "grant", "decline", "revoke", "setup", "hook"} {
 		cmd, _, err := root.Find([]string{name})
 		if err != nil || cmd.Name() != name {
 			t.Errorf("Find(%q) = %v, %v", name, cmd, err)

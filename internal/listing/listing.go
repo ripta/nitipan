@@ -16,8 +16,10 @@ import (
 )
 
 // SchemaVersion is the version of the output schema. Minor 1 adds the domain kind "resource", the
-// remote flag, and the effective count and live holders of a local resource lease.
-const SchemaVersion = "1.1"
+// remote flag, and the effective count and live holders of a local resource lease. Minor 2 adds
+// sub-leases: the parent link, the computed delegated list, the owner and grantor_of marks of a
+// filtered query, and the top-level requests and notices arrays.
+const SchemaVersion = "1.2"
 
 // Output is the whole `list --json` document.
 type Output struct {
@@ -28,6 +30,17 @@ type Output struct {
 	// in place, marked unknown. It is always an array, empty when there were none, so a consumer never
 	// has to test for absence.
 	Tombstones []Tombstone `json:"tombstones"`
+
+	// Requests are the pending sub-lease requests. A request that `grant` has marked as granting is
+	// not pending, so it is left out. A filtered query lists only the requests whose keys overlap
+	// the filter. It is always an array.
+	Requests []Request `json:"requests"`
+
+	// Notices are the notices this call delivered to its caller. Delivery removes a notice, so a
+	// consumer that reads only the JSON would lose it if it went to stderr alone. It is always an
+	// array, and empty when the call delivered none, which includes every call that read without
+	// the lock.
+	Notices []Notice `json:"notices"`
 
 	// SlotConfigPath is where the slot counts are configured. The text output prints it. The JSON
 	// document leaves it out, since a consumer has no use for it.
@@ -56,6 +69,36 @@ type Tombstone struct {
 	// Summary is the sentence `list` also writes to stderr, so a consumer that discards the array
 	// can still show a person what happened.
 	Summary string `json:"summary,omitempty"`
+}
+
+// Request is one pending sub-lease request.
+type Request struct {
+	ID string `json:"id"`
+
+	// Parent is the lease the requester asks to share. It can name a lease that no longer exists,
+	// when the call could not repair the request.
+	Parent      string        `json:"parent"`
+	Requester   record.Holder `json:"requester"`
+	Liveness    Liveness      `json:"liveness"`
+	Keys        []string      `json:"keys"`
+	Description string        `json:"description,omitempty"`
+	RequestedAt time.Time     `json:"requested_at"`
+}
+
+// Notice is one notice list delivered. Summary is the sentence `list` also writes to stderr.
+type Notice struct {
+	ID      string    `json:"id"`
+	Cause   string    `json:"cause"`
+	Target  string    `json:"target"`
+	Paths   []string  `json:"paths,omitempty"`
+	At      time.Time `json:"at"`
+	Summary string    `json:"summary"`
+}
+
+// Delegation is one live sub-lease in a parent's delegated list.
+type Delegation struct {
+	ID   string   `json:"id"`
+	Keys []string `json:"keys"`
 }
 
 // Liveness is a lease's computed liveness. A consumer treats "unknown" as alive.
@@ -89,6 +132,21 @@ type Lease struct {
 	Absorbs       []string          `json:"absorbs,omitempty"`
 	NameShared    bool              `json:"name_shared,omitempty"`
 
+	// Parent is the lease this one was delegated from, as stored. It stays set while the parent is
+	// dead or gone, until a locked call repairs the record.
+	Parent string `json:"parent,omitempty"`
+
+	// Delegated lists the live sub-leases of this lease. It is computed at read time and never
+	// stored. It is absent on a lease with none, so its presence says the lease is a parent.
+	Delegated []Delegation `json:"delegated,omitempty"`
+
+	// Owner and GrantorOf answer "who owns this path" for a filtered query, and are absent on an
+	// unfiltered list, which has no path to answer for. Owner is false on a parent whose match lies
+	// wholly inside its sub-leases. GrantorOf lists the live sub-leases of this lease whose keys the
+	// query overlaps. It is absent when there are none.
+	Owner     *bool    `json:"owner,omitempty"`
+	GrantorOf []string `json:"grantor_of,omitempty"`
+
 	// Remote is true on a resource lease written on another machine. Another machine's resource is a
 	// different resource, so a consumer that counts the holders of a name skips these.
 	Remote bool `json:"remote,omitempty"`
@@ -117,6 +175,7 @@ func FromRecord(rec *record.Record, res liveness.Result) Lease {
 		ID:            rec.ID,
 		Version:       rec.Version.String(),
 		Kind:          rec.Domain.Kind,
+		Parent:        rec.Parent,
 		Usable:        true,
 		Liveness:      Liveness{Status: res.Status.String(), Reason: res.Reason},
 		Footprint:     &fp,
@@ -167,6 +226,14 @@ func Encode(w io.Writer, out Output) error {
 
 	if out.Tombstones == nil {
 		out.Tombstones = []Tombstone{}
+	}
+
+	if out.Requests == nil {
+		out.Requests = []Request{}
+	}
+
+	if out.Notices == nil {
+		out.Notices = []Notice{}
 	}
 
 	enc := json.NewEncoder(w)

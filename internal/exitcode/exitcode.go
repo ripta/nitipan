@@ -24,6 +24,7 @@ const (
 	NoSuchLease    = 8
 	Unusable       = 9
 	WaitTimeout    = 10
+	Delegated      = 11
 )
 
 // Entry documents one exit status.
@@ -46,6 +47,7 @@ var Table = []Entry{
 	{NoSuchLease, "no such lease", "no lease has that ID"},
 	{Unusable, "unusable record", "a record this nitipan cannot use blocks the request"},
 	{WaitTimeout, "wait timeout", "acquire --wait ran out of time before the lease could be granted"},
+	{Delegated, "delegated", "the caller already holds exactly these keys, and part of them is delegated to a sub-lessee. The output lists the delegations"},
 }
 
 // Results that map to a status of their own. Commands wrap these with detail for the message.
@@ -57,6 +59,7 @@ var (
 	ErrBroken         = errors.New("lease was broken")
 	ErrNoSuchLease    = errors.New("no such lease")
 	ErrWaitTimeout    = errors.New("timed out waiting for a lease")
+	ErrDelegated      = errors.New("part of the lease is delegated")
 )
 
 // For maps an error to its exit status.
@@ -82,6 +85,8 @@ func For(err error) int {
 		return Unusable
 	case errors.Is(err, ErrWaitTimeout):
 		return WaitTimeout
+	case errors.Is(err, ErrDelegated):
+		return Delegated
 	default:
 		return Error
 	}

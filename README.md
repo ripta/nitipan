@@ -15,16 +15,20 @@ fake model server. They need no manual steps and cost no model tokens.
 
 ## First version
 
-The first version runs on one machine, with no daemon. It has six commands:
+The first version runs on one machine, with no daemon. It has ten commands:
 
 - `acquire` claims a domain
 - `release` gives it up
 - `list` shows every lease and whether its holder is alive
 - `break` removes another holder's lease, and needs `--force` when that holder is alive
 - `advertise` updates the caller's name, permission mode, or a lease's description
+- `request` asks the holder of a lease for part of it
+- `grant` hands a requested part to the requester as a sub-lease
+- `decline` refuses a request, or withdraws one
+- `revoke` ends a sub-lease at once, and only the holder of its parent can run it
 - `setup` prints the sandbox allowance, hooks, and plugins an agent needs
 
-A seventh command, `hook`, is called only by those agent hooks and plugins.
+An eleventh command, `hook`, is called only by those agent hooks and plugins.
 
 A domain is keyed by absolute path, with optional path scopes. A claim against a dead holder succeeds. An overlapping
 claim against a live holder is refused, and the refusal names the holder.
@@ -96,6 +100,89 @@ use every core.
 
 Acquire resources from the parent session only. Subagents share their parent's holder, so two subagents that both claim
 `cpu:heavy` both succeed, and the first to release frees the name while the other still runs.
+
+## Sub-leases
+
+A holder can delegate part of its domain to another session. The other session then works in that part, and the holder
+keeps the rest. The delegated part belongs to the sub-lessee alone while the sub-lease lives. Only path leases can
+delegate. A resource lease cannot, and a sub-lease cannot delegate again.
+
+The sub-lessee asks and the holder grants:
+
+1. The other session runs `nitipan request <lease-id> --checkout <path> --scope <dir>`. The lease is the one that a
+   refused `acquire` names. Request prints a request ID and the holder's handle.
+2. The requester tells the holder out of band, for example through SendMessage.
+3. The holder runs `nitipan grant <request-id>`. The output names the requester's handle and agent name. The holder can
+   run `nitipan decline <request-id>` instead. The requester can run it to withdraw.
+
+A grant binds the requester's exact identity, which is recorded in the request. The sub-lease takes the request's ID as
+its lease ID, and its name, permission mode, and description from the request. The grant is refused when the requester
+is the holder's own session, when the requester has died, when the keys are no longer inside the lease, and when
+another live lease overlaps them.
+
+The requester learns of a grant or a refusal from a notice on its next nitipan call. A notice goes to stderr as
+`nitipan: notice: ...` and is removed once it is delivered. A `list` that takes the lock delivers the caller's notices
+like any other command, and `list --json` also reports them in its `notices` array. A `list` that reads without the
+lock delivers none. Requests wait in `requests/` and notices in `notices/`, both in the state directory. Older binaries
+never read either one.
+
+While a sub-lease lives:
+
+- A claim by anyone else on the delegated part is refused, and the error names both holders.
+- The holder's own claim on the delegated part is refused too. The error names the sub-lessee, and the refusal can be
+  waited out with `--wait`.
+- The sub-lessee's claim inside its sub-lease reports that it is already covered. A claim that reaches outside is
+  refused by the holder's lease.
+- `acquire --replace` is refused on a sub-lease. A holder's `--replace` that would drop the delegated keys, or absorb a
+  lease that has sub-leases, is refused and lists them.
+- The holder that re-runs `acquire` with exactly its own keys exits with status 11 and lists the delegations. Status 11
+  means that the holder still holds the lease, but does not own all of it right now.
+
+When a sub-lease or its parent ends:
+
+- The parent's holder can run `nitipan revoke <lease-id>` to end a sub-lease at once. The sub-lessee gets a tombstone
+  that names the parent's holder, with the cause `revoked`. Anyone else is refused, and the error names the parent.
+  Subagents share their parent's holder, so any subagent of the holder can revoke.
+- A sub-lessee's `release`, a forced `break` of the sub-lease, and a dead sub-lessee that nitipan clears each return the
+  keys to the parent. The parent's record does not change. The parent gets a notice with the sub-lease's ID, its keys,
+  and how it ended. The output of a `break` says the keys went back.
+- A parent that dies, is released, or is broken takes only itself. Each live sub-lease is rewritten without `parent` in
+  the same call, at the lowest record version its fields need. Its sub-lessee gets a notice that says how the parent
+  ended. The output of `release` and `break` lists the sub-leases that now stand alone. A parent that died is handled by
+  the next nitipan call that takes the lock.
+- Releasing the parent ends the grant for good. The former parent cannot revoke a former sub-lease, and cannot claim its
+  old domain while the sub-lease stands.
+- A request whose parent lease ended is declined with a notice. A notice whose holder is dead is removed by the next
+  call that takes the lock.
+- A binary older than a sub-lease's record version never rewrites it and writes no notice for it.
+
+`list` shows the tree. The text output prints each sub-lease indented under its parent, and each pending request under
+the lease it asks to share. A sub-lease whose parent is dead or gone prints at the top level, with its stored `parent`
+link, until a locked call repairs it. A `list` that reads without the lock prints it that way too.
+
+`list --json` has schema version 1.2, an additive change over 1.1. Consumers ignore fields they do not know. Every
+lease stays a top-level entry in `leases`, so a consumer of the earlier schema still sees all of them.
+
+- `parent` is on a sub-lease, and names its parent lease ID.
+- `delegated` is on a parent that has live sub-leases. It lists each one as `{"id": ..., "keys": [...]}`. It is
+  computed when `list` runs and is never stored. A lease with no live sub-leases carries no `delegated` field.
+- `owner` and `grantor_of` appear only when `list` is filtered by a domain. An unfiltered `list` has no path to answer
+  for, so it omits both. `owner` is true when the filter overlaps a part of the lease that no live sub-lease holds, and
+  false when the match lies wholly inside the sub-leases. `grantor_of` lists the IDs of the live sub-leases whose keys
+  the filter overlaps, and is absent when there are none. A parent that holds `/repo` and delegated `/repo/src` is the
+  owner and the grantor when filtered by `/repo`. Filtered by `/repo/src`, it is only the grantor, and the sub-lease is
+  the owner. A resource filter sets neither mark.
+- `requests` lists the pending requests, each with its `id`, `parent` lease ID, `requester` holder (which carries the
+  handle), `liveness`, `keys`, `description` when the requester gave one, and `requested_at`. A request that `grant`
+  is already working on is not pending. A filtered `list` keeps the requests whose keys overlap the filter.
+- `notices` lists the notices this call delivered, each with its `cause`, `target`, `paths`, `at`, and a `summary`
+  sentence. Delivery removes a notice, so read this array when stderr is not captured.
+
+`requests`, `notices`, and `tombstones` are always arrays, never null.
+
+A sub-lease is its own record in `leases/`, with a `parent` field that names the lease it came from. The parent's record
+does not change. Records that use `parent`, and requests and notices, carry record version 1.2. A lease that uses none
+of them keeps version 1.0 and stays writable by older binaries.
 
 ## Waiting
 

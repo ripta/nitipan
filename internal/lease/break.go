@@ -54,6 +54,13 @@ type BrokenLease struct {
 	// Holder is the lease's holder, when the record could be read.
 	Holder *record.Holder
 
+	// ReturnedTo is the ID of the live parent that got the keys back, when the target was a sub-lease.
+	ReturnedTo string
+
+	// Standing lists the sub-leases of the target. They stand alone now, each as an ordinary lease of
+	// its sub-lessee.
+	Standing []*record.Record
+
 	// WasTombstone is true when the target was an unusable tombstone and not a lease.
 	WasTombstone bool
 }
@@ -77,6 +84,10 @@ type breakPlan struct {
 // force when its record allows clearing and this binary may rewrite it. Anything else needs force:
 // a live or unknown holder, a record that asks for a newer nitipan, and a record that cannot be used.
 // Breaking a live holder's lease leaves a tombstone addressed to that holder.
+//
+// Nothing cascades. Breaking a parent removes only the parent, and its live sub-leases are told and
+// rewritten without the link in the same call. Breaking a sub-lease returns its keys to the parent,
+// and tells the parent.
 func (e *Engine) Break(req BreakRequest) (*BreakResult, error) {
 	if len(req.IDs) == 0 {
 		return nil, usagef("break needs one or more lease IDs")
@@ -235,21 +246,60 @@ func (c *call) execute(p breakPlan, req BreakRequest) (BrokenLease, error) {
 		return done, c.removeFile(state.TombstonesDir, p.id)
 	}
 
-	if p.lease.Rec != nil {
-		holder := p.lease.Rec.Holder
-		done.Holder = &holder
+	if p.lease.Rec == nil {
+		return done, c.removeLeaseFile(p.lease)
 	}
 
+	holder := p.lease.Rec.Holder
+	done.Holder = &holder
+
+	var tomb *record.Tombstone
+
+	parentHow, childHow := "ended because its holder died", "its holder died, and nitipan cleared it"
+
 	if p.outcome == Broken {
-		t, err := c.writeTombstone(p.lease, req)
-		if err != nil {
+		tomb = c.newTombstone(p.lease, req)
+		parentHow = "was broken by " + describeBreaker(tomb)
+		childHow = "it was broken by " + describeBreaker(tomb)
+	}
+
+	kids, err := c.beforeRemoval(p.lease, parentHow, childHow)
+	if err != nil {
+		return done, err
+	}
+
+	if tomb != nil {
+		if err := c.publishTombstone(tomb); err != nil {
 			return done, err
 		}
 
-		done.Tombstone = t
+		done.Tombstone = tomb
 	}
 
-	return done, c.removeFile(state.LeasesDir, p.id)
+	if err := c.removeLeaseFile(p.lease); err != nil {
+		return done, err
+	}
+
+	done.Standing, err = c.afterRemoval(p.lease, kids)
+	if err != nil {
+		return done, err
+	}
+
+	if parent := c.liveParent(p.lease); parent != nil {
+		done.ReturnedTo = parent.ID
+	}
+
+	return done, nil
+}
+
+// removeLeaseFile is removeLease for a break, which treats a file that is already gone as removed.
+func (c *call) removeLeaseFile(en *entry) error {
+	err := c.removeLease(en)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("breaking %s: %w", en.ID, err)
+	}
+
+	return nil
 }
 
 func (c *call) removeFile(sub, id string) error {
@@ -261,10 +311,8 @@ func (c *call) removeFile(sub, id string) error {
 	return nil
 }
 
-// writeTombstone publishes the notice for a broken holder. It runs before the lease is removed, so
-// a crash between the two can send a notice for a lease that still exists. The other order could
-// lose the only signal the holder gets.
-func (c *call) writeTombstone(en *entry, req BreakRequest) (*record.Tombstone, error) {
+// newTombstone builds the notice for a broken holder.
+func (c *call) newTombstone(en *entry, req BreakRequest) *record.Tombstone {
 	by, anonymous := c.breaker(req.Caller)
 	rec := en.Rec
 
@@ -280,7 +328,7 @@ func (c *call) writeTombstone(en *entry, req BreakRequest) (*record.Tombstone, e
 		paths = append(paths, name)
 	}
 
-	t := &record.Tombstone{
+	return &record.Tombstone{
 		Envelope: record.Envelope{
 			Version:       record.TombstoneVersion,
 			ID:            c.e.NewID(),
@@ -296,17 +344,22 @@ func (c *call) writeTombstone(en *entry, req BreakRequest) (*record.Tombstone, e
 		BrokenAt:  c.e.Now().UTC(),
 		Paths:     paths,
 	}
+}
 
+// publishTombstone writes the tombstone before the lease is removed, so a crash between the two can
+// send a notice for a lease that still exists. The other order could lose the only signal the holder
+// gets.
+func (c *call) publishTombstone(t *record.Tombstone) error {
 	data, err := t.Encode()
 	if err != nil {
-		return nil, fmt.Errorf("encoding the tombstone for %s: %w", en.ID, err)
+		return fmt.Errorf("encoding the tombstone for %s: %w", t.Lease, err)
 	}
 
 	if err := c.l.Publish(state.TombstonesDir, t.ID, data); err != nil {
-		return nil, fmt.Errorf("publishing the tombstone for %s: %w", en.ID, err)
+		return fmt.Errorf("publishing the tombstone for %s: %w", t.Lease, err)
 	}
 
-	return t, nil
+	return nil
 }
 
 // breaker returns who the tombstone names. An agent session is recorded as a holder, with the handle

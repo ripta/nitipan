@@ -25,6 +25,8 @@ const (
 	childCheckEnv  = "NITIPAN_TEST_RACE_CHECKOUT"
 	childSlotEnv   = "NITIPAN_TEST_RACE_RESOURCE"
 	childWaitEnv   = "NITIPAN_TEST_RACE_WAIT"
+	childArgsEnv   = "NITIPAN_TEST_RACE_ARGS"
+	childAsEnv     = "NITIPAN_TEST_RACE_AS"
 	waitingLine    = "race child: attempt refused, waiting"
 	raceChildren   = 8
 	raceRounds     = 6
@@ -50,6 +52,17 @@ func runRaceChild(idx string) int {
 		fmt.Fprintln(os.Stderr, "bad child index", idx)
 
 		return 99
+	}
+
+	// Several processes can act as one holder, which a grant race needs.
+	if as := os.Getenv(childAsEnv); as != "" {
+		if n, err = strconv.Atoi(as); err != nil {
+			fmt.Fprintln(os.Stderr, "bad child identity", as)
+
+			return 99
+		}
+
+		idx = as
 	}
 
 	_, _ = io.Copy(io.Discard, os.Stdin)
@@ -101,6 +114,10 @@ func runRaceChild(idx string) int {
 		args = append(args, "--wait", wait)
 	}
 
+	if explicit := os.Getenv(childArgsEnv); explicit != "" {
+		args = strings.Split(explicit, "\x1f")
+	}
+
 	return Execute(deps, args)
 }
 
@@ -112,15 +129,33 @@ type childResult struct {
 func startRaceChild(t *testing.T, idx int, stateDir, checkout, resource string, release <-chan struct{}) <-chan childResult {
 	t.Helper()
 
-	done := make(chan childResult, 1)
-
-	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	cmd.Env = append(os.Environ(),
+	return startRaceProcess(t, release,
 		childEnv+"="+strconv.Itoa(idx),
 		childStateEnv+"="+stateDir,
 		childCheckEnv+"="+checkout,
 		childSlotEnv+"="+resource,
 	)
+}
+
+// startRaceCommand starts one process that runs the given command as holder number as.
+func startRaceCommand(t *testing.T, as int, stateDir string, args []string, release <-chan struct{}) <-chan childResult {
+	t.Helper()
+
+	return startRaceProcess(t, release,
+		childEnv+"="+strconv.Itoa(as),
+		childAsEnv+"="+strconv.Itoa(as),
+		childStateEnv+"="+stateDir,
+		childArgsEnv+"="+strings.Join(args, "\x1f"),
+	)
+}
+
+func startRaceProcess(t *testing.T, release <-chan struct{}, env ...string) <-chan childResult {
+	t.Helper()
+
+	done := make(chan childResult, 1)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), env...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -132,7 +167,7 @@ func startRaceChild(t *testing.T, idx int, stateDir, checkout, resource string, 
 	cmd.Stdout, cmd.Stderr = &out, &out
 
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("starting child %d: %v", idx, err)
+		t.Fatalf("starting a race process: %v", err)
 	}
 
 	go func() {
@@ -288,6 +323,150 @@ func TestAcquireRaceNeverExceedsTheSlotCount(t *testing.T) {
 			t.Errorf("round %d: %d records published, want %d", round, published, slots)
 		}
 	}
+}
+
+// raceOnce runs one command as one holder, alone, and returns how it ended.
+func raceOnce(t *testing.T, as int, stateDir string, args ...string) childResult {
+	t.Helper()
+
+	release := make(chan struct{})
+	done := startRaceCommand(t, as, stateDir, args, release)
+
+	close(release)
+
+	return <-done
+}
+
+// TestSubLeaseRaceNeverLetsTwoOverlappingGrantsOrClaimsSucceed races grants of overlapping requests,
+// all run by the parent's holder, against claims by other holders on the same keys. Exactly one grant
+// may win, and no claim may.
+func TestSubLeaseRaceNeverLetsTwoOverlappingGrantsOrClaimsSucceed(t *testing.T) {
+	const (
+		requesters = 4
+		claimers   = 3
+	)
+
+	for round := 0; round < raceRounds/2; round++ {
+		root, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		checkout := filepath.Join(root, "repo")
+		if err := os.MkdirAll(filepath.Join(checkout, "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		stateDir := filepath.Join(root, "state")
+
+		if res := raceOnce(t, 0, stateDir, "acquire", "--checkout", checkout); res.status != exitcode.OK {
+			t.Fatalf("round %d: the parent's acquire exited %d\n%s", round, res.status, res.output)
+		}
+
+		parentID := onlyLeaseID(t, stateDir)
+
+		var requests []string
+
+		for i := 1; i <= requesters; i++ {
+			res := raceOnce(t, i, stateDir, "request", parentID, "--checkout", checkout, "--scope", "sub")
+			if res.status != exitcode.OK {
+				t.Fatalf("round %d: request %d exited %d\n%s", round, i, res.status, res.output)
+			}
+
+			first, _, _ := strings.Cut(res.output, "\n")
+			requests = append(requests, strings.TrimPrefix(first, "requested "))
+		}
+
+		release := make(chan struct{})
+
+		var (
+			grants []<-chan childResult
+			claims []<-chan childResult
+		)
+
+		for _, id := range requests {
+			grants = append(grants, startRaceCommand(t, 0, stateDir, []string{"grant", id}, release))
+		}
+
+		for i := 0; i < claimers; i++ {
+			args := []string{"acquire", "--checkout", checkout, "--scope", "sub"}
+			claims = append(claims, startRaceCommand(t, requesters+1+i, stateDir, args, release))
+		}
+
+		close(release)
+
+		var (
+			granted int
+			dump    strings.Builder
+		)
+
+		for i, ch := range grants {
+			res := <-ch
+			fmt.Fprintf(&dump, "grant %d: status %d\n%s\n", i, res.status, res.output)
+
+			switch res.status {
+			case exitcode.OK:
+				granted++
+			case exitcode.Refused:
+			default:
+				t.Errorf("round %d: grant %d exited %d, want ok or refused\n%s", round, i, res.status, res.output)
+			}
+		}
+
+		for i, ch := range claims {
+			res := <-ch
+			fmt.Fprintf(&dump, "claim %d: status %d\n%s\n", i, res.status, res.output)
+
+			if res.status != exitcode.Refused {
+				t.Errorf("round %d: a claim on a sub-leased part exited %d, want refused\n%s", round, res.status, res.output)
+			}
+		}
+
+		if granted != 1 {
+			t.Fatalf("round %d: %d grants of %d overlapping requests succeeded, want 1\n%s", round, granted, requesters, dump.String())
+		}
+
+		published := 0
+
+		entries, err := os.ReadDir(filepath.Join(stateDir, state.LeasesDir))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), ".tmp-") {
+				published++
+			}
+		}
+
+		if published != 2 {
+			t.Errorf("round %d: %d records published, want the parent and one sub-lease\n%s", round, published, dump.String())
+		}
+	}
+}
+
+// onlyLeaseID returns the ID of the single lease in the state directory.
+func onlyLeaseID(t *testing.T, stateDir string) string {
+	t.Helper()
+
+	entries, err := os.ReadDir(filepath.Join(stateDir, state.LeasesDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var ids []string
+
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".tmp-") {
+			ids = append(ids, strings.TrimSuffix(e.Name(), ".json"))
+		}
+	}
+
+	if len(ids) != 1 {
+		t.Fatalf("leases = %v, want exactly one", ids)
+	}
+
+	return ids[0]
 }
 
 // stateNames lists every path under the state directory, relative to it.

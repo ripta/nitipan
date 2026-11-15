@@ -50,6 +50,12 @@ const (
 	LeasesDir     = "leases"
 	TombstonesDir = "tombstones"
 
+	// RequestsDir and NoticesDir hold sub-lease requests and the notices about them. A state
+	// directory set up by an older binary lacks both, so writers create them on demand. Binaries
+	// that predate sub-leases never scan either one.
+	RequestsDir = "requests"
+	NoticesDir  = "notices"
+
 	// The session directories hold what Codex hooks and opencode plugins report. They sit under
 	// sessions/, as paths relative to the state directory.
 	RegisteredDir = "sessions/registered"

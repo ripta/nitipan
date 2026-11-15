@@ -44,10 +44,11 @@ type ListResult struct {
 
 // List reads every lease with its holder's liveness.
 //
-// It takes the lock so it can finish a crashed merge and remove the tombstones it reports. When the
-// lock is busy, or the sandbox blocks it, list reads without it and warns, because records are
-// published atomically. It then still shows the tombstones it cannot use. It neither delivers nor
-// reaps any, since it could not remove them.
+// It takes the lock so it can finish a crashed merge, run the repairs of requests and sub-leases that
+// every locked call runs, and deliver the caller's notices and tombstones. It removes what it reported.
+// When the lock is busy, or the sandbox blocks it, list reads without it and warns, because records
+// are published atomically. It then still shows the tombstones it cannot use. It repairs nothing and
+// neither delivers nor reaps any notice or tombstone, since it could not remove them.
 func (e *Engine) List(req ListRequest) (*ListResult, error) {
 	res := &ListResult{}
 
@@ -77,21 +78,36 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 
 	var c *call
 
+	// repaired is false when the repairs did not run or did not finish. Notices are judged against the
+	// leases the repairs leave, so none is delivered from a half-repaired state.
+	repaired := false
+
 	switch {
 	case err == nil:
 		c = &call{e: e, l: l, sameProcess: map[*entry]bool{}}
 		defer c.close()
 
 		if ferr := l.FormatErr(); ferr != nil {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("%v; tombstones are not delivered", ferr))
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%v; tombstones and notices are not delivered", ferr))
 		}
 
 		if err := c.load(); err != nil {
 			return nil, err
 		}
+
+		if l.FormatErr() == nil {
+			repaired = true
+
+			if err := c.repair(req.Caller); err != nil {
+				repaired = false
+
+				res.Warnings = append(res.Warnings, fmt.Sprintf("repairing requests and sub-leases failed: %v; notices are "+
+					"not delivered", err))
+			}
+		}
 	case errors.Is(err, state.ErrLockBusy):
-		res.Warnings = append(res.Warnings, fmt.Sprintf("%v; listing without the lock, so tombstones are not "+
-			"delivered", err))
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%v; listing without the lock, so tombstones and notices are "+
+			"not delivered", err))
 	case errors.Is(err, fs.ErrPermission):
 		res.LockErr = err
 	default:
@@ -118,6 +134,13 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 
 	out := c.output(filter, filtered, cfg)
 
+	query := queryKeys(filter, filtered)
+
+	out.Requests, err = c.pendingRequests(query, len(query) > 0, req.Resource != "")
+	if err != nil {
+		return nil, err
+	}
+
 	canWrite := c.l != nil && c.l.FormatErr() == nil
 
 	var remove []*tombEntry
@@ -125,6 +148,13 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 	out.Tombstones, remove, err = c.tombstoneReport(req.Caller, canWrite)
 	if err != nil {
 		return nil, err
+	}
+
+	var due []dueNotice
+
+	if canWrite && repaired && req.Caller.Holder != nil {
+		due = c.dueNotices(*req.Caller.Holder)
+		out.Notices = noticeReport(due)
 	}
 
 	if err := req.Emit(out); err != nil {
@@ -135,7 +165,62 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 		c.removeTombstone(te)
 	}
 
+	for _, d := range due {
+		c.removeNotice(d.Name)
+	}
+
 	return res, nil
+}
+
+// repair runs the repairs that every locked call runs before it delivers anything, then classifies
+// the caller's holder. A caller that holds nothing still repairs, as any other locked call does.
+//
+// A failure is the caller's to report as a warning. list is the supported way to read leases, so a
+// repair that cannot write must not stop the read.
+func (c *call) repair(caller adapter.Caller) error {
+	if err := c.runRepairs(); err != nil {
+		return err
+	}
+
+	if caller.Holder != nil {
+		c.classify(*caller.Holder)
+	}
+
+	return nil
+}
+
+// noticeReport turns the delivered notices into the document's array. A dropped notice says nothing
+// true any more, so it is removed and never reported.
+func noticeReport(due []dueNotice) []listing.Notice {
+	out := []listing.Notice{}
+
+	for _, d := range due {
+		if !d.Report {
+			continue
+		}
+
+		out = append(out, listing.Notice{
+			ID:      d.Notice.ID,
+			Cause:   d.Notice.Cause,
+			Target:  d.Notice.Target,
+			Paths:   d.Notice.Paths,
+			At:      d.Notice.At,
+			Summary: d.Notice.Detail,
+		})
+	}
+
+	return out
+}
+
+// queryKeys returns the keys of a path filter. A resource filter, or no filter, has none.
+func queryKeys(filter record.Footprint, filtered bool) []keys.Key {
+	if !filtered {
+		return nil
+	}
+
+	ks, _ := pathKeys(filter)
+
+	return ks
 }
 
 // output builds the document. A record this binary cannot use always appears, as an unknown entry,
@@ -148,6 +233,8 @@ func (c *call) output(filter record.Footprint, filtered bool, cfg *SlotConfig) l
 
 	shared := c.sharedNames()
 	views := c.slotViews(cfg)
+	query := queryKeys(filter, filtered)
+	haveQuery := len(query) > 0
 
 	for _, en := range c.entries {
 		if en.Rec == nil {
@@ -161,6 +248,7 @@ func (c *call) output(filter record.Footprint, filtered bool, cfg *SlotConfig) l
 		}
 
 		lease := listing.FromRecord(en.Rec, en.Live)
+		c.annotate(&lease, en, query, haveQuery)
 		lease.Hint = en.Hint
 		lease.Remote = en.Rec.Domain.Kind == record.KindResource && !liveness.SameMachine(c.e.Machine, en.Rec.Machine)
 		lease.NameShared = shared[en.Rec.Holder.Name] && en.Rec.Holder.Name != ""

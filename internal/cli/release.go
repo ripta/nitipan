@@ -19,7 +19,11 @@ func (a *app) releaseCmd() *cobra.Command {
 
 The domain flags match a lease whose canonical keys equal them, using the keys stored in the lease,
 so the lease of a deleted worktree can still be released. --resource matches a lease whose resource
-name is equal. With no target, release refuses and lists your leases.`,
+name is equal. With no target, release refuses and lists your leases.
+
+Releasing a lease you delegated parts of removes only that lease. Its sub-leases stand alone from then
+on, as ordinary leases of their holders, and the output lists them. Releasing a sub-lease returns its
+keys to the lease it came from.`,
 		RunE: func(cmd *cobra.Command, ids []string) error {
 			return a.wrapErr(a.runRelease(cmd, ids))
 		},
@@ -60,6 +64,10 @@ func (a *app) runRelease(cmd *cobra.Command, ids []string) error {
 	if res != nil {
 		for _, rec := range res.Released {
 			fmt.Fprintf(a.deps.Stdout, "released %s\n", rec.ID)
+		}
+
+		for _, line := range standingLines(res.Standing) {
+			fmt.Fprintln(a.deps.Stdout, line)
 		}
 
 		if err == nil && len(res.Released) == 0 {

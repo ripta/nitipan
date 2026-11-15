@@ -51,7 +51,7 @@ func TestListJSONEmitsALeaseOfAnUnknownKindWithLivenessAndFootprint(t *testing.T
 	id := w.plant(plantSpec{PID: 77, Paths: []string{w.dir("repo")}, Version: "1.3", Kind: "future"})
 
 	doc := w.listJSON(w.terminal(900))
-	if doc["schema_version"] != "1.1" {
+	if doc["schema_version"] != "1.2" {
 		t.Errorf("schema_version = %v", doc["schema_version"])
 	}
 

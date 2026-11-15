@@ -89,6 +89,9 @@ func (e *Engine) handleFor(h adapter.Holder) string {
 	return handle.Derive(identity(h), machineKey(e.Machine))
 }
 
+// DescribeHolder labels a record's holder for a person.
+func DescribeHolder(h record.Holder) string { return describeHolder(h) }
+
 // describeHolder labels the handle apart from the agent name, since only the handle is assigned by
 // nitipan.
 func describeHolder(h record.Holder) string {

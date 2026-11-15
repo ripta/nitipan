@@ -13,7 +13,7 @@ import (
 // higher major is not.
 const (
 	CurrentMajor = 1
-	CurrentMinor = 1
+	CurrentMinor = 2
 )
 
 // Version is a record format version, written as "major.minor".
@@ -36,6 +36,10 @@ var (
 
 	// ResourceVersion is the minor that adds the resource record.
 	ResourceVersion = Version{Major: CurrentMajor, Minor: 1}
+
+	// ParentVersion is the minor that adds the parent field of a sub-lease, and the request and
+	// notice records. A record that uses none of them keeps its lower minor.
+	ParentVersion = Version{Major: CurrentMajor, Minor: 2}
 )
 
 // ParseVersion parses "major.minor".

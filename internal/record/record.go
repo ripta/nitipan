@@ -82,6 +82,10 @@ type Record struct {
 	AcquiredAt     time.Time `json:"acquired_at"`
 	Absorbs        []string  `json:"absorbs,omitempty"`
 
+	// Parent is the ID of the lease this one was delegated from. Only a sub-lease has one. A parent
+	// that names no record is dangling, and a reader treats it like a dead parent.
+	Parent string `json:"parent,omitempty"`
+
 	// BodyKnown is false when the domain kind is one this binary does not understand. Such a record
 	// is judged by its envelope alone.
 	BodyKnown bool `json:"-"`
@@ -163,6 +167,25 @@ func (r *Record) Encode() ([]byte, error) {
 	}
 
 	return encode(r)
+}
+
+// MinimalVersion is the lowest version whose fields the record still uses. A sub-lease that loses its
+// parent drops to it, so an older binary can rewrite the record again. A record never moves up.
+func (r *Record) MinimalVersion() Version {
+	need := PathVersion
+	if r.Domain.Kind == KindResource {
+		need = ResourceVersion
+	}
+
+	if r.Parent != "" {
+		need = ParentVersion
+	}
+
+	if r.Version.Major == need.Major && r.Version.Minor < need.Minor {
+		return r.Version
+	}
+
+	return need
 }
 
 // Clearable reports whether any reader may clear the record once its holder is dead.

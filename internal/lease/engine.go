@@ -28,6 +28,23 @@ type Hooks struct {
 	// AfterRewrite runs once `--replace` has rewritten its target and before it removes the leases it
 	// merged. An error aborts the operation there, leaving the disk as a crash would.
 	AfterRewrite func() error
+
+	// AfterGrantMark lets a test crash a grant where no lease exists yet, to check the lapsed repair.
+	AfterGrantMark func() error
+
+	// AfterGrantPublish lets a test crash a grant that has a lease and no notice, to check the granted repair.
+	AfterGrantPublish func() error
+
+	// AfterGrantNotice lets a test crash a grant that has both, to check that the repair tells nobody twice.
+	AfterGrantNotice func() error
+
+	// AfterLossNotice lets a test crash a call that published a loss notice and has not yet made the
+	// write it announces: a sub-lease ending, or a parent ending.
+	AfterLossNotice func() error
+
+	// AfterRevokeTombstone lets a test crash a revoke that published its tombstone and has not yet
+	// removed the sub-lease.
+	AfterRevokeTombstone func() error
 }
 
 // Engine runs lease operations against one state directory.
@@ -88,6 +105,10 @@ type entry struct {
 
 	// Hint is advice for a person that never changes the verdict.
 	Hint string
+
+	// removed is set once this call has removed the file. Later steps of the same call then treat the
+	// lease as gone, so nothing counts it as a parent or a sub-lease, and no rewrite recreates it.
+	removed bool
 }
 
 // Reasons this package adds to the ones the record package defines.
@@ -239,6 +260,12 @@ func (e *Engine) beginWith(h *adapter.Holder, lock func() (*state.Locked, error)
 		return nil, err
 	}
 
+	if err := c.runRepairs(); err != nil {
+		c.close()
+
+		return nil, err
+	}
+
 	if h != nil {
 		c.classify(*h)
 
@@ -247,6 +274,8 @@ func (e *Engine) beginWith(h *adapter.Holder, lock func() (*state.Locked, error)
 
 			return nil, err
 		}
+
+		c.deliverNotices(*h)
 	}
 
 	return c, nil
@@ -299,7 +328,7 @@ func (c *call) absorb(entries []*entry) ([]*entry, error) {
 			continue
 		}
 
-		err := c.l.Remove(state.LeasesDir, en.ID)
+		err := c.removeLease(en)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("finishing a merge: %w", err)
 		}
@@ -339,7 +368,7 @@ func (c *call) firstUnusable() error {
 
 func (c *call) mineByID(id string) *entry {
 	for _, en := range c.mine {
-		if en.ID == id {
+		if en.ID == id && !en.removed {
 			return en
 		}
 	}
@@ -350,7 +379,7 @@ func (c *call) mineByID(id string) *entry {
 // entryByID finds any file by lease ID, usable or not.
 func (c *call) entryByID(id string) *entry {
 	for _, en := range c.entries {
-		if en.ID == id {
+		if en.ID == id && !en.removed {
 			return en
 		}
 	}

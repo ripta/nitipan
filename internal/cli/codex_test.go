@@ -769,14 +769,14 @@ func TestCodexRegistrationOfAHigherMinorIsNeitherSweptNorClearedByAnOldBinary(t 
 
 	// A newer nitipan wrote the registration, and the session ended.
 	name := registrationName("t1", 400)
-	w.rewriteSessionFile("registered", name, map[string]any{"version": "1.2", "ended": true})
+	w.rewriteSessionFile("registered", name, map[string]any{"version": "1.3", "ended": true})
 
 	// Another registration of a higher minor sits under a host that is gone, with no lease naming it.
 	w.codexHost(450)
 	wantStatus(t, w.hook(w.hookFor(450, 452), "session-start", "t9", nil), exitcode.OK)
 
 	orphan := registrationName("t9", 450)
-	w.rewriteSessionFile("registered", orphan, map[string]any{"version": "1.2"})
+	w.rewriteSessionFile("registered", orphan, map[string]any{"version": "1.3"})
 
 	w.kill(450)
 	w.kill(400)

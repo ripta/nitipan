@@ -17,3 +17,13 @@ type Key struct {
 	// Normalize means the volume ignores Unicode normalization form, so comparisons normalize.
 	Normalize bool `json:"normalize,omitempty"`
 }
+
+// Paths returns the path of each key, in order.
+func Paths(ks []Key) []string {
+	out := make([]string, len(ks))
+	for i, k := range ks {
+		out[i] = k.Path
+	}
+
+	return out
+}

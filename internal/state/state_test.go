@@ -302,7 +302,11 @@ func TestLockSweepsTempFilesOfACrashedWriter(t *testing.T) {
 	leases := filepath.Join(dir.Path(), LeasesDir)
 	tombs := filepath.Join(dir.Path(), TombstonesDir)
 	writeRaw(t, filepath.Join(leases, ".tmp-"+idA), "partial")
+	requests := filepath.Join(dir.Path(), RequestsDir)
+	notices := filepath.Join(dir.Path(), NoticesDir)
 	writeRaw(t, filepath.Join(tombs, ".tmp-"+idB), "partial")
+	writeRaw(t, filepath.Join(requests, ".tmp-"+idA), "partial")
+	writeRaw(t, filepath.Join(notices, ".tmp-"+idA+"-request-granted.json"), "partial")
 	writeRaw(t, filepath.Join(leases, idB+".json"), "{}")
 
 	mustLock(t, dir)
@@ -310,6 +314,8 @@ func TestLockSweepsTempFilesOfACrashedWriter(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(leases, ".tmp-"+idA),
 		filepath.Join(tombs, ".tmp-"+idB),
+		filepath.Join(requests, ".tmp-"+idA),
+		filepath.Join(notices, ".tmp-"+idA+"-request-granted.json"),
 	} {
 		if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s survived the sweep: %v", path, err)

@@ -20,9 +20,19 @@ const reasonBadTombstoneName record.Reason = "file name is not a tombstone ID"
 //
 // Delivered runs before the tombstone is removed, so a crash between the two repeats the notice
 // instead of losing it. A tombstone is the only signal a broken holder gets.
+//
+// Notice receives the notices a call delivers. It runs before the notice file is removed, for the same
+// reason.
 type Notify struct {
 	Delivered func(*record.Tombstone)
+	Notice    func(*record.Notice)
 	Warn      func(error)
+}
+
+func (n Notify) notice(x *record.Notice) {
+	if n.Notice != nil {
+		n.Notice(x)
+	}
 }
 
 func (n Notify) delivered(t *record.Tombstone) {
@@ -79,7 +89,13 @@ func (e *Engine) loadTombstones() ([]*tombEntry, error) {
 // addressedTo reports whether the tombstone was written for this holder. A tombstone from another
 // machine is never ours, whatever its PID says.
 func (e *Engine) addressedTo(h adapter.Holder, t *record.Tombstone) bool {
-	return liveness.SameMachine(e.Machine, t.Machine) && matchHolder(h, t.Holder, t.Liveness) == matchSame
+	return e.isHolder(h, t.Envelope)
+}
+
+// isHolder reports whether the envelope's holder is the caller. A record from another machine is
+// never the caller's, whatever its PID says.
+func (e *Engine) isHolder(h adapter.Holder, env record.Envelope) bool {
+	return liveness.SameMachine(e.Machine, env.Machine) && matchHolder(h, env.Holder, env.Liveness) == matchSame
 }
 
 // deliver reports every tombstone addressed to the caller, then removes it. A failed removal is
@@ -185,14 +201,20 @@ func DescribeNotice(t *record.Tombstone) string {
 	return strings.TrimSuffix(t.Detail, ".")
 }
 
-// DescribeBroken says which lease was broken, by whom, and when.
+// DescribeBroken says which lease was broken, by whom, and when. A revoked sub-lease says so.
 func DescribeBroken(t *record.Tombstone) string {
 	msg := fmt.Sprintf("lease %s", t.Lease)
 	if len(t.Paths) > 0 {
 		msg += fmt.Sprintf(" on %s", strings.Join(t.Paths, ", "))
 	}
 
-	return fmt.Sprintf("%s was broken by %s at %s", msg, describeBreaker(t), t.BrokenAt.Format("2006-01-02 15:04:05 MST"))
+	at := t.BrokenAt.Format("2006-01-02 15:04:05 MST")
+
+	if t.Cause == record.CauseRevoked {
+		return fmt.Sprintf("%s was revoked by %s, the holder of its parent lease, at %s", msg, describeBreaker(t), at)
+	}
+
+	return fmt.Sprintf("%s was broken by %s at %s", msg, describeBreaker(t), at)
 }
 
 // describeBreaker names the breaker. A caller with no adapter is an anonymous process, never a

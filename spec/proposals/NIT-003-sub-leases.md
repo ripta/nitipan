@@ -1,8 +1,8 @@
 # NIT-003: Sub-Leases
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-10-20
+**Updated:** 2026-10-24
 
 ## Dependencies
 
@@ -64,7 +64,7 @@ covers all its keys.
 - The children of a lease are found by scanning for records that name it, in the scan `acquire` already does under the
   lock
 - A child whose `parent` names no record has a dangling parent. Lease IDs are never reused, so this is detected
-  soundly. A new reader treats it the way "Liveness and the parent's death" treats a dead parent, tombstone included
+  soundly. A new reader treats it the way "Liveness and the parent's death" treats a dead parent, notice included
 - A V1 binary can release, break, or clear a parent record, since the parent's record stays V1-writable. Its children
   then dangle. The duty to end or reparent them is delayed until the next new-binary call, and it is not lost, because
   each child still holds its sub-lessee's identity
@@ -78,7 +78,8 @@ covers all its keys.
 - A V1 binary, or any binary older than a child's minor, never rewrites that child, under NIT-001's writer rules. It
   still treats the child's dead or dangling parent as absent when it checks overlap
 - `parent` passes NIT-001's minor-version rule. A reader that ignores it sees two overlapping live records, so it
-  refuses at least as much as a new reader does
+  refuses at least as much as a new reader does. A sub-lease, a request, and a notice carry record version 1.2. A lease
+  without `parent` keeps version 1.0. Amended 2026-10-24; see Decision Log
 
 NIT-001's per-record mechanisms work unchanged on a child: holder match, tombstones, handle collision, release and
 break by ID, the holder-wide rewrite, and `list`. NIT-001's `--replace` keeps the lease ID so that parent links like
@@ -106,8 +107,8 @@ sub-lease lives, its keys belong to the sub-lessee alone.
   `acquire` on such a key is refused. The error names the sub-lessee and says to coordinate with it or ask the user. A
   parent holding `src` and `docs` that delegated `src/api` and then claims `src` is refused
 - The one exception is the parent's equal-key-set refresh. It is exempt from the parent's own children. When live
-  delegations exist, it exits with its own status, distinct from plain success, and its output lists them. A caller
-  that checks only the exit status is not told it owns everything
+  delegations exist, it exits with status 11, distinct from plain success, and its output lists them. A caller
+  that checks only the exit status is not told it owns everything. Amended 2026-10-24; see Decision Log
 - A sub-lessee's claim whose keys are all covered by its own live sub-lease is "covered by your leases". The parent's
   record does not block it, since those keys belong to the sub-lessee alone. A sub-lessee holding `/repo/src` that
   claims `/repo/src/handlers` gets "covered", not a refusal naming the parent
@@ -140,11 +141,13 @@ identity.
   prints the request ID and the parent's handle. The requester then asks the parent out of band, such as through
   SendMessage
 - A refused `acquire` names `nitipan request` as the way to ask for part of a blocking lease only for the refused keys
-  that one blocking lease covers, when that lease has no `parent` and none of the blockers is a live child of it. That is a command the caller itself runs. A sub-lease
-  cannot delegate, so a `request` against one is refused, and an error never suggests it. Neither does an error to the
-  blocker's own holder
+  that one blocking lease covers, when that lease has no `parent` and none of the blockers is a live child of it. That
+  is a command the caller itself runs. A sub-lease cannot delegate, so a `request` against one is refused, and an error
+  never suggests it. Neither does an error to the blocker's own holder
 - `request` refuses keys that the named lease does not cover, and keys that a live child of it already covers or
   overlaps, since `grant` would always refuse them. The error names the sub-lessee where there is one
+- `request` also refuses a resource lease, since a slot has no part to hand over, a lease of the caller's own, and a
+  lease whose holder is dead. Amended 2026-10-24; see Decision Log
 - `nitipan grant <request-id>` turns the request into a sub-lease record under the lock. The sub-lease's lease ID is
   the request ID. Its output names the requester's handle and agent name, so the parent sees whom it granted to
 - A grant first rewrites the request to a `granting` state through `rename(2)`. It then publishes the sub-lease, writes
@@ -163,8 +166,9 @@ identity.
   parent's death". It can also re-run `acquire` on the same keys, which succeeds as an equal-key-set refresh once
   granted
 - Requests live in `requests/<id>.json`, published the way tombstones are. They use the shared envelope and its
-  versioning, with footprint `none`. V1 binaries never scan that directory, so a request cannot block a V1 claim. A lock holder reaps a request whose requester is dead. It also reaps a request whose
-  parent lease is gone, and leaves the requester a "request declined" notice
+  versioning, with footprint `none`. V1 binaries never scan that directory, so a request cannot block a V1 claim. A lock
+  holder reaps a request whose requester is dead. It also reaps a request whose parent lease is gone, and leaves the
+  requester a "request declined" notice
 
 The handle binding was rejected. A session that holds no lease has no record, so its handle carries no collision
 suffix, and two such sessions can compute the same handle. It also needs a new `whoami` command. The secret was
@@ -182,12 +186,15 @@ candidates were ending the sub-lease with its parent, and keeping it as an ordin
 link or left with the link forever.
 
 Decision (autonomous): the sub-lease survives and becomes an ordinary lease. A dead parent and a dangling parent are
-handled the same way.
+handled the same way. Amended 2026-10-24; see Decision Log.
 
 - The next new-binary lock holder that sees a child whose parent is dead or dangling first writes the "parent ended"
   notice, then rewrites the child without `parent`, through `rename(2)`. The notice's ID is derived from the child's
   lease ID and the cause, so a retry after a crash finds it already published. The rewritten record's `version` drops
   to the lowest minor its remaining fields need, so a V1 binary can rewrite it again
+- The notice says how the parent ended when the call that ended it knows. A repair that finds the parent already gone
+  cannot tell a release from a break or from an older binary's removal, and the notice says so. A sub-lease whose own
+  holder is dead is left alone, since clearing it removes it
 - A binary older than the child's minor does not rewrite it, and does not write its notice. Only a binary that can
   rewrite the child writes the notice, so the notice is written once, by the call that repairs the child
 - The parent's dead record is cleared as NIT-001 already clears dead leases. Its remaining keys become claimable around
@@ -198,13 +205,14 @@ handled the same way.
 Notices live in `notices/<id>.json`, published the way tombstones are, with the shared envelope and footprint `none`.
 A notice that reports a loss, such as a parent or sub-lease ending, is published before the write that causes it. The
 overlap check still guards the keys, so an early loss notice is harmless. A grant notice comes after the grant. Every
-notice's ID is derived from its target's ID and its cause, so a retry after a crash finds it already published and the
-holder is told once. A notice is addressed to a holder. It carries a
-cause, and how that cause came about:
+notice's ID is derived from its target's ID and its cause, as `<target-id>-<cause>`. A retry after a crash finds it
+already published, and the holder is told once. A notice is addressed to a holder. It carries a cause, and how that
+cause came about:
 
-- Parent ended, sent to a sub-lessee: the parent's holder died, released, or was broken by a named caller
+- Parent ended, sent to a sub-lessee: the parent's holder died, released, or was broken by a named caller, or the parent
+  is gone with no record of how
 - Sub-lease ended, sent to a parent: its sub-lessee released, died, or was broken by a named caller. A revoke sends none,
-  since the parent did it
+  since the parent did it, and it removes one that a crashed release or break left behind
 - Request granted, sent to a requester
 - Request declined, sent to a requester: the parent declined, or the parent lease ended and the request was reaped
 - Request lapsed, sent to a requester: a grant was interrupted and did not leave a lease. The requester may request
@@ -213,6 +221,10 @@ cause, and how that cause came about:
 The holder's next nitipan call reports a notice and removes it. Delivery happens only under the lock, after that call's
 repairs of dangling children and granted requests. A `list` that reads without the lock delivers no notices, as it
 skips tombstone cleanup. A lock holder reaps a notice whose holder is dead.
+A loss notice that is published before its write waits for that write. Delivery leaves a "parent ended" notice in place
+while its sub-lease still names a live parent, and a "sub-lease ended" notice while the sub-lease still exists. A retry
+after a crash then replaces the notice with its own account, and the addressee is told once. Delivery drops a "parent
+ended" notice whose sub-lease is gone, and a "sub-lease ended" notice whose addressee holds no lease covering the keys.
 Subagents share their parent's holder, so a subagent's call can consume a notice before the main session sees it. The
 same is true of tombstones. Notices do not go in `tombstones/`. NIT-001's `release` reports an ID
 with an undelivered tombstone as "broken", so a V1 `release` would misreport a live lease. V1 binaries never scan
@@ -235,19 +247,32 @@ sub-leases nested inside their parent's entry, flat entries with computed annota
 stored `parent` link.
 
 Decision (autonomous): every lease stays a top-level entry, with computed annotations. The `list --json` change is an
-additive minor bump of its schema.
+additive minor bump of its schema, from 1.1 to 1.2. Amended 2026-10-24; see Decision Log.
 
 - A child carries `parent`, its parent's lease ID
 - A parent carries a computed `delegated` list of its live children's IDs and keys. It is computed at read time, never
   stored in the parent's record
-- A filtered query marks each match. A lease is `owner` when the query overlaps its keys outside the union of its live
-  children's keys. A parent is also `grantor_of` the children whose keys match. A parent holding `/repo` with `/repo/src` delegated, filtered by
-  `/repo`, is `owner` and `grantor_of` the child. Filtered by `/repo/src`, it is only `grantor_of`, and the child is
-  `owner`
-- Pending requests appear in a top-level `requests` array, each with its parent lease ID, requester handle, and keys
-- The human table prints children indented under their parent, and pending requests under the lease they target
-- A child whose parent is dangling prints at the top level with no grantor mark. That includes a `list` that reads
-  without the lock
+- A filtered query marks each match. A lease is `owner` when some part of the query that overlaps its keys is held by
+  none of its live children. The part is the deeper of the query key and the lease key, and a child holds it when one of
+  the child's keys contains it. Testing one child key at a time is the same as testing the union, since a part is one
+  path and sibling subtrees are disjoint. A parent is also `grantor_of` the children whose keys match. A parent
+  holding `/repo` with `/repo/src` delegated, filtered by `/repo`, is `owner` and `grantor_of` the child. Filtered by
+  `/repo/src`, it is only `grantor_of`, and the child is `owner`
+- An unfiltered `list` sets neither mark, since there is no path to answer for. A resource filter sets neither. The
+  parent link and the `delegated` list carry the structure there. A mark that is present is always computed from a
+  query, and an absent one never means false
+- Pending requests appear in a top-level `requests` array, each with its parent lease ID, requester holder and handle,
+  liveness, and keys. A request in the `granting` state is not pending and is left out. A filtered query keeps the
+  requests whose keys overlap the filter
+- `list` that takes the lock runs the same repairs of requests and sub-leases as any locked call, then delivers the
+  caller's notices. It reports each delivered notice in a top-level `notices` array with a `summary`, as tombstones are.
+  The array is always present, and empty for a `list` that reads without the lock, which delivers none
+- A sub-lease counts as live, and so as delegated, only while its holder and its parent are alive. A child whose parent
+  is dead is displayed like one whose parent is dangling
+- The human table prints children indented under their parent, and pending requests under the lease they target. A
+  request whose lease is not listed prints in a group of its own
+- A child whose parent is dangling prints at the top level with no grantor mark, showing its stored `parent` link. That
+  includes a `list` that reads without the lock
 
 Requests are visible to every session. That is harmless. Only the parent can grant, only the parent or the requester
 can decline, and a grant binds the recorded identity. Seeing a request lets a third party do nothing.
@@ -301,8 +326,11 @@ cascades.
 
 - `nitipan revoke <child-id>` ends a live sub-lease at once. Only the holder of the child's parent lease may run it, and
   it needs no `--force`. Under the lock, it removes the child and writes a tombstone in `tombstones/`, keyed by the
-  sub-lessee and naming the parent as the breaker. The tombstone carries cause `revoked`. Old readers ignore the cause
-  and deliver it as a break, which passes the minor-version rule. NIT-008 extends this act
+  sub-lessee and naming the parent as the breaker. The tombstone carries a new `cause` field set to `revoked`, and is
+  stamped 1.2. Its `kind` field stays empty, since `kind` already means `moved` or `revived`. Old readers ignore the
+  cause and deliver it as a break, which passes the minor-version rule. A sub-lessee that is already dead gets no
+  tombstone, and a retry after a crash reuses the tombstone it finds. NIT-008 extends this act. Amended 2026-10-24; see
+  Decision Log
 - Another caller's `revoke` is refused, and the error names the parent. `break --force` by anyone still works as in
   NIT-001
 - No error names `revoke`. A refused `acquire` on a delegated key names the sub-lessee and says to coordinate with it or
@@ -345,7 +373,8 @@ parent is told.
   refused, naming them
 - When a child ends by any act other than its parent's `revoke`, its keys return to the parent with no rewrite of the
   parent's record. That covers the sub-lessee's `release`, a forced break of the child, and clearing a dead child. The
-  parent gets a "sub-lease ended" notice carrying the child's ID, its keys, and how it ended
+  parent gets a "sub-lease ended" notice carrying the child's ID, its keys, and how it ended. A parent that is dead or
+  gone gets none, since nobody can receive it. Amended 2026-10-24; see Decision Log
 - A V1 `release` of a child reaches the same end state, minus the notice. That rests on NIT-001 saying what `release`
   does on a record of a higher minor
 
@@ -369,15 +398,13 @@ None.
 - **The parent dies and the sub-lessee does not notice** — likelihood: medium, impact: low.
   Neither macOS nor nitipan has a push signal on another process's death. The sub-lease survives, so the sub-lessee's
   work is not cut off. Mitigation: the sub-lessee learns from a "parent ended" notice on its next nitipan call.
-- **NIT-003 rests on NIT-001 amendments that NIT-001 does not carry yet** — likelihood: high, impact: high.
-  NIT-001 is in flight and owned by another session. The Decision Log lists eight amendments it needs: the order of the
-  other-holders and coverage checks, `release` on a higher minor, the stale `clear_when_dead` example, a `list --json`
-  evolution rule, the commands that need an adapter, the milestone 3 carve-out, the "breaker can claim at once" text in
-  "Breaking a live lease", and the rationale in "Record evolution and unknown records" about a NIT-003 delegation
-  list. The check order and the `release` rule are one-way doors, since V1 binaries cannot learn them later. Gating
-  NIT-003's milestones does not protect them, since V1 can ship without them. Rated high likelihood because none is
-  requested yet. Mitigation: the amendments went to NIT-001's owner, the nitipan guardian session, on 2026-10-18,
-  before NIT-001 is accepted. Milestone 1 starts only once NIT-001 carries them.
+- **NIT-003 rests on NIT-001 amendments that NIT-001 now carries** — likelihood: low, impact: high.
+  The amendments have landed in NIT-001. Amended 2026-10-24; see Decision Log. The Decision Log lists the eight it
+  needed: the order of the other-holders and coverage checks, `release` on a higher minor, the stale `clear_when_dead`
+  example, a `list --json` evolution rule, the commands that need an adapter, the milestone 3 carve-out, the "breaker
+  can claim at once" text in "Breaking a live lease", and the rationale in "Record evolution and unknown records" about
+  a NIT-003 delegation list. The check order and the `release` rule are one-way doors, since V1 binaries cannot learn
+  them later. Mitigation: the amendments went to NIT-001's owner on 2026-10-18, and NIT-001 took all eight.
 - **Subagents act as their guardian** — likelihood: medium, impact: medium.
   Subagents share the parent's holder. Any subagent of a guardian can grant or revoke, and can consume its notices and
   tombstones. Accepted (autonomous): NIT-001's holder model already accepts that subagents are one holder, and no
@@ -399,7 +426,7 @@ None.
 
 ### M1: Records, overlap, and grants
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - NIT-001's text carries the amendments this proposal's Decision Log lists
 - Table tests cover every overlap case with and without a parent link: parent and child, child and third party,
@@ -419,9 +446,33 @@ None.
   children, is refused and lists the children
 - A V1 binary refuses at least as much as a new one against a parent and child, and never rewrites a child
 
+**As built:**
+
+- NIT-001 already carried the eight amendments. Its Decision Log entry of 2026-10-18, "Took eight amendments", lists
+  them, so the first check needed no edit. The Risks entry about NIT-001 not carrying them was stale, and was amended.
+  See the Decision Log entry of 2026-10-24.
+- The old-binary check used a binary from the run's base commit `f29ad6d`, extracted with `git archive`. Its own test
+  harness drove it over a temporary state directory, with a parent, a planted version 1.2 child, and a third party.
+  Every claim by the parent, the sub-lessee, and the third party on the delegated or the parent's keys was refused.
+  `advertise` by the sub-lessee was refused, and `break` of the child without `--force` was refused. A dead parent's
+  keys outside the child were claimable and the child's were not. The child record stayed byte-identical in every case.
+  The new binary gave the same refusal in each case but three, where the old binary was stricter.
+  The new one reports "covered" or exits 11 instead, and lets the sub-lessee refresh its own keys. The old binary
+  refused all three. The harness is kept outside the repo for M2 to reuse.
+- Notices are delivered by every locked call that has a holder, after that call's repairs. M1 left `list` neither
+  repairing nor delivering them. Since M3, a `list` that takes the lock does both.
+- The repair of requests also reaps a request whose parent lease no longer exists, with a "request declined" notice. It
+  fell out of the same code, and M2 owns its checks. One test covers it here.
+- `grant` also refuses a requester whose handle another live holder has taken since the request, and any other overlap
+  with the caller's own leases or the parent's other sub-leases.
+- Fixtures that stood for a newer minor moved from 1.2 to 1.3.
+- Decisions amended during the build: resource leases cannot be sub-leased, the exit status of the refresh with
+  delegations is 11, notice IDs are `<target-id>-<cause>`, and the sub-lease, request, and notice records carry version
+  1.2. See the Decision Log entry of 2026-10-24.
+
 ### M2: Parent lifecycle
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - A child whose parent died, was released, or was broken survives as an ordinary lease. It is rewritten without
   `parent` at the lowest minor its fields need, and its sub-lessee gets a "parent ended" notice saying how
@@ -435,16 +486,55 @@ None.
 - A request whose parent lease ends is reaped with a "request declined" notice
 - Notices never appear in `tombstones/`, and a lock holder reaps a dead holder's notices
 
+**As built:**
+
+- The repair of a dead or dangling parent runs in the same phase as the request repair, after it and before any
+  delivery, on every locked call that opens the lock for a write, with or without a holder. M2 left `list` out of it.
+  Since M3, a `list` that takes the lock runs it too.
+- A parent's `release` and a forced `break` publish every sub-lessee's notice, then remove the parent, then rewrite the
+  sub-leases. A crash after the removal is finished by the dangling-parent repair, and its notice reads "cannot tell".
+  Crash hooks cover a loss notice and a revoke tombstone. Each test runs the call twice and counts one report.
+- A `revoke` also removes a "sub-lease ended" notice that a crashed release or break of the sub-lease left behind.
+  See the Decision Log entry of 2026-10-24 for the row review.
+- A request whose parent ended is reaped by the next locked call, not by the call that ended the parent.
+- A call that removes a lease marks it removed for the rest of the call. A break of a parent and its child in one call
+  once could have rewritten the child after removing it, which recreates the file. The mark and a test close it.
+- A loss notice is held back until its loss happens, so the addressee is not told early and not told twice. A notice
+  left pending by a crash that never retries stays on disk until the sub-lease ends another way or the addressee's
+  holder dies. See the Decision Log entry of 2026-10-24 for M2.
+- Old-binary check, using the harness kept beside M1's, with a binary from `f29ad6d` and the new binary against a
+  child stamped 1.3. A parent release, a forced break of the parent, a dead parent cleared by a third party's claim,
+  and a dead parent with the child refreshing its keys all left the child byte-identical. No `notices/` file appeared,
+  and the only tombstone was the break's own for the parent. With the child at 1.2 the new binary rewrote it and left
+  one notice in the three cases where another holder made the call. `list` without the lock delivers none, which a
+  test covers.
+- Decisions amended during the build: see the Decision Log entries of 2026-10-24 for M2.
+
 ### M3: Display
 
-**Status:** NOT STARTED
+**Status:** DONE
 
-- `list --json` carries `parent`, a computed `delegated` list, `owner` and `grantor_of` marks, and a `requests` array,
-  as an additive minor bump of its schema
+- `list --json` carries `parent`, a computed `delegated` list, `owner` and `grantor_of` marks, a `requests` array, and a
+  `notices` array of what that call delivered, as an additive minor bump of its schema. A `list` that takes the lock
+  repairs and delivers, and one that reads without it delivers none. Amended 2026-10-24; see Decision Log
 - A filter on an ancestor of a delegated key marks the parent `owner` and `grantor_of`. A filter on a delegated key
   marks the child `owner` and the parent only `grantor_of`
 - The human table indents children and pending requests under their parent, and prints a dangling child at the top
   level, including when `list` reads without the lock
+
+**As built:**
+
+- `list` under the lock now runs the request and sub-lease repairs and delivers the caller's notices, which M1 and M2
+  left undone. A test of M2 that expected a locked `list` to leave a notice for the sub-lessee's next call was changed
+  to match. See the Decision Log entries of 2026-10-24 for M3.
+- The owner check takes the deeper of each overlapping query key and lease key, and asks whether one sub-lease key
+  contains it. Tests cover each example in "Display", a full handoff, siblings, a parent whose keys are all delegated,
+  and a shared prefix.
+- The unlocked `list` reads a dead parent's children as standing alone, since that is what the next locked call makes
+  them. A test plants a dangling child and lists with the lock held by another process, as JSON and as text.
+- A request file this binary cannot use is not shown in `requests`.
+- `list --json` goldens moved to schema 1.2. The old-binary harness was not rerun, since no record or state-directory
+  change landed.
 
 ## Decision Log
 
@@ -532,6 +622,80 @@ None.
   an old reader more permissive needs a new major, and a skipped notice to a parent does not. So `parent` stays a minor
   addition. The user kept all eight amendments at NIT-001's review gate.
 - 2026-10-20: Scheduled as NIT-003 M1-M3 in queue.md.
+- 2026-10-24 (run best guess, NIT-003 M1): Resource leases cannot be sub-leased. NIT-002's Impacts left the question to
+  this proposal, and the text was silent. `request` against one is refused. A slot has no part to hand over, and the
+  refusal is additive and reversible. NIT-002 is untouched. Amended "Invocation and consent". `request` also refuses a
+  lease of the caller's own and a lease whose holder is dead, which the text implied.
+- 2026-10-24 (run best guess, NIT-003 M1): The equal-key refresh with live delegations exits 11, the next free status.
+  The text said only "its own status". Amended "Overlap with the parent".
+- 2026-10-24 (run best guess, NIT-003 M1): A sub-lease, a request, and a notice are stamped record version 1.2, and the
+  current minor is 2. A lease without `parent` keeps 1.0, and the parent's record never changes. The text said only "a
+  minor". Amended "Record shape".
+- 2026-10-24 (run best guess, NIT-003 M1): A notice's ID and file name is `<target-id>-<cause>`, with the request ID as
+  the target of a request notice. The text said only that the ID is derived from the target and the cause. Amended
+  "Liveness and the parent's death".
+- 2026-10-24 (correction of a stale risk, NIT-003 M1): Amended the Risks entry "NIT-003 rests on NIT-001 amendments
+  that NIT-001 does not carry yet". It was rated likelihood high, impact high, and said NIT-001 was in flight, that
+  none was requested yet, and that milestone 1 starts only once NIT-001 carries them. NIT-001 took all eight on
+  2026-10-18, so the entry now says the amendments landed, with likelihood low.
+- 2026-10-24 (run best guess, NIT-003 M1): A refusal that names a sub-lessee is waitable under `acquire --wait`, since
+  the sub-lease may end. No text changed.
+- 2026-10-24 (run best guess, NIT-003 M2): The tombstone of a revoke carries a new `cause` field set to `revoked`, is
+  stamped 1.2, and leaves `kind` empty. The text said only "cause `revoked`". `kind` already means `moved` or `revived`,
+  and only a separate field lets an old reader deliver it as a plain break. A sub-lessee that is already dead gets no
+  tombstone, and a retried revoke reuses its tombstone. Amended "Breaks across the tree".
+- 2026-10-24 (run best guess, NIT-003 M2): A repair that finds a parent already gone writes a "parent ended" notice that
+  says nitipan cannot tell how it ended. The text said the notice names how. Only the call that releases or breaks the
+  parent knows. A sub-lease whose own holder is dead is not repaired. Amended "Liveness and the parent's death".
+- 2026-10-24 (run best guess, NIT-003 M2): A "sub-lease ended" notice goes only to a live parent. A dead or gone parent
+  has nobody to receive it, and the sub-lease repair has already made the child ordinary. Amended "Release across the
+  tree".
+- 2026-10-24 (run best guess, NIT-003 M2): Delivery holds a loss notice back until its loss has happened, and a retry
+  replaces the pending notice instead of keeping it. Before, a notice published ahead of a crashed write could be
+  delivered, and then published again by the retry, so the addressee heard twice. A "parent ended" notice is held while
+  its sub-lease names a live parent, and dropped when the sub-lease is gone. A "sub-lease ended" notice is held while
+  the sub-lease exists, and dropped when the addressee holds no lease covering its keys. No new field is stored. Amended
+  "Liveness and the parent's death".
+- 2026-10-24 (run best guess, NIT-003 M3): `list --json` is schema 1.2, and a lease with sub-leases is described by
+  computed fields only. The text said only "an additive minor bump". Amended "Display".
+- 2026-10-24 (run best guess, NIT-003 M3): An unfiltered `list` omits `owner` and `grantor_of`, and a resource filter
+  omits them too. The text did not say. A mark answers a question about a path, so an unfiltered list has none to
+  answer, and setting `owner` true on every lease would read as a claim nobody checked. If wrong, an unfiltered `list`
+  would set `owner` true everywhere and `grantor_of` from `delegated`. Amended "Display".
+- 2026-10-24 (run best guess, NIT-003 M3): `requests` omits a request in the `granting` state, and a filtered `list`
+  keeps only the requests whose keys overlap the filter. A granting request is never granted again and its repair
+  finishes it, so showing it as pending would invite a second grant. Amended "Display".
+- 2026-10-24 (run best guess, NIT-003 M3): `list` that takes the lock runs the repairs of requests and sub-leases, and
+  delivers the caller's notices, reported in a `notices` array with a `summary`. M1 and M2 left `list` neither
+  repairing nor delivering. "Liveness and the parent's death" says a `list` that reads without the lock delivers no
+  notices, as it skips tombstone cleanup, which implies a locked one does. Delivery removes a notice, so stderr alone
+  would lose it for a guardian that pipes JSON. A `list` that reads without the lock repairs and delivers nothing. A
+  test of M2 that expected a locked `list` to leave the notice was changed to expect delivery. If wrong, drop the
+  repairs and the `notices` array. Amended "Display" and M3.
+- 2026-10-24 (run best guess, NIT-003 M3): A failed repair in a locked `list` is a warning, not an error. `list` still
+  prints what it read, and delivers no notice that call. `list` is the guardians' supported read path, and NIT-001
+  already makes a failed tombstone removal non-fatal. A locked `list` also reaps the notices of dead holders, as every
+  locked call does. Amended "Display".
+- 2026-10-24 (run best guess, NIT-003 M3): Reworded the `owner` rule in "Display". It read "when the query overlaps its
+  keys outside the union of its live children's keys". It now reads "when some part of the query that overlaps its keys
+  is held by none of its live children", with the part and the holding spelled out. The two agree for path keys, since
+  a part is one path and sibling subtrees are disjoint. The old wording hid how a part is found. Amended M3's first
+  check to name the `notices` array, with the earlier entry above.
+- 2026-10-24 (run best guess, NIT-003 M3): A sub-lease whose parent is dead is displayed as standing alone, and a dead
+  parent lists no `delegated`. The text covered a dangling parent only. "Liveness and the parent's death" treats the two
+  alike, and the next locked call makes that so. Amended "Display".
+- 2026-10-24 (row review, NIT-003 M1-M3): "Representation" treated a dangling child "the way 'Liveness and the parent's
+  death' treats a dead parent, tombstone included". That section uses notices and no tombstone, so the text now reads
+  "notice included". Correction of fact in design text, with no change to behavior.
+- 2026-10-24 (row review, NIT-003 M1-M3): `revoke` removes any pending "sub-lease ended" notice for its target before it
+  removes the sub-lease. A sub-lessee's release or break may publish that notice and crash before removing the lease.
+  A later revoke by the parent then left the notice behind, and the parent was told the sub-lessee released a lease
+  the parent had revoked. This refines "A revoke sends none, since the parent did it" in "Liveness and the parent's
+  death". The M1 and M2 As built notes that said `list` neither repairs nor delivers were corrected to say that M3
+  changed it.
+- 2026-10-24: ADR candidate (cuts across the system): a parent and its sub-lessees are exempt from each other at
+  overlap, at the record level and outside ADR-03's key rule. NIT-005, NIT-008, and every later claim check must apply
+  it. Undecided. Found in NIT-003 M1.
 
 ## References
 
