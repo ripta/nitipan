@@ -59,13 +59,14 @@ func (s fenceSetting) offCause() string {
 	return fmt.Sprintf("%s is false", fenceKey(s.Remote))
 }
 
-// legacyNotice is the one line that every push affected by the old key prints. It gives no advice on
-// whether to rename or unset the key. It says to reinstall the hook first, since an older hook binary
+// legacyNotice is the one line that every push affected by the old key prints. It branches on whether the
+// old key set the mode. Any explicit fence beside a leftover atomic=false decides the mode, whichever way
+// it is set. The notice gives no advice on whether to rename or unset the key. It says to reinstall the hook first, since an older hook binary
 // reads only the old key.
 func (s fenceSetting) legacyNotice() string {
 	where := strings.TrimPrefix(s.LegacyOrigin, "file:")
 
-	if s.Mode == fenceFalse {
+	if s.ViaLegacy {
 		return fmt.Sprintf("nitipan: %s is false in %s. The old key acts as %s=false. After nitipan setup git --install, "+
 			"it can be renamed to %s=false or unset", legacyKey(s.Remote), where, fenceKey(s.Remote), fenceKey(s.Remote))
 	}

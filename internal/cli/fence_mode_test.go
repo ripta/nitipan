@@ -143,15 +143,17 @@ func TestAnUnsetFenceModeFallsBackForOnePushAndTriesTheFenceOnTheNext(t *testing
 	}
 }
 
-// With true, the same refusals fail the push with an error that names the key. Nothing lands.
+// With true, the same refusals fail the push with an error that names the key. Nothing lands. A refused
+// push leaves the world as it found it, and each row heals its host after it, so the rows share one world.
 func TestAFenceModeOfTrueMakesAHostRefusalAnError(t *testing.T) {
+	pw := newPushWorld(t)
+	pw.setConfig("nitipan.origin.fence", "true")
+	pw.claimSvc()
+
 	for _, test := range hostRefusalTests {
 		t.Run(test.Name, func(t *testing.T) {
-			pw := newPushWorld(t)
 			test.Refuse(t, pw)
-			pw.setConfig("nitipan.origin.fence", "true")
-
-			pw.claimSvc()
+			defer test.Heal(t, pw)
 
 			before := pw.remoteMain()
 			res := pw.push()
@@ -163,6 +165,10 @@ func TestAFenceModeOfTrueMakesAHostRefusalAnError(t *testing.T) {
 
 			if got := pw.remoteMain(); got != before {
 				t.Errorf("remote main moved to %s from %s", got, before)
+			}
+
+			if got := pw.remoteFences(); got != "" {
+				t.Errorf("a refused push landed a fence: %q", got)
 			}
 		})
 	}
@@ -225,6 +231,11 @@ var legacyTests = []legacyTest{
 		Name:       "a fence beside a leftover old key wins and the notice still fires",
 		Config:     map[string]string{"nitipan.origin.atomic": "false", "nitipan.origin.fence": "true"},
 		Fenced:     true,
+		WantNotice: []string{"nitipan.origin.atomic is false in", ".git/config", "nitipan.origin.fence wins", "nitipan setup git --install"},
+	},
+	{
+		Name:       "a fence of false beside a leftover old false is decided by the fence",
+		Config:     map[string]string{"nitipan.origin.atomic": "false", "nitipan.origin.fence": "false"},
 		WantNotice: []string{"nitipan.origin.atomic is false in", ".git/config", "nitipan.origin.fence wins", "nitipan setup git --install"},
 	},
 	{
@@ -614,54 +625,36 @@ git push origin main 2>&1
 type slashRemoteTest struct {
 	Name string
 
-	// Mode is the value of the remote's fence key.
-	Mode string
+	// Value is what the remote's fence key is set to.
+	Value string
 
-	// Refuse makes the host refuse atomic push.
-	Refuse bool
-
-	WantStatus int
-	WantFenced bool
-	WantErr    string
+	Want fenceMode
 }
 
 var slashRemoteTests = []slashRemoteTest{
-	{
-		Name: "true makes a refusal an error", Mode: "true", Refuse: true,
-		WantStatus: exitcode.Error, WantErr: "nitipan.team/origin.fence is true",
-	},
-	{Name: "false skips the fence on a host that would take it", Mode: "false", WantStatus: exitcode.OK},
+	{Name: "true", Value: "true", Want: fenceTrue},
+	{Name: "false", Value: "false", Want: fenceFalse},
 }
 
-// A remote name with a slash is a name git can hold a key for. Its mode must be honored like any other.
-func TestARemoteNamedWithASlashHonorsItsFenceMode(t *testing.T) {
+// A remote name with a slash is a name git can hold a key for. Its mode must be read like any other. A
+// reader that treats a name holding any of ':/@ ' as unset would fail this, and the pusher and the hook
+// would then fence a remote whose mode says otherwise.
+func TestTheModeReaderHonorsARemoteNamedWithASlash(t *testing.T) {
 	for _, test := range slashRemoteTests {
 		t.Run(test.Name, func(t *testing.T) {
-			pw := newPushWorld(t)
-			gitIn(t, pw.repo1, "remote", "add", "team/origin", pw.bare)
-			pw.setConfig("nitipan.team/origin.fence", test.Mode)
+			dir := t.TempDir()
+			gitIn(t, dir, "init")
+			gitIn(t, dir, "config", "nitipan.team/origin.fence", test.Value)
 
-			if test.Refuse {
-				gitIn(t, pw.bare, "config", "receive.advertiseAtomic", "false")
+			g := (&app{deps: Deps{}.withDefaults()}).newPushGit(true, dir)
+
+			got, err := readFenceSetting(g, "team/origin")
+			if err != nil {
+				t.Fatal(err)
 			}
 
-			pw.claimSvc()
-
-			before := pw.remoteMain()
-			res := pw.m1.w.run(pw.c1, "push", "team/origin", "main")
-
-			wantStatus(t, res, test.WantStatus)
-
-			if test.WantErr != "" {
-				wantContains(t, "stderr", res.Stderr, test.WantErr)
-
-				if got := pw.remoteMain(); got != before {
-					t.Errorf("remote main moved to %s from %s", got, before)
-				}
-			}
-
-			if fenced := pw.remoteFences() != ""; fenced != test.WantFenced {
-				t.Errorf("fence landed = %v, want %v", fenced, test.WantFenced)
+			if got.Mode != test.Want {
+				t.Errorf("mode = %v, want %v", got.Mode, test.Want)
 			}
 		})
 	}

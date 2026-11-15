@@ -81,7 +81,7 @@ func (a *app) runFenceDelete(remote, key string) error {
 
 	cmd := exec.Command("git", "push", "--force-with-lease="+name+":"+sha, remote, ":"+name)
 	cmd.Dir = cwd
-	cmd.Env = append(keys.CleanGitEnv(os.Environ()), fenceDeleteEnv+"="+name)
+	cmd.Env = append(withoutFenceMarks(keys.CleanGitEnv(os.Environ())), fenceDeleteEnv+"="+name)
 	cmd.Stdout = a.deps.Stdout
 	cmd.Stderr = a.deps.Stderr
 

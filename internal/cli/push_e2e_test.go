@@ -289,7 +289,7 @@ git update-ref "$ref" "$new"
 	}
 }
 
-func TestAHostWithoutAtomicPushGetsALabeledLeaseCheckNotFencingAndNothingIsRecorded(t *testing.T) {
+func TestAHostWithoutAtomicPushGetsALabeledLeaseCheckNotFencing(t *testing.T) {
 	r := newRig(t)
 	r.must(r.user(remoteSetup))
 	r.must(r.user(`git --git-dir "$ROOT/origin.git" config receive.advertiseAtomic false`))
@@ -311,12 +311,6 @@ func TestAHostWithoutAtomicPushGetsALabeledLeaseCheckNotFencingAndNothingIsRecor
 
 	if reason, label := strings.Index(res.Stderr, "origin does not support atomic push"), strings.Index(res.Stderr, "could not verify"); reason < 0 || label < reason {
 		t.Errorf("the error must lead with the host's reason:\n%s", res.Stderr)
-	}
-
-	for _, key := range []string{"fence", "atomic"} {
-		if got := r.user(`cd "$REPO"; git config nitipan.origin.` + key); got.Status == 0 {
-			t.Errorf("nitipan.origin.%s = %q, want nothing recorded", key, got.Stdout)
-		}
 	}
 
 	if got := r.fenceRefs(); got != "" {

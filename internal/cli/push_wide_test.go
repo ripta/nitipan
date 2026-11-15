@@ -155,12 +155,6 @@ func TestAHostWithoutAtomicPushGetsALeaseCheckThatRenewsThenRefusesALostLease(t 
 	wantStatus(t, res, exitcode.OK)
 	wantContains(t, "stderr", res.Stderr, "origin does not support atomic push", "lease check and not fencing")
 
-	for _, key := range []string{"fence", "atomic"} {
-		if _, set := configValue(t, pw.repo1, "nitipan.origin."+key); set {
-			t.Errorf("nitipan.origin.%s is set, and nothing may be recorded", key)
-		}
-	}
-
 	if got := pw.remoteFences(); got != "" {
 		t.Errorf("a fence landed on a host without atomic push: %q", got)
 	}

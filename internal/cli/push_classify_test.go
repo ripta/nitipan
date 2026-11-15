@@ -32,6 +32,9 @@ type classifyTest struct {
 	Want        error
 	WantRefused bool
 	WantReason  string
+
+	// WantMessage is text the failure's message must hold. It is empty when the message is not checked.
+	WantMessage []string
 }
 
 func movedTo(moved bool, err error) func() (bool, error) {
@@ -107,7 +110,8 @@ var classifyTests = []classifyTest{
 		Name: "a remote that cannot be re-read is not a fence refusal",
 		Stdout: porcelain(
 			"!\trefs/f:" + classifyFence + "\t[remote rejected] (hook declined)"),
-		Moved: movedTo(false, errors.New("listing the refs of origin: unreachable")),
+		Moved:       movedTo(false, errors.New("listing the refs of origin: unreachable")),
+		WantMessage: []string{"could not be asked", "unreachable"},
 	},
 	{
 		Name: "a push with no fence ref does not ask the remote",
@@ -165,17 +169,14 @@ func TestAFailedFencedPushIsClassifiedByTheFirstRuleThatMatches(t *testing.T) {
 				if errors.Is(got, errLostCAS) || errors.Is(got, errNoAtomic) || errors.As(got, &refused) {
 					t.Fatalf("classify = %v, want rule 4 and no fallback", got)
 				}
+
+				for _, want := range test.WantMessage {
+					if got == nil || !strings.Contains(got.Error(), want) {
+						t.Fatalf("classify = %v, want a message holding %q", got, want)
+					}
+				}
 			}
 		})
-	}
-}
-
-// A second push that fails must name why the remote could not be asked, so the user is not left with a
-// bare status.
-func TestAFailedFencedPushThatCannotRereadTheRemoteSaysSo(t *testing.T) {
-	got := classifyPushFailure(pushFailure{Remote: "origin", Moved: movedTo(false, errors.New("unreachable"))})
-	if got == nil || !strings.Contains(got.Error(), "could not be asked") || !strings.Contains(got.Error(), "unreachable") {
-		t.Fatalf("classify = %v", got)
 	}
 }
 

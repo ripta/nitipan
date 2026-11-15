@@ -214,7 +214,7 @@ The units are two nitipan binaries that serve one clone. The hook script runs th
   pusher's fenced push meets a new hook that refuses fence refs, and fails closed
 - Old binary after new: the new binary writes nothing, so the old binary sees the config as it left it
 - Notice: an older hook prints no notice, and an older pusher sets no `NITIPAN_FENCE_NOTICE`, so a newer hook prints it
-  once. No mix prints it twice
+  once. No mix prints it twice. Amended 2026-11-14; see Decision Log.
 
 No direction lets a fence-less push land without a lease check.
 
@@ -277,7 +277,8 @@ None.
 
 The classifier returns typed outcomes and leaves mode handling as it was. A lost compare-and-swap still
 retries. A refusal of `--atomic` still records `atomic=false` and takes the lease check. A fence-ref refusal is still an
-error, now carrying the host's reason. M2 wires the outcomes to the `fence` key.
+error, now carrying the host's reason. M2 wires the outcomes to the `fence` key. M2 then replaced the recording of
+`atomic=false`, so nothing is recorded and the refusal takes the labeled lease check described under M2.
 
 - Rule 1 no longer matches `stale info` on stderr. It asks the remote, and a remote that cannot be asked fails the push
   as rule 4 with an error that says so.
@@ -306,7 +307,7 @@ error, now carrying the host's reason. M2 wires the outcomes to the `fence` key.
   never rewritten or unset. Its notice names its file and says to run `nitipan setup git --install` before renaming
   or unsetting it
 - The notice prints once per push. A plain agent `git push` gets it from the hook. `nitipan push` prints it and marks
-  its git calls with `NITIPAN_FENCE_NOTICE`, so the hook stays quiet there
+  its git calls with `NITIPAN_FENCE_NOTICE`, so the hook stays quiet there. Amended 2026-11-14; see Decision Log.
 - With `fence` set beside a leftover `atomic`, `fence` wins and the notice still fires
 - The hook accepts a fence-less push into fenced paths only under the three conditions in "The hook accepts a sanctioned
   fallback", and runs its own lease check on it
@@ -339,7 +340,10 @@ name or one with a newline has no mode.
   finds a lost lease, carries the host's reason in its error instead. The warning's key advice is therefore missing
   from those two errors.
 - The fallback variable and the notice variable are dropped from the environment of every other git call in push,
-  including the runner that asks the remote. `fence delete` shares that runner and is unaffected.
+  including the runner that asks the remote. The `fence delete` push is its own git call. It drops both variables with
+  the same helper as the other pushes, and it sets neither. An inherited value reached it before this change, though the leak was inert.
+- The legacy notice branches on whether the old key set the mode. With any explicit `fence` beside a leftover
+  `atomic=false`, including `fence=false`, it says `fence` wins and does not advise a rename.
 - The reinstall hint keys on the phrase the hook's `requireFences` refusal uses, defined once as a constant that both
   sides read. The phrase is specific enough that the hook's mirror-push refusal does not match. The hint fires for the
   fallback and for a push under `false`.
@@ -469,7 +473,9 @@ legacy notice, and the reinstall hint match the text in `push.go` and `fencemode
   an agent's push, and `nitipan push` marks its git calls with `NITIPAN_FENCE_NOTICE` to keep the hook quiet. The
   pusher still prints for itself since a clone may have no hook. An inherited copy of the variable is stripped, as for
   `NITIPAN_FENCE_FALLBACK`. Skew was checked: an older hook prints nothing, and a newer hook with an older pusher
-  prints once. Amended "Replacing `nitipan.<remote>.atomic`", "Version skew", and the M2 checks.
+  prints once. Amended "Replacing `nitipan.<remote>.atomic`", "Version skew", and the M2 checks. Before this, none of the three
+  said who prints the notice or how often. "Replacing" said only that every affected push prints it. "Version skew" had
+  no notice rule. The M2 checks had no check about the notice's printer or count.
 - 2026-11-14 (run best guess): M3 also corrected `broker.md`, `broker-and-nodes.md`, and `cli.md`. The milestone named
   `pushing.md`, `troubleshooting.md`, and `architecture.md`. These three other pages describe the removed `atomic=false`
   write or the fail-the-push behavior, and a doc that describes a removed behavior is wrong. The change is wording only

@@ -35,8 +35,7 @@ type fenceRefusedError struct {
 }
 
 func (e *fenceRefusedError) Error() string {
-	return fmt.Sprintf("%s refused the fence ref %s: %s. This is the host's ref policy about refs under %s and not a lost lease. "+
-		"Report this to the user", e.Remote, e.Ref, e.Reason, fenceref.Namespace)
+	return fmt.Sprintf("%s refused the fence ref %s: %s", e.Remote, e.Ref, e.Reason)
 }
 
 // porcelainRef is one ref line of git push --porcelain. The line is a flag, from:to, and a summary,

@@ -167,3 +167,32 @@ Review findings:
   the threat-model bullet, which `pushing.md` applies. It named the configuration-honoring principle and the never-write
   rule as possible ADRs. Dismissed: the user declined the first as an ADR in NIT-009's Decision Log, and it covers the
   second.
+
+## Row review
+
+Commit: `nitipan: fix the fence-wins notice and tighten the fence-mode tests`, which carries the proposal and this
+report. A fresh implementer applied the fixes. Checks: `make fmt` and `make ci` passed, with 0 lint issues.
+`proposals.py check` reported only the row-finishing work, and `freeze` was clean. Test cost: `internal/cli` took
+551.9 s, down from 568 s.
+
+Findings:
+
+- `legacyNotice` branched on the mode, not on whether the old key set it. With `fence=false` beside `atomic=false`, it
+  said the old key acts as `fence=false` and could be renamed to it. Confirmed. Fixed: it branches on the legacy read.
+  A new `legacyTests` row failed before the fix.
+- Two amended spots in NIT-009 lacked their markers, and the Decision Log entry gave a prior meaning for one spot only.
+  Fixed.
+- `fenceRefusedError.Error()` and `errNoAtomic` still carried M1's interim text, including "Report this to the user".
+  Fixed to a plain statement of the reason.
+- The `fence delete` push did not strip an inherited `NITIPAN_FENCE_FALLBACK` or `NITIPAN_FENCE_NOTICE`. Plausible. A
+  trace showed the leak was inert, since the hook returns before the sanctioned check. Fixed anyway, because the plan
+  says every push strips them. The M2 As built block now says this.
+- The M1 As built block described the `atomic=false` record that M2 removed. Fixed with a line pointing at M2.
+- `docs/reference/pushing.md` did not say an agent can set `NITIPAN_FENCE_FALLBACK` on a plain push. Fixed.
+- Test consolidation, for the timeout bug:
+  - The re-read-failure unit test merged into the classifier table.
+  - The no-atomic e2e and wide tests dropped their nothing-recorded loops. The `hostRefusalTests` rows own that check.
+  - The slash-named remote test became a direct mode-reader test. It failed on the old skip rule.
+  - The `fence=true` refusal table shares one world.
+  - The unset-mode fallback table keeps a world per row, since a landed fence would leak into the next row.
+- adr-impact over the row: no conflict and no ADR candidate.

@@ -150,6 +150,10 @@ The pre-push hook trusts the mode whoever set it. An agent that runs `git config
 clone gets only the lease check on that remote. This falls under the accepted risk that hooks are bypassable, as
 `--no-verify` does. The hook still runs its own lease check on such a push.
 
+An agent can also set `NITIPAN_FENCE_FALLBACK=origin` on a plain `git push`. That asks the hook to accept a push
+with no fence refs on that remote. The agent gets a lease check in place of fencing. This is the same accepted risk.
+The hook's own lease check still runs on that push.
+
 ## Probing a host
 
 `make live-fence-hosts LIVE_FENCE_ARGS="<clone>"` probes each remote of a throwaway clone for atomic push and fence

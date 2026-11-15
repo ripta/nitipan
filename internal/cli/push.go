@@ -26,7 +26,7 @@ const pushAttempts = 5
 
 var (
 	errLostCAS  = errors.New("a fence ref changed during the push")
-	errNoAtomic = errors.New("the remote cannot take an atomic push")
+	errNoAtomic = errors.New("the remote does not support atomic push")
 )
 
 func (a *app) pushCmd() *cobra.Command {
@@ -487,6 +487,14 @@ func hookDemandsFences(_, stderr string) error {
 	return nil
 }
 
+// withoutFenceMarks drops the caller's own copies of the fallback and notice variables. A push that
+// nitipan runs sets them itself, so an inherited one must never reach git or the hook.
+func withoutFenceMarks(env []string) []string {
+	return slices.DeleteFunc(env, func(kv string) bool {
+		return strings.HasPrefix(kv, fenceFallbackEnv+"=") || strings.HasPrefix(kv, fenceNoticeEnv+"=")
+	})
+}
+
 // gitPush runs git push in dir and shows its output. classify, when set, reads what git said on a
 // failure. Stdout is copied as stderr is, because a porcelain push reports each ref there.
 //
@@ -495,9 +503,7 @@ func hookDemandsFences(_, stderr string) error {
 func (a *app) gitPush(dir string, args []string, classify func(stdout, stderr string) error, env ...string) error {
 	cmd := exec.Command("git", append([]string{"push"}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = slices.DeleteFunc(keys.CleanGitEnv(os.Environ()), func(kv string) bool {
-		return strings.HasPrefix(kv, fenceFallbackEnv+"=") || strings.HasPrefix(kv, fenceNoticeEnv+"=")
-	})
+	cmd.Env = withoutFenceMarks(keys.CleanGitEnv(os.Environ()))
 	cmd.Env = append(cmd.Env, "LC_ALL=C", "LANGUAGE=C", fenceNoticeEnv+"=1")
 	cmd.Env = append(cmd.Env, env...)
 
