@@ -273,7 +273,7 @@ func TestListJSONAlwaysWritesRequestsAndNoticesAsArrays(t *testing.T) {
 		}
 	}
 
-	if doc["schema_version"] != "1.5" {
+	if doc["schema_version"] != "1.6" {
 		t.Errorf("schema_version = %v", doc["schema_version"])
 	}
 }

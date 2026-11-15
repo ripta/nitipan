@@ -18,7 +18,8 @@ import (
 
 // Ledger is the ring ledger of one registration: the keys some wake path already rang for. A waking
 // path rings once per key, so a session that ignores its ring cannot be woken forever. The keys here
-// are message IDs, written as "mail:<id>". Notices and requests join as keys of their own.
+// are message IDs, written as "mail:<id>". Notices and requests are keys of their own, written as
+// "notice:<id>@<write time>" and "request:<id>@<write time>", and the lease package builds them.
 //
 // The file sits beside the registration, so a waiter with no node running reads it too. It carries
 // ADR-04's major.minor. A ledger a path cannot use reads as empty, so the path may ring again, which a
@@ -29,8 +30,15 @@ type Ledger struct {
 	Rung     map[string]time.Time `json:"rung"`
 }
 
+// Prefixes of the ledger keys. A key's prefix says what the ring was for.
+const (
+	MailKeyPrefix    = "mail:"
+	NoticeKeyPrefix  = "notice:"
+	RequestKeyPrefix = "request:"
+)
+
 // MailKey is the ledger key of a mail message.
-func MailKey(id string) string { return "mail:" + id }
+func MailKey(id string) string { return MailKeyPrefix + id }
 
 // PluginFreshness bounds how long a plugin presence remains current without a heartbeat.
 const PluginFreshness = 15 * time.Second

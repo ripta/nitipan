@@ -37,7 +37,7 @@ func (e *Engine) Revoke(h adapter.Holder, id string) (*RevokeResult, error) {
 	}
 	defer c.close()
 
-	kid, parent, err := c.revocable(id)
+	kid, parent, err := c.revocable(id, "end it")
 	if err != nil {
 		return nil, err
 	}
@@ -73,8 +73,8 @@ func (c *call) dropSubLeaseEnded(kid *entry) {
 }
 
 // revocable finds the sub-lease and its parent, and refuses anyone but the parent's holder. The
-// refusal names the parent.
-func (c *call) revocable(id string) (kid, parent *entry, err error) {
+// refusal names the parent. what completes "the right to ..." for the act the caller asked for.
+func (c *call) revocable(id, what string) (kid, parent *entry, err error) {
 	kid = c.entryByID(id)
 
 	switch {
@@ -92,27 +92,21 @@ func (c *call) revocable(id string) (kid, parent *entry, err error) {
 	switch {
 	case parent == nil || parent.Rec == nil:
 		return nil, nil, failf(exitcode.ErrRefused, "lease %s is a sub-lease of %s, which is gone or cannot be read, so nobody "+
-			"holds the right to end it. Coordinate with its holder or ask the user", id, kid.Rec.Parent)
+			"holds the right to %s. Coordinate with its holder or ask the user", id, kid.Rec.Parent, what)
 	case c.mineByID(parent.ID) == nil:
 		return nil, nil, failf(exitcode.ErrNotYours, "lease %s is a sub-lease of %s, which is held by %s. Only that holder can "+
-			"end it. Coordinate with the holder or ask the user", id, parent.ID, describeHolder(parent.Rec.Holder))
+			"%s. Coordinate with the holder or ask the user", id, parent.ID, describeHolder(parent.Rec.Holder), what)
 	}
 
 	return kid, parent, nil
 }
 
 // revokeTombstone publishes the sub-lessee's tombstone, naming the parent's holder as the breaker. An
-// earlier revoke that crashed may have published it already, and then it is reused.
+// earlier revoke or expiry that crashed may have published it already, and then it is reused.
 func (c *call) revokeTombstone(h adapter.Holder, kid *entry) (*record.Tombstone, error) {
-	tombs, err := c.e.loadTombstones()
-	if err != nil {
-		return nil, err
-	}
-
-	for _, te := range tombs {
-		if te.Tomb != nil && te.Tomb.Lease == kid.ID && te.Tomb.Cause == record.CauseRevoked {
-			return te.Tomb, nil
-		}
+	found, err := c.endTombstone(kid)
+	if err != nil || found != nil {
+		return found, err
 	}
 
 	t := c.newTombstone(kid, BreakRequest{Caller: adapter.Caller{Holder: &h}})
@@ -124,4 +118,25 @@ func (c *call) revokeTombstone(h adapter.Holder, kid *entry) (*record.Tombstone,
 	}
 
 	return t, nil
+}
+
+// endTombstone finds the tombstone an earlier revoke or recall expiry published for the sub-lease. Both
+// tell the sub-lessee the same thing, so either one counts and the sub-lessee is told once.
+func (c *call) endTombstone(kid *entry) (*record.Tombstone, error) {
+	tombs, err := c.e.loadTombstones()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, te := range tombs {
+		if te.Tomb == nil || te.Tomb.Lease != kid.ID {
+			continue
+		}
+
+		if te.Tomb.Cause == record.CauseRevoked || te.Tomb.Cause == record.CauseRecallExpired {
+			return te.Tomb, nil
+		}
+	}
+
+	return nil, nil
 }

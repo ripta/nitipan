@@ -3,8 +3,10 @@ package lease
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/keys"
@@ -32,6 +34,10 @@ const (
 
 	// RefusedMark means a fence mark addressed to the caller guards the paths.
 	RefusedMark
+
+	// RefusedRecalled means the caller's sub-lease ended at the deadline of its recall, and the paths
+	// are the parent's again.
+	RefusedRecalled
 )
 
 // Refusal is one cause for refusing a ref update, with the paths it covers.
@@ -53,10 +59,46 @@ type Judge struct {
 	caller adapter.Holder
 	tombs  []*tombEntry
 	marks  []*markEntry
+
+	// ended are the sub-leases whose recall is past its deadline. The judge treats them as gone, so the
+	// parent owns their keys.
+	ended []*recallState
+
+	// pending are the sub-leases whose recall is in force with the deadline still ahead.
+	pending []*recallState
+
+	// recallWarnings are the recalls the judge could not use.
+	recallWarnings []string
+
+	// noted are the pending recalls that a passing path of the caller fell under.
+	noted map[string]*recallState
+}
+
+// recallState is a recall as the judge sees it, with the sub-lease and the parent it names.
+type recallState struct {
+	rc     *record.Recall
+	kid    *entry
+	parent *entry
+}
+
+// heldBySubLessee reports whether the caller holds the sub-lease and not its parent.
+//
+// A caller that holds both owns the keys either way, so a recall changes nothing for it.
+func (j *Judge) heldBySubLessee(rs *recallState) bool {
+	return j.c.e.isHolder(j.caller, rs.kid.Rec.Envelope) && !j.c.e.isHolder(j.caller, rs.parent.Rec.Envelope)
 }
 
 // NewJudge reads the records, tombstones, and fence marks that decide for an agent caller.
+//
+// The recalls are read first, then the leases, then the tombstones. An expiry publishes the tombstone,
+// removes the sub-lease, and drops the recall last. In this order a sub-lease that the read still finds
+// has its recall in the recalls, and one the expiry already removed has its tombstone.
 func (e *Engine) NewJudge(h adapter.Holder) (*Judge, error) {
+	recalls, err := e.loadRecalls()
+	if err != nil {
+		return nil, err
+	}
+
 	entries, err := e.load()
 	if err != nil {
 		return nil, err
@@ -72,13 +114,61 @@ func (e *Engine) NewJudge(h adapter.Holder) (*Judge, error) {
 		return nil, err
 	}
 
-	return &Judge{c: &call{e: e, entries: entries, sameProcess: map[*entry]bool{}}, caller: h, tombs: tombs, marks: marks}, nil
+	j := &Judge{c: &call{e: e, entries: entries, sameProcess: map[*entry]bool{}}, caller: h, tombs: tombs, marks: marks,
+		noted: map[string]*recallState{}}
+
+	j.readRecalls(recalls)
+
+	return j, nil
+}
+
+// readRecalls judges every recall with the rule the locked calls use, and writes nothing.
+//
+// A sub-lease past its recall's deadline is marked removed in the judge's own copy, so every later
+// lookup reads the parent as the owner.
+//
+// A recall that cannot be used, or whose parent cannot be used, ends no sub-lease.
+func (j *Judge) readRecalls(recalls []*RecallEntry) {
+	var ended []*recallState
+
+	for _, jr := range j.c.judgeRecalls(recalls) {
+		re := jr.Entry
+
+		if re.Bad != nil {
+			j.recallWarnings = append(j.recallWarnings, fmt.Sprintf("the recall record %s cannot be used by this nitipan (%s), "+
+				"so it ends no sub-lease. Upgrade nitipan or ask the user", re.Path, re.Bad.Reason))
+
+			continue
+		}
+
+		switch {
+		case jr.Verdict.Status == RecallUnusable:
+			j.recallWarnings = append(j.recallWarnings, fmt.Sprintf("the recall of sub-lease %s is not enforced: %s. Upgrade nitipan "+
+				"or ask the user", re.ID, jr.Verdict.Why))
+		case jr.Verdict.Status == RecallInForce:
+			j.pending = append(j.pending, j.recallStateOf(re.Rec))
+		case jr.Ended:
+			rs := j.recallStateOf(re.Rec)
+
+			j.ended = append(j.ended, rs)
+			ended = append(ended, rs)
+		}
+	}
+
+	for _, rs := range ended {
+		rs.kid.removed = true
+	}
+}
+
+func (j *Judge) recallStateOf(rc *record.Recall) *recallState {
+	return &recallState{rc: rc, kid: j.c.entryByID(rc.ID), parent: j.c.entryByID(rc.Parent)}
 }
 
 // Warnings reports what the judge had to ignore: a fence mark that nitipan cannot use and whose keys
-// cannot be read either, so it guards nothing here.
+// cannot be read either, so it guards nothing here, and a recall that ends no sub-lease because it or
+// its parent cannot be used.
 func (j *Judge) Warnings() []string {
-	var out []string
+	out := slices.Clone(j.recallWarnings)
 
 	for _, me := range j.marks {
 		if me.Mark == nil && me.rawKeys() == nil {
@@ -99,6 +189,10 @@ type cause struct {
 	tomb  *record.Tombstone
 	mark  *record.Mark
 	why   string
+
+	// recall and parent are set for a recalled cause.
+	recall *record.Recall
+	parent *entry
 }
 
 // Refusals judges each path on its own and returns one refusal per cause. checkout is the worktree
@@ -129,9 +223,14 @@ func (j *Judge) Refusals(checkout keys.Key, touched []keys.Key) []Refusal {
 	}
 
 	for _, k := range touched {
-		if c := j.judge(k); c != nil {
-			add(c, k)
+		c := j.judge(k)
+		if c == nil {
+			j.noteRecall(k)
+
+			continue
 		}
+
+		add(c, k)
 	}
 
 	out := make([]Refusal, len(causes))
@@ -153,7 +252,61 @@ func (j *Judge) judge(k keys.Key) *cause {
 		return c
 	}
 
+	if c := j.recalledCause(k); c != nil {
+		return c
+	}
+
 	return j.recordCause(k)
+}
+
+// recalledCause refuses a path inside a sub-lease of the caller that ended at its recall's deadline.
+// The sub-lease is gone from the judge's records, so nothing else would name the caller.
+func (j *Judge) recalledCause(k keys.Key) *cause {
+	fp := record.PathFootprint([]keys.Key{k})
+
+	for _, rs := range j.ended {
+		if j.heldBySubLessee(rs) && rs.kid.Rec.Footprint.Overlaps(fp, j.c.e.Finder) {
+			return &cause{kind: RefusedRecalled, id: rs.kid.ID, en: rs.kid, recall: rs.rc, parent: rs.parent}
+		}
+	}
+
+	return nil
+}
+
+// noteRecall remembers the recall a passing path falls under, when the caller is that sub-lease's
+// holder.
+func (j *Judge) noteRecall(k keys.Key) {
+	fp := record.PathFootprint([]keys.Key{k})
+
+	for _, rs := range j.pending {
+		if j.heldBySubLessee(rs) && rs.kid.Rec.Footprint.Overlaps(fp, j.c.e.Finder) {
+			j.noted[rs.kid.ID] = rs
+		}
+	}
+}
+
+// RecallNotices says, for each recall in force that a passing path of the caller fell under, what the
+// recall is and when it ends. The hook prints these. It only signals, so nothing is written or
+// consumed.
+func (j *Judge) RecallNotices() []string {
+	ids := make([]string, 0, len(j.noted))
+	for id := range j.noted {
+		ids = append(ids, id)
+	}
+
+	sort.Strings(ids)
+
+	out := make([]string, len(ids))
+
+	for i, id := range ids {
+		rs := j.noted[id]
+
+		out[i] = fmt.Sprintf("your sub-lease %s on %s was recalled by the holder of lease %s. Finish, commit, and release it "+
+			"before %s. If it is still held then, it ends and its keys go back to that lease", id, rs.kid.domainList(),
+			rs.rc.Parent, rs.rc.Deadline.UTC().Format(time.RFC3339))
+	}
+
+	return out
 }
 
 func (j *Judge) markCause(k keys.Key) *cause {
@@ -308,6 +461,10 @@ func (j *Judge) message(checkout keys.Key, c *cause) string {
 	case RefusedTombstone:
 		return fmt.Sprintf("%s: %s. Your lease no longer exists. Report this to the user and stop work on these paths.",
 			where, DescribeBroken(c.tomb))
+	case RefusedRecalled:
+		return fmt.Sprintf("%s: your sub-lease %s was recalled by %s, and the deadline %s passed. Your sub-lease no longer "+
+			"exists, and these paths are back with lease %s. Report this to the user and stop work on these paths.", where,
+			c.id, describeHolder(c.parent.Rec.Holder), c.recall.Deadline.UTC().Format(time.RFC3339), c.recall.Parent)
 	default:
 		return fmt.Sprintf("%s: %s. A fence mark still guards these paths against you. Report this to the user and stop "+
 			"work on them.", where, DescribeBroken(c.mark.AsTombstone()))

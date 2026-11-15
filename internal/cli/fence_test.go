@@ -308,7 +308,7 @@ func TestAMarkRefusesReplaceAndRequest(t *testing.T) {
 
 		// A mark of a newer minor is never rewritten by this binary, so the parent's cover cannot
 		// lift it before the request meets it.
-		w.plantMark(markSpec{PID: 200, Keys: []string{filepath.Join(repo, "src")}, Version: "1.4"})
+		w.plantMark(markSpec{PID: 200, Keys: []string{filepath.Join(repo, "src")}, Version: "1.5"})
 
 		res := w.run(requester, "request", parentID, "--checkout", repo, "--scope", "src")
 		wantStatus(t, res, exitcode.Broken)
@@ -462,7 +462,7 @@ func TestListShowsFenceMarks(t *testing.T) {
 	holder := w.claude(200, "s1")
 	id := w.acquireOK(holder, "--checkout", repo, "--scope", "src", "--name", "alpha")
 
-	if doc := w.listJSON(w.terminal(900)); doc["schema_version"] != "1.5" || len(marksOf(doc)) != 0 {
+	if doc := w.listJSON(w.terminal(900)); doc["schema_version"] != "1.6" || len(marksOf(doc)) != 0 {
 		t.Fatalf("before the break: schema %v, marks %v", doc["schema_version"], doc["marks"])
 	}
 
@@ -698,7 +698,7 @@ func (f *judgeFixture) breakA(kind string) {
 		wantStatus(f.w.t, f.w.run(f.callers["alpha"], "list"), exitcode.OK)
 
 		for _, id := range f.w.markIDs() {
-			f.w.editJSON(filepath.Join(f.w.marksDir(), id+".json"), func(doc map[string]any) { doc["version"] = "1.4" })
+			f.w.editJSON(filepath.Join(f.w.marksDir(), id+".json"), func(doc map[string]any) { doc["version"] = "1.5" })
 		}
 	}
 }

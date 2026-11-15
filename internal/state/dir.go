@@ -56,6 +56,10 @@ const (
 	RequestsDir = "requests"
 	NoticesDir  = "notices"
 
+	// RecallsDir holds the deadlines of recalled sub-leases, one record per sub-lease. Writers create it
+	// on demand, and binaries that predate recall never scan it.
+	RecallsDir = "recalls"
+
 	// MarksDir holds the fence marks that `break --force` leaves for a broken holder. Writers create
 	// it on demand, and binaries that predate fencing never scan it.
 	MarksDir = "marks"

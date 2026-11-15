@@ -115,12 +115,22 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint,
 	}
 
 	if c == nil {
+		// Recalls are read before the leases. An expiry removes the sub-lease and then its recall, so a
+		// reader in the other order can find the sub-lease still there and its recall gone.
+		recalls, recallErr := e.loadRecalls()
+
 		entries, err := e.load()
 		if err != nil {
 			return nil, err
 		}
 
 		c = &call{e: e, entries: entries}
+
+		if recallErr != nil {
+			res.Warnings = append(res.Warnings, recallErr.Error())
+		} else {
+			res.Warnings = append(res.Warnings, c.hideEndedRecalls(recalls)...)
+		}
 	}
 
 	if req.Emit == nil {
@@ -239,6 +249,7 @@ func (c *call) output(filter record.Footprint, filtered bool, cfg *SlotConfig) l
 
 	shared := c.sharedNames()
 	views := c.slotViews(cfg)
+	recalls := c.pendingRecalls()
 	query := queryKeys(filter, filtered)
 	haveQuery := len(query) > 0
 
@@ -256,6 +267,11 @@ func (c *call) output(filter record.Footprint, filtered bool, cfg *SlotConfig) l
 		lease := listing.FromRecord(en.Rec, en.Live)
 		c.annotate(&lease, en, query, haveQuery)
 		lease.Hint = en.Hint
+
+		if rc := recalls[en.ID]; rc != nil {
+			lease.Recall = &listing.Recall{Parent: rc.Parent, Deadline: rc.Deadline.UTC()}
+		}
+
 		lease.Remote = en.Rec.Domain.Kind == record.KindResource && !liveness.SameMachine(c.e.Machine, en.Rec.Machine)
 		lease.NameShared = shared[en.Rec.Holder.Name] && en.Rec.Holder.Name != ""
 

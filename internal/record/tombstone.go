@@ -50,6 +50,10 @@ type Tombstone struct {
 // CauseRevoked is the tombstone cause of a sub-lease its parent's holder ended.
 const CauseRevoked = "revoked"
 
+// CauseRecallExpired is the tombstone cause of a sub-lease whose recall deadline passed. A reader that
+// does not know it delivers the tombstone as a plain break, as it does a revoke.
+const CauseRecallExpired = "recalled"
+
 // Notice kinds. A break leaves Kind empty.
 const (
 	// NoticeMoved reports that a session's leases moved to a new host process.

@@ -1,0 +1,372 @@
+# Sub-lease recall: deadline, hook, rings, and the node's mirror
+
+**Date:** 2026-11-13
+
+This report covers a `/work-queue` run of NIT-008 M1-M4 (sub-lease recall) in the local macOS checkout at
+`/Users/ripta/projects/nitipan`. NIT-008 is `spec/proposals/NIT-008-sub-lease-recall.md`. It lets a parent holder
+recall a sub-lease with a deadline. Every reader enforces the deadline from a `recalls/` side record.
+
+## Run state
+
+- Run: default `next 1`, the row NIT-008 M1-M4. Code and specs share this repository, on `main`. Finished.
+- Run base and row base commit subject: `spec: mark broker auth implemented and move its queue row to history`.
+- Dependencies: NIT-005 M1, NIT-007 M2, and NIT-004 M3, all DONE. No `live_after` entries. No skipped, held, or
+  blocked rows.
+- Machine-local state tracks commit identifiers outside committed documentation.
+
+| Milestone | Run status | Commits |
+|-----------|------------|---------|
+| NIT-008 M1 | DONE | `nitipan: recall a sub-lease with a deadline` |
+| NIT-008 M2 | DONE | `nitipan: refuse a recalled sub-lessee's commits in the git hook` |
+| NIT-008 M3 | DONE | `nitipan: ring wake paths for pending lease notices and requests` |
+| NIT-008 M4 | DONE | `nitipan: drop a recalled sub-lease from the node's mirror at its deadline` |
+
+## Approved plan and authorization
+
+The user approved the run plan on 2026-11-13. It authorizes implementation, milestone, row, and final reviews,
+proposal completion, and commits by explicit path on the checked-out branch. It authorizes best guesses the proposal
+supports, and stashing a blocked milestone's work by path. It authorizes no push, pull request, branch change,
+destructive git operation, or action on another session's edits.
+
+Local checks for every milestone: `make fmt`, `make ci` (fmt-check, lint, vet-linux, race tests, build), then
+`proposals.py check` and `proposals.py freeze`. M3 runs the live Codex and opencode wake-path checks with the sandbox
+disabled. No milestone check is left to the user.
+
+## Best guesses from the plan
+
+- Recall's records take minor 1.4, and the current record minor moves to 4. "How the deadline is enforced" says the
+  next minor when M1 lands, and the current minor is 1.3. The child record keeps 1.2.
+- The recall repair runs after the parent-gone repair. The proposal says the parent-gone repair runs before any expiry.
+- Tombstone reuse after a crash accepts cause `revoked` or `recalled`, in both `revoke` and expiry.
+- Under `--wait`, an equal-key refresh whose exempted delegation is under a recall in force is waitable. Without that,
+  exit 11 returns as success inside the wait loop and never retries.
+- The help text keeps `revoke`'s wording, "Subagents share their parent's holder". The proposal says "as `revoke`'s
+  does".
+- M1 builds one shared read-only in-force evaluator and checks it for the locked call and the unlocked `list`. M2 wires
+  the hook to it. M1's bullet naming the hook is amended to point at M2.
+- M3 adds key prefixes to the ring ledger with no version bump. Its keys are opaque strings.
+- A request's write time for its ring key is `RequestedAt`.
+- M4 drops the expired child from the mirror rather than adding owner data to the wire. The broker computes no owner.
+  The node schedules a resend at the earliest pending deadline. That only re-reads and re-sends, and writes no lease
+  state.
+- Text in NIT-004, NIT-005, and NIT-007 that this work changes is amended as a correction of fact with its own Decision
+  Log entry.
+
+## Milestones
+
+### NIT-008 M1: Recall with a deadline
+
+DONE. Commit: `nitipan: recall a sub-lease with a deadline`, which carries the proposal and this report.
+
+Checks: `make fmt` clean, `make ci` passes (lint 0 issues; `internal/cli` takes about 438s under `-race`).
+`proposals.py check` and `proposals.py freeze` both return `[]`. No unowned failures.
+
+Test cost: the new `internal/cli/recall_test.go` tests plus the package's existing `TestACrash*` tests run in 16.2s
+alone (`-count=1 -p 1 -parallel 1`, with `-race`). The new `internal/lease` and `internal/record` tests run in about 1s
+each. No real sleeps. Waits use a settable clock.
+
+Implementer best guesses, each recorded in the proposal's As built block or Decision Log:
+
+- The deadline is inclusive. A recall is past its deadline at or after it, so the last attempt of an `acquire --wait`
+  that runs exactly at its timeout sees the end. If wrong, flip one comparison in `JudgeRecall`.
+- A dead sub-lessee past its deadline is left for normal dead-holder clearing, with no tombstone. Nobody can receive
+  one. Amended in "Expiry".
+- The recall record's envelope holder is the parent's holder. No decision reads it.
+- `recall` and `--cancel` refuse any recall record they cannot use, not only one of a higher minor, with exit 9. A
+  cancel with no recall exits 8.
+- A recall `state` this binary does not know makes the record unusable. It ends nothing and warns.
+- An unlocked `list` drops a sub-lease past its deadline from `leases` and from the parent's `delegated`, and warns on
+  stderr. The JSON carries no marker for it.
+- `recall` prints a wait of the time to the deadline, rounded up to a second, plus 10 seconds.
+- A refresh result carries the recalled children's deadlines. `AcquireWait` treats a non-empty set as waitable. A wait
+  that ends before the deadline exits 10. Without `--wait`, the delegation line ends with `recalled until <deadline>`.
+- A locked call prints a stderr line per expiry it ran. Unusable recall or parent records warn on every locked call.
+- The cancelled notice is written only while the sub-lease still stands and names the parent.
+- Nine tests that used `"1.4"` as a newer-minor fixture now use `"1.5"`. Six schema assertions moved to `"1.6"`.
+- `revocable` takes the act's name so a recall's refusal reads right. `newTombstone` is split so the expiry can name
+  the parent's holder as breaker.
+
+Deviations:
+
+- The hook part of M1's unusable-parent check moved to M2, as planned. M1, M2, and the Decision Log are amended.
+- No test covers `revoke` reusing a `recalled` tombstone. A recalled child is always ended by the repairs before a
+  revoke body runs, so the CLI cannot reach it. The shared lookup that accepts both causes is exercised by the expiry
+  crash test.
+- The implementer overwrote `internal/lease/engine.go` by mistake and rebuilt it from `HEAD` plus the new hooks. The
+  reviewer confirmed its diff holds only the added hook fields.
+
+Review findings:
+
+- `recall` on a dead sub-lessee skipped the rewritable check and removed a higher-minor recall record (PLAUSIBLE).
+  Traced and confirmed: NIT-001 lets an older binary remove a higher-minor record only on its own holder's release. A
+  regression test failed on the unfixed code, with exit 0 for 9 and the record gone. Fixed: `recall` checks the record
+  first, and the reap, expiry, and cancel leave a higher-minor record in place. Recorded in As built.
+- An unlocked `list` shows a pending recall on a dead sub-lessee past its deadline (PLAUSIBLE). Not confirmed. The
+  recall still binds until dead-holder clearing removes the sub-lease, and the wait never counts dead children. No
+  change.
+- No test pins `revoke`'s reuse of a `recalled` tombstone (note). Dismissed: unreachable from the CLI, and the shared
+  lookup is tested from the expiry side.
+- `adr-impact`: ADR-04 and ADR-06 consistent. No conflict, no supersession.
+
+ADR candidates:
+
+- "A deadline on a local lease is enforced by every reader when it reads." The Decision Log already holds it, declined
+  by the user on 2026-10-24.
+- "Restrictive new state goes in a side directory older binaries never scan." Fails the Architecture test. It is a
+  storage mechanism serving ADR-04's minor rule, not an invariant of its own.
+
+Open: the README still says "ten commands", which was already out of date before this run.
+
+### NIT-008 M2: Recall in the git hook
+
+DONE. Commit: `nitipan: refuse a recalled sub-lessee's commits in the git hook`, which carries the proposal and this
+report.
+
+Checks: `make fmt` clean, `make ci` passes (lint 0 issues; `internal/cli` about 435s under `-race`). The first `make ci`
+of the fix round failed on an errcheck in a new test. The fix is in, and the rerun passed. `proposals.py check` and
+`proposals.py freeze --row-commit` for M1's commit both return `[]`. No unowned failures.
+
+Test cost: the first round's four hook recall tests ran in 1.9s alone under `-race`. The fix round's run used a filter
+that also matched the older hook tests. That run took 143s and is not a figure for the new tests alone.
+
+Implementer best guesses:
+
+- A `Deps.Touched` seam in the CLI, following `Deps.Git`, so hook tests feed touched paths without real git. The plan
+  named no seam. The alternative is real-git end-to-end tests with on-disk deadline edits.
+- With an unusable parent record, the hook warns that the recall is not enforced. NIT-005's unusable kind still refuses
+  the sub-lessee, because that record's footprint covers every path. The M2 check says only "ends no child and reports
+  it".
+- The pre-deadline line prints only when the whole update passes, once per recall, and never for the parent's holder.
+- A caller holding both the parent and the sub-lease is never refused by the recall kind and gets no notice.
+- A dead sub-lessee is left as is, matching the unlocked `list`.
+
+Deviations: none from the proposal or the plan. NIT-005 and NIT-007 already describe the recall refusal and the hook's
+deadline line, so neither needed a correction. The reviewer confirmed both.
+
+Review findings:
+
+- Several As built claims had no test (plan gap). Fixed with one table-driven test and one count test. They cover a
+  caller holding both leases, a refused update printing no line, one line per recall across two paths, a dead
+  sub-lessee, and a recall against a mark and against a tombstone. The unusable-parent test now asserts `Refused`. No
+  claim turned out false. The dead-sub-lessee claim is barely observable, so As built was reworded to say the record
+  never refuses either way.
+- The unlocked read order let an expiry slip between reads (PLAUSIBLE). Confirmed by reading. Entries and tombstones
+  read before the tombstone was published, plus recalls read after the drop, showed a live sub-lease with no recall.
+  The ex-sub-lessee would pass once. Fixed: the hook and the unlocked `list` now read recalls first, then entries,
+  tombstones, and marks. A test cannot interleave a read with an expiry. The test pins the fix, not the bug, and As
+  built says so. Residue: a recall read just before a cancel that lands exactly at the deadline could show a child the
+  cancel saved as ended, to one unlocked reader. Unlocked readers write nothing, so the next read corrects it.
+- Nested recalls would mislabel a notice (PLAUSIBLE). Not confirmed: sub-leases do not nest, since a record with a
+  `parent` has no delegations. Noted in As built.
+- `recalledCause` ignores a grandchild's ownership (PLAUSIBLE). Not confirmed, for the same reason. No change.
+- Doc comments on two hook helpers packed several ideas, and one README sentence stacked clauses. Both fixed.
+- `adr-impact`: ADR-03, ADR-04, ADR-06, and ADR-07 consistent. No conflict.
+
+ADR candidates: none new. The lock-free recall rule is the candidate the user declined on 2026-10-24.
+
+### NIT-008 M3: Rings for pending notices and requests
+
+DONE. Commit: `nitipan: ring wake paths for pending lease notices and requests`, which carries both proposals and this
+report.
+
+Checks: `make fmt` clean, `make ci` passes (lint 0 issues; `internal/cli` about 444s under `-race`). `proposals.py
+check` and `proposals.py freeze` with both earlier row commits return `[]`. No unowned failures.
+
+Live checks, run with the sandbox disabled through the permission prompt:
+
+- `make live-codex LIVE_CODEX_ARGS=--selftest`: ok.
+- `env -u CODEX_THREAD_ID -u CODEX_SESSION_ID make live-codex 'LIVE_CODEX_ARGS=--only mail,mail-embedded,notice-ring
+  --results <scratchpad>/codex-notice-ring.md'`: all PASS, with no real model calls.
+- `make live-opencode 'LIVE_OPENCODE_ARGS=--only mail,mail-reminder,notice-ring --results
+  <scratchpad>/opencode-notice-ring.md'`: all PASS, with no real model turns.
+
+The new `notice-ring` scenario plants a notice for the session. It checks that the wake path rings and names `nitipan
+list`, and that `nitipan list` then delivers and removes the notice. The review round changed no live-check script, so
+the live runs were not repeated.
+
+Test cost: the first round's new CLI tests ran in 3.8s alone under `-race`. The node notice test ran in 1.06s. The
+review round replaced the waiter test's real 300ms and 5s waits with a direct call and a single waiter run.
+
+Implementer best guesses:
+
+- The node maps a registration to a holder through its current session ID, not its raw envelope. Notices are addressed
+  to the session the holder resolves to now. If wrong, the node would ring for notices `nitipan list` cannot deliver.
+- A `recalled` notice for a sub-lease past its deadline does not ring. The unlocked read counts the sub-lease as ended,
+  and the sub-lessee learns from the tombstone, which NIT-008 gives no ring.
+- A request whose requester is dead does not ring, since a locked call removes it. The proposal is silent.
+- A node built with no liveness checker rings no notices or requests. The real node always has a checker.
+- The live harnesses plant notices only. A pending request needs a lease. The CLI and node tests cover requests.
+- The Claude waiter has no live check. A CLI test covers it, and its socket ring shares the node path.
+- `leaseRings` skips a multi-session holder with no session ID and an invalid ID. A single-session adapter with an
+  empty ID still rings, because `pendingFor`'s blanket skip would drop its notice rings.
+
+Deviations: none from NIT-008. The implementer first edited four NIT-007 passages as a correction of fact. Review
+reverted that edit. NIT-007 now carries only a References line linking NIT-008.
+
+Review findings:
+
+- The NIT-007 edit was not a correction of fact (plan best guess, reviewer finding). The old text described what NIT-007
+  shipped correctly. NIT-008 is the proposal that extends it, and its Impacts already records the change. The four
+  hunks and their Decision Log entry were reverted, and NIT-007 gained one References line to NIT-008. The plan's best
+  guess about amending frozen proposals was too broad here. Extensions stay in the extending proposal.
+- The waiter test used real waits where a direct call proves the contract (CONFIRMED). Fixed: `ringUnrung` is called
+  directly for the once-per-key and replaced-notice contract, and one waiter run checks its exit status.
+- The node's idle early return was gone, and leases loaded once per registration (PLAUSIBLE). Confirmed. Fixed: the node
+  returns early unless the inbox, `notices/`, or `requests/` holds a file. It reads leases once per tick and judges each
+  registration against that view.
+- The turn hook built the engine before its cheap empty check (PLAUSIBLE). Fixed: the check runs first, and holders that
+  cannot hold a lease return early.
+- The refused-claim control matched on the test name, and a PID offset was unexplained (CONFIRMED). Fixed with a table
+  field and a named helper.
+- Test gaps. Added a row for a past-deadline `recalled` notice and a node test for the request ring. The socket ring and
+  a no-checker node stay untested, as recorded in As built.
+- The live fake model could run `nitipan list` in another scenario (PLAUSIBLE). Not confirmed: notices are addressed to
+  each scenario's own fresh session, and the sweep removes planted files. No change.
+- Two doc comments repeated or packed ideas. Fixed.
+- `adr-impact`: ADR-04, ADR-06, and ADR-07 consistent. No conflict.
+
+ADR candidates, recorded as `Undecided` in NIT-008's Decision Log:
+
+- No wake path lets a party wake a session's agent through an act that costs it nothing and that the session never
+  granted. Cuts across the system: every future ring path must honor it, and it is a security boundary.
+- Every wake signal, for mail, lease notices, or requests, only signals, and only a read consumes. ADR-06 states this
+  for mail alone. Cuts across the system: a later path could read ADR-06 as mail-only.
+
+One candidate was dismissed. `adr-impact` named wake paths judging from an unlocked, best-effort read, and that is an
+implementation tradeoff, not an invariant.
+
+### NIT-008 M4: Recall in the node's mirror
+
+DONE. Commit: `nitipan: drop a recalled sub-lease from the node's mirror at its deadline`, which carries the proposal
+and this report.
+
+Checks: `make fmt` clean. The final `make ci` passed (lint 0 issues; `internal/cli` 442s, `internal/node` 33.7s).
+`proposals.py freeze` with the three earlier row commits returns `[]`. `proposals.py check` reports only that NIT-008 is
+ready for `implemented` and its row for `history.md`. The row finish handles both.
+
+Test cost: the five new node tests run in about 1.8s alone (`-count=1 -p 1 -parallel 1`, `-race`). The deadline test
+waits on the node's 250ms tick through `eventually`, with a settable clock and no fixed sleep.
+
+Unowned failure, recorded per "Test Failures":
+
+- Original failure: one `make ci` run in the review round failed two `internal/cli` tests.
+  `TestLateRefusalReleasesTheNewAnchorOnTheNextCall` failed at `wide_test.go:540`, "an unknown outcome keeps the
+  anchor". `TestRetriedReleaseAfterALostReplyStillReleasesACreatedAnchor` failed at `wide_test.go:567`, "the node did
+  not pick up the claim request within 300ms". The run took 459s.
+- Attempts: on the M4 tree, both tests at `-count=20` under `-race` passed 40 of 40. A standalone full `internal/cli`
+  run passed in 447.7s, and the final `make ci` passed. On a scratch copy with the M3 node code, the same `-count=20`
+  run failed once, at `wide_test.go:540` with the same assertion.
+- Evidence: the first failure reproduces with no M4 code. M4's code is idle on that path, since the wide tests write no
+  recall. As a precaution, the deadline check now runs after request serving on each tick.
+- Uncertain: the 300ms pickup failure was not reproduced on the base. One base reproduction is not a statistical
+  comparison, and the root cause is not found. It looks like a timing flake under load.
+
+Implementer best guesses:
+
+- The resend checks the deadline on the node's existing 250ms request tick against its clock, not a computed timer.
+  It needs no new seam, follows clock steps, and resolves to 250ms. The node bullet under "Readers that take no lock"
+  is amended to say so.
+- The tests assert on the mirror the broker holds and send no "who holds" query. The broker returns every overlapping
+  mirror and elects no owner, so the mirror's contents are the whole change. The reviewer agreed.
+- A sub-lease whose own holder is dead stays in the mirror, as in the unlocked `list`.
+- Node warnings about unusable recall records are deduplicated once per change, since the mirror is rebuilt on every
+  heartbeat.
+
+Deviations: none from the plan. NIT-004 is untouched.
+
+Review findings:
+
+- A `recalls/` read error other than a missing directory failed the whole snapshot (PLAUSIBLE). Confirmed: with a
+  regular file at `recalls`, `snapshot()` failed, the session ended, and the restart hit the same error. Every lease's
+  mirror was lost. A regression test failed on the unfixed code. Fixed: the node warns once, treats the recall list as
+  empty, and still sends every lease.
+- Three test comments and a failure message said "timer" where the code uses the tick. Fixed.
+- Two node doc comments packed ideas or bound to the wrong field. Fixed.
+- `adr-impact`: ADR-01, ADR-04, ADR-07, and ADR-08 consistent. No conflict.
+
+ADR candidates: none pass. "The node never writes lease state" is false as stated, because the node already publishes
+notices under the lock. "Every reader applies the same recall rule" is the candidate the user declined on 2026-10-24.
+
+## Row review
+
+Commit: `nitipan: share one recall judgement across every reader that takes no lock`, which carries the proposal and
+this report.
+
+The reviewer found no blocking defect. All five readers apply the one recall rule with an inclusive deadline, skip a
+dead sub-lessee, and read recalls before leases.
+
+Findings:
+
+- The deadline decision carried two Amended markers. Fixed: one marker, dated 2026-11-14, and that day's Decision Log
+  entry says the earlier marker moved to it.
+- M3's As built said the Claude Code waiter ran live. It did not. Fixed: only the opencode plugin and the Codex paths
+  ran live.
+- The README said "ten commands" where there are eleven, and its `list --json` history was wrong about its baseline.
+  Fixed, and two over-wide paragraphs were rewrapped.
+- No test pinned the inclusive deadline across the hook, the unlocked `list`, and the ring. Fixed with one table test
+  at the deadline and one nanosecond before it. It runs in 1.45s alone under `-race`.
+- The node ran liveness for every lease on every snapshot (PLAUSIBLE). Confirmed: a session holder's liveness reads
+  registration files, and opencode's can read its database. Fixed: liveness runs only for leases a recall names, once
+  per snapshot. No regression test, since this is a cost cut with no new behavior.
+- Recall classification and the "ended recall" loop existed in several copies (PLAUSIBLE). Confirmed: unusable-reason
+  strings had already drifted between the node and the CLI. Fixed: one shared reader, classifier, and judgement in the
+  lease package serve the hook, the unlocked `list`, the ring view, and the node. Each reader keeps its own warnings
+  and read order. Lease and node tests passed before and after. The shared judgement uses one fixed view, so a nested
+  sub-lease's verdict no longer depends on file order. Sub-leases do not nest today, so no behavior changed.
+
+Checks: `make fmt` clean, `make ci` passes (`internal/cli` 431s). The known `wide_test.go` flake did not recur.
+`proposals.py freeze` with the four row commits returns `[]`.
+
+`adr-impact` on the row range raised a PLAUSIBLE tension with ADR-04's minor rule. An older binary that never reads
+`recalls/` stays more permissive about the sub-lessee's own claim past the deadline. This is dismissed as a conflict.
+The accepted proposal moved the deadline into a side record to satisfy the field rule, and it states this older-binary
+gap in "How the deadline is enforced" and Risks. It is listed for the user's review. `adr-impact` also named the ring
+ledger's skew rule as a weak candidate, and it fails the Architecture test as a format detail.
+
+Row finish commit: `spec: mark sub-lease recall implemented and move its queue row to history`. NIT-008 is
+`implemented`, the index says so, and its row is at the end of `history.md`.
+
+## Final review and ADR review
+
+Commit: `spec: put NIT-008's deadline-decision marker on the decision`.
+
+The final review covered the run's whole range with an ADR review. It found no code defect. The range adds and edits
+no ADR file. ADR-04, ADR-06, and ADR-07 hold. The reviewer traced the row-review refactor. It found no behavior change
+beyond removing a file-order dependence, plus one unusable-reason wording change for a non-unusable decode error.
+
+Findings:
+
+- The "How the deadline is enforced" decision's one marker sat inside the readers bullet, while the Decision Log said
+  it was on the decision. Fixed as a correction of fact, with a Decision Log entry that quotes both removed passages.
+  `proposals.py freeze` and `check` return `[]` after it.
+- The ADR-04 tension (PLAUSIBLE, disposition user). The reviewer agrees with the dismissal on the rule's letter. No
+  field was added, and no existing guarantee weakened. It notes that the proposal's case against the rejected
+  child-field option proves too much. That option's older-reader "covered" answer is the same gap the chosen design
+  keeps. The rejection still stands on the other ground: a new major would make the child unusable to older binaries.
+  No edit, since frozen text that changes nothing a reader acts on stays. Left for the user.
+- The two `Undecided` ADR candidates (disposition user). Neither is ready to write:
+  - The "no free wake" boundary fails the Record test as worded. "Costs nothing" has no settled line. A pending
+    request also lets another party ring the holder, and whether a live requester's wait counts as a cost is not
+    decided. It also overlaps NIT-006's mail-grant rule.
+  - The "every wake signal only signals" candidate passes Architecture and Decision. It widens ADR-06's scope, so
+    writing it means a new ADR that supersedes ADR-06.
+
+## Run summary
+
+Every milestone in the row is DONE, and no row is held or blocked. There are no stashes. The run made no push and no
+branch change. It touched no edit it did not make: every freeze hunk had origin `row`, and no finding had disposition
+`user` for another session's edit.
+
+Best guesses that most deserve review:
+
+- The inclusive deadline, the dead sub-lessee left to normal clearing, and recall's exit codes, 9 for an unusable
+  record and 8 for a cancel with no recall.
+- The `--wait` waitable refresh, and the printed wait of time-to-deadline plus 10 seconds.
+- The node's deadline check on its 250ms tick rather than a computed timer.
+- Reverting the NIT-007 edit to a References line. Extensions stay in the extending proposal.
+
+Open items:
+
+- The unowned `wide_test.go` flake, recorded under M4. Its root cause is not found.
+- The ADR-04 note and the two `Undecided` ADR candidates, for the next `/proposal-reviewer` run.
+- The socket ring path and a node with no liveness checker have no test, as recorded in M3's As built.

@@ -131,6 +131,10 @@ def reply(request: dict) -> dict:
         tool = next((n for n in names if n in ("shell", "bash")), "shell")
         command = f"{shlex.quote(str(BIN))} mail read > {shlex.quote(str(WORK / 'mail-read.out'))}"
         return {"kind": "tool", "name": tool, "arguments": json.dumps({"command": command})}
+    if not found and users and "Run `nitipan list`" in users[-1]:
+        tool = next((n for n in names if n in ("shell", "bash")), "shell")
+        command = f"{shlex.quote(str(BIN))} list > {shlex.quote(str(WORK / 'list-read.out'))} 2>&1"
+        return {"kind": "tool", "name": tool, "arguments": json.dumps({"command": command})}
     if not found:
         return {"kind": "text", "text": "ok"}
     tool = next((n for n in names if n in ("shell", "bash")), None) or next(
@@ -1051,6 +1055,29 @@ def step_mail() -> None:
 # The plan. It is the single list the dry run prints and the driver walks.
 
 
+def step_notice_ring() -> None:
+    directory = scratch("notice-ring")
+    session = new_session("notice-ring", directory)
+    tui = open_tui("notice-ring", session, directory)
+    check("notice-ring", "notice ring", "recipient TUI is open", tui is not None)
+    if tui is None:
+        raise RuntimeError("the notice ring test needs a live recipient TUI")
+    try:
+        init = sh(session, f"{BIN} mail status", "notice-register")
+        check("notice-ring", "notice ring", "opencode registers its mailbox", init.exit == 0, repr(init))
+        check("notice-ring", "notice ring", "recipient is idle before the notice", wait_idle(session))
+        detail = "opencode-notice-fixture-" + RUNID
+        notice = common.store_notice(session, detail)
+        output = WORK / "list-read.out"
+        output.unlink(missing_ok=True)
+        woke = wait_for(lambda: output.exists() and detail in output.read_text(), 45)
+        check("notice-ring", "notice ring", "plugin wakes the idle session, whose ring names nitipan list and reads the notice",
+              bool(woke), output.read_text() if output.exists() else tui.tail())
+        check("notice-ring", "only a read consumes", "nitipan list removes the notice it delivered", not notice.exists())
+    finally:
+        tui.stop()
+
+
 def step_mail_reminder() -> None:
     global IGNORE_MAIL_RINGS
     directory = scratch("mail-reminder")
@@ -1099,6 +1126,7 @@ class Step:
 STEPS = [
     Step("install", step_install, "make build, private config and fake provider, install plugins, start the server",
          [("0", R_PLUGINS)], always=True),
+    Step("notice-ring", step_notice_ring, "idle plugin wake for a deliverable notice, followed by nitipan list"),
     Step("mail-reminder", step_mail_reminder, "unread mail reminds in later turn/tool context without waking again"),
     Step("mail", step_mail, "idle plugin wake followed by explicit mail read"),
     Step("plugins", step_plugins, "installed files and `opencode plugin list`", [("0", R_PLUGINS), ("13", R_PLUGINS)]),

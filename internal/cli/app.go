@@ -127,7 +127,7 @@ func (a *app) openEngine(open func(string, state.Options) (*state.Dir, error)) (
 	e.Now = a.deps.Now
 	e.Sleep = a.deps.Sleep
 	e.Hooks = a.deps.Hooks
-	e.Notify = lease.Notify{Delivered: a.deliverNotice, Notice: a.deliverRecordNotice, Warn: a.warn}
+	e.Notify = lease.Notify{Delivered: a.deliverNotice, Notice: a.deliverRecordNotice, Expired: a.reportExpiry, Warn: a.warn}
 	e.Sessions = sessions
 	e.GitHooks = a.gitHooksOf
 
@@ -197,6 +197,13 @@ func (a *app) deliverRecordNotice(n *record.Notice) {
 // line carries exactly one.
 func (a *app) printRecordNotice(detail string) {
 	fmt.Fprintf(a.deps.Stderr, "nitipan: notice: %s.\n", strings.TrimSuffix(detail, "."))
+}
+
+// reportExpiry says that this call ended a sub-lease because its recall deadline passed. It goes to
+// stderr, since the call was run for another purpose.
+func (a *app) reportExpiry(x lease.Expiry) {
+	fmt.Fprintf(a.deps.Stderr, "nitipan: sub-lease %s on %s ended: the deadline of its recall, %s, passed.\n", x.Lease.ID,
+		keyList(x.Lease), x.Recall.Deadline.UTC().Format(time.RFC3339))
 }
 
 // warn reports a failure that did not fail the call. A permission failure carries the sandbox text.

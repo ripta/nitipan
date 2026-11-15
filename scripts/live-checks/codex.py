@@ -113,6 +113,8 @@ THREADS: dict[str, "Ctx"] = {}
 FAKE: "Fake | None" = None
 BASELINE: list[str] = []
 GUARD: dict = {}
+IGNORE_LIST_RINGS = False
+REQUEST_TEXTS: list[str] = []
 
 
 # The fake Responses API. reply() is pure so it can be tested without a socket.
@@ -130,6 +132,8 @@ def decode_marker(text: str) -> dict | None:
     found = MARKER.search(text or "")
     if not found and "Run `nitipan mail read`" in (text or ""):
         return {"cmd": f"{shlex.quote(str(BIN))} mail read > {shlex.quote(str(WORK / 'mail-read.out'))}"}
+    if not found and "Run `nitipan list`" in (text or "") and not IGNORE_LIST_RINGS:
+        return {"cmd": f"{shlex.quote(str(BIN))} list > {shlex.quote(str(WORK / 'list-read.out'))} 2>&1"}
     if not found:
         return None
     try:
@@ -248,6 +252,7 @@ class FakeHandler(BaseHTTPRequestHandler):
         except ValueError:
             request = {}
         answer = reply(request)
+        REQUEST_TEXTS.append("\n".join(item_text(i) for i in request.get("input") or [] if isinstance(i, dict)))
         HITS.append(self.path)
         log("fake_request", path=self.path, encoding=encoding, tools=tool_names(request.get("tools")),
             answer=answer["kind"], before=answer.get("before", 0), no_tool=answer.get("noTool", False))
@@ -1543,6 +1548,42 @@ def step_mail() -> None:
     ctx.unsubscribe()
 
 
+def step_notice_ring() -> None:
+    global IGNORE_LIST_RINGS
+    command = toml_str(f"{EXE} hook mail-turn")
+    hooks = "\n".join(f"[[hooks.{event}]]\n[[hooks.{event}.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n" for event in ("UserPromptSubmit", "PostToolUse"))
+    host = fresh_host(Spec("notice-ring", extra=hooks, trusted=("sessionStart", "sessionEnd", "userPromptSubmit", "postToolUse")))
+    ctx = host.thread(scratch("notice-ring"), "notice-ring")
+    init = ctx.turn(f"{BIN} mail status")
+    check("notice-ring", "notice ring", "Codex registers its mailbox", init.exit == 0, repr(init))
+    detail = "codex-notice-fixture-" + RUNID
+    notice = common.store_notice(ctx.id, detail)
+    output = WORK / "list-read.out"
+    output.unlink(missing_ok=True)
+    mark = len(REQUEST_TEXTS)
+    IGNORE_LIST_RINGS = True
+    try:
+        turn = ctx.turn("echo notice-turn")
+        rung = [t for t in REQUEST_TEXTS[mark:] if "Run `nitipan list`" in t]
+        check("notice-ring", "notice ring", "the turn hook rings in model context, naming nitipan list",
+              turn.exit == 0 and bool(rung), repr(turn))
+        check("notice-ring", "only a read consumes", "a turn hook's ring leaves the notice in place", notice.exists())
+    finally:
+        IGNORE_LIST_RINGS = False
+    found = re.search(r"nitipan: [^\n]*Run `nitipan list` to read [a-z]+\.", rung[-1]) if rung else None
+    if found is None:
+        raise RuntimeError("the turn hook's ring text was not found in the model's request")
+    endpoint = queue_endpoint(host.home)
+    sent = run(["codex", "queue", "--thread", ctx.id, "--message", found.group(0)], env=codex_env(host.home))
+    check("notice-ring", "notice ring", "codex queue accepts the ring", sent.returncode == 0, sent.stdout + sent.stderr)
+    woke = wait_for(lambda: output.exists() and detail in output.read_text(), 40)
+    check("notice-ring", "notice ring", "idle Codex wakes on the ring and nitipan list delivers the notice", bool(woke),
+          output.read_text() if output.exists() else "no list output")
+    check("notice-ring", "only a read consumes", "nitipan list removes the notice it delivered", not notice.exists())
+    kill_group(endpoint)
+    ctx.unsubscribe()
+
+
 def step_mail_embedded() -> None:
     directory = scratch("mail-embedded")
     home = home_for(tui_spec(directory))
@@ -1588,6 +1629,7 @@ STEPS = [
     Step("install", step_install, "make build, fake Responses API, trust bootstrap, start the plain host",
          [("0", R_ENTRIES), ("0", R_HOOKENV), ("0", R_HOST)], always=True),
     Step("mail", step_mail, "idle queue wake followed by explicit mail read"),
+    Step("notice-ring", step_notice_ring, "turn hook ring and idle queue wake for a deliverable notice, then nitipan list"),
     Step("mail-embedded", step_mail_embedded, "record queue delivery to an embedded TUI without a daemon"),
     Step("identity", step_identity,
          "thread a: first-turn acquire, variables, holder, sandbox list, registration, second thread, modes",
@@ -1880,6 +1922,7 @@ def selftest() -> int:
     prompt = encode_command("echo hi", before=1.5, after=2.5)
     assert decode_marker(prompt) == {"cmd": "echo hi", "before": 1.5, "after": 2.5, "yield_ms": 60000}
     assert decode_marker("no marker") is None
+    assert "list > " in decode_marker("Run `nitipan list` to read it.")["cmd"]
     assert decode_marker("HARNESS-CMD:!!!:END") is None
 
     user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}]}

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/exitcode"
@@ -76,6 +77,10 @@ type AcquireResult struct {
 	// Delegated lists the live sub-leases of a lease the caller refreshed. A refresh with delegations
 	// is not plain success, because the caller does not own those keys right now.
 	Delegated []*record.Record
+
+	// Recalled holds, by lease ID, the deadline of each delegation that is under a recall still in
+	// force. A wait treats such a refresh as not done yet, since the deadline returns those keys.
+	Recalled map[string]time.Time
 }
 
 // Acquire claims a domain under the lock.
@@ -930,6 +935,8 @@ func (cl *claim) refresh(target *entry) (*AcquireResult, error) {
 	for _, kid := range cl.delegated {
 		res.Delegated = append(res.Delegated, kid.Rec)
 	}
+
+	res.Recalled = cl.recalledChildren(cl.delegated)
 
 	return res, nil
 }

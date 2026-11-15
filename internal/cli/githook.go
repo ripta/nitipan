@@ -76,7 +76,7 @@ func (a *app) runRefTransaction(phase string) error {
 			"agent: %w. Ask the user", res.Failure)
 	}
 
-	touches, err := gitfence.New().Touched(updates)
+	touches, err := a.deps.Touched(updates)
 	if err != nil {
 		return fmt.Errorf("git refused to update a branch or HEAD, because nitipan could not work out which paths it "+
 			"touches: %w", err)
@@ -110,6 +110,10 @@ func (a *app) runRefTransaction(phase string) error {
 	}
 
 	if len(report) == 0 {
+		for _, n := range judge.RecallNotices() {
+			fmt.Fprintf(a.deps.Stderr, "nitipan: %s\n", n)
+		}
+
 		return nil
 	}
 

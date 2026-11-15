@@ -15,7 +15,7 @@ fake model server. They need no manual steps and cost no model tokens.
 
 ## First version
 
-The first version runs on one machine, with no daemon. It has ten commands:
+The first version runs on one machine, with no daemon. It has eleven commands:
 
 - `acquire` claims a domain
 - `release` gives it up
@@ -26,6 +26,7 @@ The first version runs on one machine, with no daemon. It has ten commands:
 - `grant` hands a requested part to the requester as a sub-lease
 - `decline` refuses a request, or withdraws one
 - `revoke` ends a sub-lease at once, and only the holder of its parent can run it
+- `recall` gives a sub-lease a deadline to finish, commit, and release, and only the holder of its parent can run it
 - `setup` prints the sandbox allowance, hooks, and plugins an agent needs, and installs the git hooks with
   `setup git --install <checkout>`
 
@@ -146,6 +147,21 @@ When a sub-lease or its parent ends:
 - The parent's holder can run `nitipan revoke <lease-id>` to end a sub-lease at once. The sub-lessee gets a tombstone
   that names the parent's holder, with the cause `revoked`. Anyone else is refused, and the error names the parent.
   Subagents share their parent's holder, so any subagent of the holder can revoke.
+- The parent's holder can run `nitipan recall <lease-id> --deadline <duration>` to give a sub-lease time to finish. The
+  duration is required and has no default. The sub-lessee gets a notice with the deadline on its next nitipan call. The
+  output names the sub-lessee's handle and agent name and the absolute deadline. Tell the sub-lessee out of band, for
+  example through SendMessage or mail. The output also prints an `acquire --wait` command on the parent's whole key set.
+  There is no timer. The first locked nitipan call by anyone after the deadline ends the sub-lease as a `revoke` would,
+  with a tombstone of the cause `recalled` and a "sub-lease ended" notice to the parent. A sub-lessee that releases
+  first returns its keys as usual. A second `recall` replaces the deadline. `nitipan recall <lease-id> --cancel` takes
+  the recall back and tells the sub-lessee. A recall ends when its parent dies, is released, or is broken, and the
+  sub-lease then stands alone. A recall whose parent record this nitipan cannot read ends nothing, and is reported.
+  The holder's `acquire --wait` on exactly its own keys waits while a delegation is under a recall, and exits 11 without
+  `--wait`, listing the deadline. An older nitipan never reads `recalls/`, so it keeps answering the sub-lessee as
+  covered past the deadline until a newer binary takes the lock. The node applies the same rule when it mirrors
+  `leases/`, so `nitipan who holds` reports the parent as owner of a recalled sub-lease's keys once the deadline
+  passes, before any locked call removes the sub-lease. A node built before this reports the ex-sub-lessee as owner
+  until then.
 - A sub-lessee's `release`, a forced `break` of the sub-lease, and a dead sub-lessee that nitipan clears each return the
   keys to the parent. The parent's record does not change. The parent gets a notice with the sub-lease's ID, its keys,
   and how it ended. The output of a `break` says the keys went back.
@@ -163,9 +179,9 @@ When a sub-lease or its parent ends:
 the lease it asks to share. A sub-lease whose parent is dead or gone prints at the top level, with its stored `parent`
 link, until a locked call repairs it. A `list` that reads without the lock prints it that way too.
 
-`list --json` has schema version 1.3, an additive change over 1.2 that adds the `marks` array. The sub-lease fields
-below came in with 1.2, an additive change over 1.1. Consumers ignore fields they do not know. Every lease stays a
-top-level entry in `leases`, so a consumer of the earlier schema still sees all of them.
+`list --json` has schema version 1.6. Every minor version is an additive change. The sub-lease fields below came in
+with 1.2, the `marks` array with 1.3, and the `recall` object with 1.6. Consumers ignore fields they do not know. Every
+lease stays a top-level entry in `leases`, so a consumer of the earlier schema still sees all of them.
 
 - `parent` is on a sub-lease, and names its parent lease ID.
 - `delegated` is on a parent that has live sub-leases. It lists each one as `{"id": ..., "keys": [...]}`. It is
@@ -179,14 +195,18 @@ top-level entry in `leases`, so a consumer of the earlier schema still sees all 
 - `requests` lists the pending requests, each with its `id`, `parent` lease ID, `requester` holder (which carries the
   handle), `liveness`, `keys`, `description` when the requester gave one, and `requested_at`. A request that `grant`
   is already working on is not pending. A filtered `list` keeps the requests whose keys overlap the filter.
+- `recall` is on a sub-lease whose parent recalled it and whose recall is still pending, as
+  `{"parent": ..., "deadline": ...}`. Schema version 1.6 adds it. A `list` that reads without the lock treats a
+  sub-lease past its deadline as ended, so the parent reads as the owner, and warns on stderr.
 - `notices` lists the notices this call delivered, each with its `cause`, `target`, `paths`, `at`, and a `summary`
   sentence. Delivery removes a notice, so read this array when stderr is not captured.
 
 `requests`, `notices`, and `tombstones` are always arrays, never null.
 
 A sub-lease is its own record in `leases/`, with a `parent` field that names the lease it came from. The parent's record
-does not change. Records that use `parent`, and requests and notices, carry record version 1.2. Fence marks carry 1.3. A
-lease that uses none of them keeps version 1.0 and stays writable by older binaries.
+does not change. Records that use `parent`, and requests and notices, carry record version 1.2. Fence marks carry 1.3.
+Recalls, in `recalls/`, carry 1.4 with the `recalled` and `recall-cancelled` notices and the `recalled` tombstone cause.
+A lease that uses none of them keeps version 1.0 and stays writable by older binaries.
 
 ## Git hook and fence marks
 
@@ -203,6 +223,7 @@ and refuses it when it touches a path that:
 - a record covers whose holder's liveness is unknown, or that nitipan cannot use
 - an undelivered tombstone addressed to the caller lists
 - a fence mark addressed to the caller guards
+- a sub-lease of the caller ended at the deadline of its recall, which gives the keys back to the parent
 
 A path no live record covers passes, because a lease is not required to commit. A dead holder's record does not refuse.
 A caller with no agent variables is the user's own terminal and is never refused. A caller with agent variables and no
@@ -216,7 +237,13 @@ commit and a pin, `git update-ref refs/nitipan/salvage/<id> <sha>`, that keeps i
 outside `refs/heads`, so the hook lets it through. A pinned commit landed on a branch later is still checked.
 
 Each refusal kind has its own message. A refusal for a lease that ended quotes how it ended and names no command, and
-says to report to the user.
+says to report to the user. The recall refusal quotes the recall's deadline and the parent's holder in the same way.
+
+The hook reads recalls without the lock. It applies the same rule as `list`. A sub-lease past its recall's deadline
+counts as ended, so the parent owns its keys and the parent's commits pass. Before the deadline, the hook passes the
+sub-lessee's commits and prints the deadline on stderr. That line writes nothing and consumes nothing. A recall record
+the hook cannot use, and a recall whose parent record it cannot use, end no sub-lease. The hook reports each and
+ignores the recall.
 
 The hook goes into the directory git uses for hooks, so a linked worktree shares it. It goes into every initialized
 submodule too. An existing `reference-transaction` hook is kept and chained, and `setup git --uninstall <checkout>` puts
@@ -372,6 +399,13 @@ publishes presence while loaded,
 and `mail status` reports missing or stale presence. Restart the service after replacing its installed plugin. Sessions
 on one shared host keep separate mailboxes and ring ledgers. Every wake path only signals; the session runs
 `nitipan mail read` to consume its mail.
+
+Every wake path rings for more than mail. It also rings for a notice addressed to the session that a locked nitipan call
+would deliver now, such as the `recalled` notice of a recall. It rings for a pending request on a lease the session
+holds too, since the requester waits on it. Those rings say to run `nitipan list`, which delivers the notices and shows
+the requests. A notice that waits on a repair, or that delivery would drop, never rings. Neither does the refused-claim
+notice below. A waiting path rings once per notice or request with no node running. A notice rewritten in place rings
+again. The turn hooks and the identified-holder reminders do not wake anything, so they may repeat.
 
 ## Broker authentication
 

@@ -46,6 +46,25 @@ type Hooks struct {
 	// removed the sub-lease.
 	AfterRevokeTombstone func() error
 
+	// AfterRecallRecord lets a test crash a recall that wrote its record and not yet the notice.
+	// AfterRecallNotice lets a test crash one that wrote the notice and not yet marked the record
+	// announced.
+	AfterRecallRecord func() error
+	AfterRecallNotice func() error
+
+	// AfterCancelMark, AfterCancelDrop, and AfterCancelNotice let a test crash a cancel after it marked
+	// the record cancelling, after it dropped the recalled notice, and after it wrote the cancelled
+	// notice.
+	AfterCancelMark   func() error
+	AfterCancelDrop   func() error
+	AfterCancelNotice func() error
+
+	// AfterExpiryTombstone and AfterExpiryRemoval let a test crash an expiry after the sub-lessee's
+	// tombstone, and after the sub-lease was removed and before the recall record was. The notice to
+	// the parent runs AfterLossNotice.
+	AfterExpiryTombstone func() error
+	AfterExpiryRemoval   func() error
+
 	// BeforeBreakMark lets a test fail the write of a break's fence mark, to check that the break
 	// leaves nothing of the broken holder's notice behind.
 	BeforeBreakMark func() error

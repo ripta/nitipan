@@ -1,8 +1,8 @@
 # NIT-008: Sub-Lease Recall
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-11-08
+**Updated:** 2026-11-14
 
 ## Dependencies
 
@@ -68,7 +68,7 @@ that no caller has asked for.
 
 Decision (autonomous): no timer. The deadline is stored beside the sub-lease, and every new-binary reader enforces it
 when it reads. "Sub-leases at machine reach" left both listed candidates without a lease to act on, since a `machine`
-sub-lease has no broker term. Amended 2026-10-24; see Decision Log.
+sub-lease has no broker term. Amended 2026-11-14; see Decision Log.
 
 The recall record:
 
@@ -95,8 +95,10 @@ The recall record:
 
 Expiry:
 
-- Every locked call's repairs end each child whose recall is in force and past its deadline. The expiry first writes a
-  tombstone with cause `recalled` and the "sub-lease ended" notice to the parent. The notice says the recall's deadline
+- Every locked call's repairs end each child whose recall is in force and past its deadline. The deadline is inclusive:
+  a reader whose clock reads the deadline itself finds the child ended. A child whose own holder is dead is left for
+  the clearing that removes it, as the parent-gone repair leaves it. The expiry first writes a tombstone with cause
+  `recalled` and the "sub-lease ended" notice to the parent. The notice says the recall's deadline
   passed. It then removes the child, and removes the recall record last. The tombstone names the parent's holder as the
   breaker, taken from the parent's record, since the call that runs the expiry may be a third party's
 - A retry after a crash reuses a tombstone for the same lease whose cause is `revoked` or `recalled`, so the sub-lessee
@@ -114,7 +116,9 @@ Readers that take no lock:
   command, as the tombstone kind does. It never names `request`
 - A recall record a reader cannot use never ends a child. A locked call leaves the child alone and reports the file. The
   hook reports it and ignores it, as NIT-005 treats a fence mark it cannot read
-- NIT-004's node applies the rule when it mirrors `leases/`, so discovery reports the parent as owner past the deadline
+- NIT-004's node applies the rule when it mirrors `leases/`, so discovery reports the parent as owner past the deadline.
+  A deadline passing changes no file, so the node also watches `recalls/` and resends the mirror once its clock reaches
+  the earliest deadline of a recall in force. That resend only re-reads and sends. It writes no lease state
 
 Changing a recall:
 
@@ -271,7 +275,7 @@ None.
 
 ### M1: Recall with a deadline
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `recall <child-id> --deadline <duration>` by the parent's holder writes the recall record and the `recalled` notice,
   and leaves the child's record unchanged
@@ -287,8 +291,9 @@ None.
   says, and the undelivered `recalled` notice is dropped. An unreadable parent leaves the child alone and is reported
 - A recall record that is no longer in force is removed by the next locked call, after any release, break, dead-holder
   clearing, revoke, or older-binary rewrite of its child
-- A recall whose parent record is unusable ends no child for a locked call, an unlocked `list`, or the hook, and each
-  reports it. The recall survives the locked call, and is enforced once the parent reads usable again
+- A recall whose parent record is unusable ends no child for a locked call or an unlocked `list`, and each reports it.
+  The recall survives the locked call, and is enforced once the parent reads usable again. Amended 2026-11-13; see
+  Decision Log.
 - A second `recall` replaces the deadline and the notice. `recall --cancel` removes both and leaves a `recall-cancelled`
   notice, and a later `recall` removes that notice. A crash at each step of `--cancel` leaves the recall cancelled after
   the next locked call, and the sub-lessee told once. A recall of a dead sub-lessee removes the child at once with no
@@ -303,18 +308,88 @@ None.
 - A NIT-003 binary leaves the recall record alone and can still rewrite the child, and a new binary then removes the
   recall
 
+**As built:**
+
+Nothing here ran against a real agent session. Every check drives the CLI over a fake process table and a settable
+clock.
+
+- The record minor is 1.4. `CurrentMinor` moved to 4, so the tests that used 1.4 as a "newer minor" fixture now use 1.5.
+  The child's own record keeps 1.2
+- One exported function, `lease.JudgeRecall`, decides in force, past the deadline, not in force, or unusable. It reads
+  plain data and takes no lock. M2's hook and M4's node mirror call it. A locked call, an unlocked `list`, and
+  delivery's verdict on the two new notice causes all use it. The deadline is inclusive. See Decision Log
+- The repair runs after the parent-gone repair, so a child whose parent died has already stood alone and its recall is
+  reaped, never enforced. A `cancelling` record is finished before any verdict. An unusable parent leaves the recall
+  and warns on every locked call. An unusable recall record warns the same way and ends nothing
+- The crash order is hooked at each step of `recall`, `--cancel`, and the expiry, and a test crashes at each one. The
+  expiry reuses a tombstone of cause `revoked` or `recalled` for the same lease. A revoke reuses either one too. No
+  test reaches the revoke side, because every locked call's repairs end a recalled child before a revoke's body runs.
+  The shared lookup serves both
+- `recall` and `--cancel` refuse a recall record they cannot use, not only one of a higher minor, and exit 9. A cancel
+  with no recall exits 8. Recall of a dead sub-lessee prints that no recall was written
+- A recall record of a higher minor is never removed or finished by this binary. The reap, an expiry's last step, and a
+  cancel leave it for a newer binary, since NIT-001 lets an older binary remove such a record only on its own holder's
+  release. `recall` on a dead sub-lessee checks the record first and refuses the same way
+- The cancelled notice is written only for a sub-lease that still stands and names the parent. A cancel that finishes
+  after the sub-lease is gone writes none
+- A locked call prints a line to stderr for each expiry it ran, naming the sub-lease and the deadline. A call that
+  cannot use a record warns with the file's path
+- A `list` that reads without the lock drops a sub-lease past its deadline from its leases and from the parent's
+  `delegated`, so the parent reads as owner, and warns on stderr that the sub-lease counts as ended. The JSON has no
+  marker for it
+- A refresh under a recall in force returns the deadline in its result. `acquire --wait` retries on it, so an equal-key
+  refresh waits for the expiry and exits 0, or 11 when other delegations remain. A wait that ends before the deadline
+  exits 10. Without `--wait` the delegation line ends with `recalled until <deadline>`
+- `recall` prints an `acquire --wait` command on the parent's whole key set. The wait is the time to the deadline
+  rounded up to a second, plus 10 seconds, so the last attempt runs after the deadline
+- `list` text and `list --json` show a pending recall on the sub-lease. The schema moved from 1.5 to 1.6
+- The hook's recall warning, the recall refusal kind, the rings, and the node mirror are not built. They are M2, M3,
+  and M4
+
 ### M2: Recall in the git hook
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - The hook refuses an ex-sub-lessee's commits on recalled keys past the deadline, with a refusal that quotes the recall
   and names no command, and passes the parent there
 - Before the deadline, the hook passes the sub-lessee's commits and prints the deadline on stderr
 - A recall record the hook cannot use is reported and ignored
+- A recall whose parent record is unusable ends no child for the hook, which reports it. Amended 2026-11-13; see
+  Decision Log.
+
+**As built:**
+
+Nothing here ran against real git. The checks drive `hook reference-transaction` over a fake process table and a
+settable clock, with the touched paths fixed by a `Deps.Touched` seam that defaults to the real git work. The seam is
+new. No test reaches git's own calling of the hook.
+
+- The judge reads `recalls/` when it is built and judges each recall with `lease.JudgeRecall`, the rule the locked calls
+  use. A sub-lease past its deadline is marked removed in the judge's own copy of the records, so the parent reads as
+  the owner of its keys and the parent's commits pass. The state directory is not written
+- `RefusedRecalled` is the new refusal kind. It is checked after fence marks and tombstones, before the owner check,
+  for the holder of the ended sub-lease only. Its message quotes the deadline and the parent's holder, says the
+  sub-lease no longer exists, and names no command. A caller that holds both the sub-lease and the parent is never
+  refused by it
+- Before the deadline the sub-lessee's commits pass. When every path of the update passes, the hook prints one stderr
+  line per recall the update fell under, with the deadline. A refused update prints no such line
+- A recall record the hook cannot use, and a recall whose parent record it cannot use, go into the judge's warnings and
+  end no sub-lease. An unusable parent record also covers every path as an unusable record, so the sub-lessee's commit
+  there is refused with the unusable kind and not the recall kind
+- A sub-lease whose own holder is dead is not hidden, as in the unlocked `list`. A dead holder's record never refuses,
+  so the parent passes there either way
+- The hook and the unlocked `list` read `recalls/` before the leases, and the hook reads the leases before the
+  tombstones. An expiry publishes the tombstone, removes the sub-lease, and drops the recall last. A reader that read
+  the recall last could find the sub-lease still standing with its recall gone, and pass the ex-sub-lessee once. In this
+  order a sub-lease the read still finds has its recall in hand, and one already removed has its tombstone. A test
+  cannot interleave a read with an expiry, so none pins the order
+- Sub-leases do not nest, so a sub-lease past its deadline is never a parent whose own recall the judge must re-parent
+- NIT-005 and NIT-007 needed no amendment. NIT-005 already says a sub-lease past an in-force recall deadline is not live,
+  and its refusal text for a tombstone or mark still holds. NIT-007 already says the git hook's recall warning is not a
+  mail ring
 
 ### M3: Rings for pending notices and requests
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - Every NIT-007 wake path rings for a notice that delivery would deliver now, and for a pending request on a lease the
   session holds, naming `nitipan list`
@@ -323,12 +398,79 @@ None.
 - A waking path rings once per notice or request with no node running. A re-armed waiter does not ring again for an
   ignored one, and a replaced `recalled` notice rings again
 
+**As built:**
+
+The opencode plugin ran against the real opencode, and the Codex turn hook and `codex queue`
+against the real Codex, with the fake model. The node's socket and queue rings ran only against a fixture executable.
+The live checks cannot start a node, since the node rings only over an HTTPS broker. The Claude Code waiter and socket
+ring have no live check, as before.
+
+- One function, `Engine.PendingRings`, decides what rings. It reads `recalls/` and then the leases without the lock, as
+  the git hook does, and hides a sub-lease past its recall deadline. It then calls delivery's own `dueNotices` and keeps
+  the notices it would deliver, minus the cause `shared-claim-refused`. It adds each pending request whose target
+  lease the holder holds. Every wake path calls it
+- A request whose requester is dead is left out, since a locked call removes it. A notice that waits on a repair rings
+  once a locked call has run the repair. A `recalled` notice for a sub-lease past its deadline does not ring, because
+  the unlocked read counts the sub-lease as ended
+- A registration stands for the holder with its process and its current session ID. A session ID held before a /clear
+  gets no notice ring, because `nitipan list` would not deliver for it. The node builds that holder from the
+  registration fields `Registration.Envelope()` uses, through a method on the registration
+- The ledger keys are `notice:<id>@<write time>` and `request:<id>@<write time>` beside `mail:<id>`. The ledger version
+  did not change. A key's prefix picks the words of the ring, which name `nitipan list` for notices and requests and
+  `nitipan mail read` for mail. One ring names both when both are pending
+- Turn hooks, the identified-holder reminder, and the opencode reminder read the same verdict and claim nothing. The
+  waiter, the opencode poll, and the node claim the keys first. A ring path that reads nothing pending skips the leases
+  when notices/ and requests/ are empty, so a ring on every tool call stays cheap
+- The node reads the state directory with `OpenRead` and takes no lease lock. A test holds the lock for the whole ring.
+  A node with no liveness checker rings no notices or requests. A real node always has one
+- The node's socket and queue rings now pass the ring text, not a count, so a ring for a notice does not say mail
+- The live checks gained a `notice-ring` scenario in each harness. Codex plants a notice, checks that the turn hook puts
+  the ring in the model's context and leaves the notice, then queues the hook's own ring text to the idle thread and
+  checks that `nitipan list` delivers it. opencode plants a notice and checks that the plugin wakes the idle session. No
+  harness plants a pending request. That path is covered by the CLI tests
+- The node's codex-queue ring is tested for a notice and for a pending request. Its socket ring shares the same
+  decision code and has no test of its own, and a node with no liveness checker is untested
+- The node reads the leases once per tick through `ReadRings`, and returns early when the inbox, `notices/`, and
+  `requests/` are all empty, so an idle node reads no registrations
+- A ring path for a holder that cannot hold a lease rings nothing. That is a multi-session agent with no session ID, or
+  an invalid one
+
 ### M4: Recall in the node's mirror
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - Past a recall's deadline, and before any locked call ends the child, "who holds X" reports the parent as owner of the
   recalled keys
+
+**As built:**
+
+Nothing here ran against a real broker or a real discovery query. The node tests run the node against the in-process
+broker with a settable wall clock, and read the mirror the broker holds. No test sends a "who holds" query. The broker's
+discovery returns every overlapping mirror and computes no owner, so a child missing from the mirror is the whole change.
+The wire and the broker did not change.
+
+- The node's snapshot reads `recalls/` first, then scans `leases/`, as the hook and the rings do. It judges each recall
+  with `lease.JudgeRecalls` and drops from the mirror each sub-lease whose recall is in force and past its deadline. The
+  deadline is inclusive. A sub-lease whose own holder is dead stays, as in the unlocked `list`, since the clearing that
+  removes it is a locked call's job. The node judges liveness with its own checker, and reads every holder as alive when
+  it has none. It looks a holder up only for a lease some recall names, since a session check can read a directory or a
+  database, and it does that once per snapshot
+- The unlocked `list`, the hook's judge, the ring view, and the node all read recalls with `lease.ReadRecalls` and judge
+  them with `lease.JudgeRecalls`. The usable-recall test and the dead-sub-lessee rule live there only. Each reader keeps
+  its own warnings. The judgement uses one fixed view of the leases, so a verdict does not depend on file order. The
+  unlocked `list` and the ring view used to remove an ended sub-lease while they still iterated, which let a nested
+  sub-lease's verdict change with file order
+- The node watches `recalls/` beside `leases/` and the registrations, so a new, changed, or cancelled recall resends the
+  mirror after the usual debounce
+- A deadline passing changes no file. Each snapshot records the earliest deadline among the recalls in force. The event
+  loop's 250 ms tick compares the node's wall clock, `Options.Now`, with it and resends the mirror once it is reached.
+  The next snapshot re-arms the check. A tick that compares a clock reads a clock step the way the locked calls do,
+  where a timer set for a computed delay would not. The check only re-reads and re-sends. It writes no lease state and
+  ends no sub-lease. A node timer that writes lease state stays rejected, as "How the deadline is enforced" says
+- A recall record the node cannot use, and a recall whose sub-lease or parent record it cannot use, end nothing. The node
+  warns once per problem and again if the problem changes, not on every heartbeat
+- Nothing in the node tests reaches the kqueue watcher on `recalls/`. A fake watcher stands in. The kqueue watcher already
+  watches a directory that does not exist yet
 
 ## Decision Log
 
@@ -379,6 +521,31 @@ None.
   rings, but it gave no way for a ring path to recognize it. It now names the notice's cause, `shared-claim-refused`,
   and M3's check names it too. Nothing else about the rule changed. The bullet's marker moved from the 2026-10-24 entry
   to this one.
+- 2026-11-13 (autonomous): M1 built the CLI and the locked and unlocked readers, and no hook. M1's check said "A recall
+  whose parent record is unusable ends no child for a locked call, an unlocked `list`, or the hook, and each reports
+  it." The hook is M2, so M1 would have named a reader it does not build. M1's check now names the locked call and the
+  unlocked `list`, and M2 gets a check for the hook.
+- 2026-11-13 (autonomous): "How the deadline is enforced" said every locked call's repairs end each child "whose recall
+  is in force and past its deadline", and gave no rule for the instant of the deadline or for a dead sub-lessee. The
+  deadline is now inclusive, since a wait whose last attempt runs at its own timeout must see the child ended. A child
+  whose own holder is dead is left for the clearing that removes it, as the parent-gone repair leaves it, because
+  nobody can receive its tombstone. The marker on the decision moved from 2026-10-24 to this entry.
+- 2026-11-14 (autonomous): M4 built the node's mirror. "Readers that take no lock" said the node applies the rule when
+  it mirrors `leases/`, and gave the node no way to learn that a deadline passed, since a deadline changes no file. The
+  node now also watches `recalls/` and resends the mirror once its clock reaches the earliest deadline of a recall in
+  force. The resend writes no lease state, so the rejected node timer is still rejected. The check runs on the event
+  loop's existing tick against `Options.Now`, not on a timer set for a computed delay. The "How the deadline is
+  enforced" decision carried a marker for each of this entry and the 2026-11-13 one. The 2026-11-13 marker moved to
+  this entry, so the decision has one.
+- 2026-11-14: ADR candidate (cuts across the system): no wake path lets a party wake a session's agent by an act that
+  costs it nothing and that the session never granted, such as a refused claim. Undecided. Found in M3.
+- 2026-11-14: ADR candidate (cuts across the system): every wake signal, for mail, lease notices, or requests, only
+  signals, and only a read consumes. ADR-06 states this for mail alone. Undecided. Found in M3.
+- 2026-11-14: Correction of fact. The 2026-11-14 entry above says the "How the deadline is enforced" decision has one
+  marker. The text put that marker inside the readers bullet instead, which read "the earliest deadline of a recall in
+  force. That resend only re-reads and sends. It writes no lease state. Amended 2026-11-14; see Decision Log". The
+  decision paragraph, which ended "sub-lease has no broker term.", carried none. The marker now sits on the decision
+  paragraph, where the entry says it is. No decision changed.
 
 ## References
 

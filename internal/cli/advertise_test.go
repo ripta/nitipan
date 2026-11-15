@@ -64,7 +64,7 @@ func TestAdvertiseRefusesToRewriteARecordOfANewerMinorAndWritesNothing(t *testin
 	c := w.claude(200, "s1")
 
 	plain := w.acquireOK(c, "--checkout", w.dir("repo", "a"), "--name", "before")
-	newer := w.plant(plantSpec{PID: 200, Paths: []string{w.dir("repo", "b")}, Version: "1.4", Name: "before"})
+	newer := w.plant(plantSpec{PID: 200, Paths: []string{w.dir("repo", "b")}, Version: "1.5", Name: "before"})
 
 	res := w.run(c, "advertise", "--name", "after")
 	wantStatus(t, res, exitcode.Error)

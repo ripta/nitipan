@@ -923,3 +923,4 @@ Check to test, by the bullet order above:
 - NIT-004: the broker that holds the mailboxes
 - NIT-006: broker auth, which binds each label to a user and opens mail across users
 - ADR-08: broker authority needs a proof no session can make
+- [NIT-008](NIT-008-sub-lease-recall.md): extends these rings to lease notices and pending requests

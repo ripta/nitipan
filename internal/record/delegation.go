@@ -78,6 +78,12 @@ const (
 	CauseParentEnded   = "parent-ended"
 	CauseSubLeaseEnded = "sub-lease-ended"
 
+	// CauseRecalled goes to a sub-lessee whose parent recalled the sub-lease with a deadline.
+	// CauseRecallCancelled tells it the recall is off. A reader that does not know either delivers the
+	// notice as it delivers any cause.
+	CauseRecalled        = "recalled"
+	CauseRecallCancelled = "recall-cancelled"
+
 	// CauseSharedClaimRefused goes to the holder of a broker lease that refused a coworker's `shared`
 	// claim while hidden from that coworker. It never rings, turn hooks included. A refused claim costs
 	// the coworker nothing, so a ringing notice would let them wake the holder's agent with no mail grant.
