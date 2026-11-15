@@ -1,6 +1,6 @@
 # ADR-09: Fencing Is Coordination, Not Correctness
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-14
 
 ## Context
