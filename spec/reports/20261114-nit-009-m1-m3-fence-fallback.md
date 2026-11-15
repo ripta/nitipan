@@ -220,10 +220,26 @@ Findings:
 
 ## Left for the user
 
-- Run `make live-fence-hosts` against the real hosts, to see each host's porcelain wording for a refused fence ref.
 - ADR-09 is still `proposed`, while `docs/architecture.md` cites it as the principle.
 - Two bugs this run filed, both needing a design call:
   - `spec/bugs/20261114-nonff-branch-refused-as-extra-fence.md`: a behind branch makes the hook refuse the fence ref
     with a misleading message.
   - `spec/bugs/20261114-cli-tests-near-go-timeout.md`: `internal/cli` runs about 552 s against go's 600 s default.
 - No freeze hunk or review finding concerned another session's edit. No stash was made.
+
+## Live host probe
+
+The user approved running the probe after the run. The coordinator ran `make live-fence-hosts` with the sandbox
+disabled, for the SSH agent. It ran from a throwaway clone of `~/projects/playground` in the session scratchpad, with
+that repo's four remotes. A dry run first printed every command with `--porcelain`.
+
+| Remote | Host | atomic | create | fast-forward | delete |
+|--------|------|--------|--------|--------------|--------|
+| github | github.com | yes | yes | yes | yes |
+| gitlab | gitlab.com | yes | yes | yes | yes |
+| srht | git.sr.ht | yes | yes | yes | yes |
+| tngl | a tangled knot | yes | yes | yes | yes |
+
+No host refused a step, so the probe printed no porcelain lines. A follow-up `git ls-remote` on each remote found no
+`refs/nitipan/*` and no probe branch left behind. The result matches the NIT-005 run: these hosts take the fenced push,
+and none of them triggers the fallback.
