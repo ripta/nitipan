@@ -18,7 +18,7 @@ mail, delegations, and grants use to name users.
 ## Lease reach across users
 
 `user` reach is per user. Each bound user's `user` leases meet only that user's other `user` leases. Two users' `user`
-leases on overlapping names do not conflict. Two labels of one user do. The sign-in page and some CLI help call this the user's "scope".
+leases on overlapping names do not conflict. Two labels of one user do.
 
 `shared` reach is one space that every bound user shares. A `user` lease and a `shared` lease on overlapping names
 conflict, whichever user holds each. An overlap report never shows another user's mirrored `machine` lease, at any
