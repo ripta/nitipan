@@ -433,14 +433,14 @@ func TestMachineClaimRecordsItsRepoEntriesOnlyWhereANodeIsConfigured(t *testing.
 
 // whoAmIMachine starts a machine and, when bound is set, binds its label to a user. It returns the machine
 // and the user label that who am-i should report.
-func whoAmIMachine(t *testing.T, bound bool) (*wideMachine, string) {
+func whoAmIMachine(t *testing.T, bound bool) (m *wideMachine, label string) {
 	t.Helper()
 
 	f := newWideFixtureConfig(t, true, nil, func(c *broker.Config) {
 		c.OIDCConfig = &oidc.Config{Issuer: "https://issuer.test", ClientID: "nitipan", RedirectURL: "https://broker.test/callback"}
 	})
 
-	m := f.machine("m")
+	m = f.machine("m")
 	m.start()
 	m.labelOf(t)
 
@@ -486,6 +486,42 @@ func TestWhoAmIReachesTheBroker(t *testing.T) {
 
 			if want := test.Want(label); res.Stdout != want {
 				t.Errorf("stdout = %q, want %q", res.Stdout, want)
+			}
+		})
+	}
+}
+
+// TestWhoAmIPrintsJSONWhenAsked proves `who am-i --json` prints a schema 1.0 object. It catches a command
+// that registers the flag and still prints the text line, which a script parsing JSON cannot read. An
+// unbound node must keep the key with an empty value, so the shape stays stable.
+func TestWhoAmIPrintsJSONWhenAsked(t *testing.T) {
+	for _, test := range whoAmITextTests {
+		t.Run(test.Name, func(t *testing.T) {
+			m, label := whoAmIMachine(t, test.Bound)
+
+			res := m.w.run(m.w.terminal(72), "who", "am-i", "--json")
+			wantStatus(t, res, exitcode.OK)
+
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(res.Stdout), &raw); err != nil {
+				t.Fatalf("decoding %q: %v", res.Stdout, err)
+			}
+
+			if _, ok := raw["user_label"]; !ok {
+				t.Errorf("user_label is missing from %q", res.Stdout)
+			}
+
+			var out whoAmIOutput
+			if err := json.Unmarshal([]byte(res.Stdout), &out); err != nil {
+				t.Fatalf("decoding %q: %v", res.Stdout, err)
+			}
+
+			if out.SchemaVersion != WhoSchemaVersion {
+				t.Errorf("schema version = %q, want %q", out.SchemaVersion, WhoSchemaVersion)
+			}
+
+			if out.UserLabel != label {
+				t.Errorf("user label = %q, want %q", out.UserLabel, label)
 			}
 		})
 	}

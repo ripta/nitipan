@@ -155,7 +155,10 @@ Each entry in `found` has these fields:
 - `why`, what the broker could not judge for a mirror in the `unknown` state
 - `expires_ms`, the expiry in milliseconds since the epoch
 
-`who am-i` accepts `--json` but prints the same text either way.
+`nitipan who am-i --json` prints one document at schema version 1.0. It has these fields:
+
+- `schema_version`, `"1.0"`
+- `user_label`, the label of the user this node is bound to. It is an empty string when the node is bound to nobody
 
 ## Record versions
 

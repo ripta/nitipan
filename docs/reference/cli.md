@@ -97,7 +97,7 @@ Asks the broker who holds leases. Each subcommand needs the node and a broker.
 | `who is <name>` | list every holder whose agent name or handle is exactly the name |
 | `who am-i` | print this node's user label |
 
-`who holds` and `who is` take `--json`. `who am-i` accepts `--json` too, but it prints the same text either way.
+Each `who` command takes `--json`.
 
 ## Sub-leases
 

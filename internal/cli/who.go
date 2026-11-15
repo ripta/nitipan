@@ -37,6 +37,12 @@ type whoOutput struct {
 	Duplicate     bool         `json:"duplicate,omitempty"`
 }
 
+// whoAmIOutput is the JSON that who am-i prints. The user label is empty for a node bound to nobody.
+type whoAmIOutput struct {
+	SchemaVersion string `json:"schema_version"`
+	UserLabel     string `json:"user_label"`
+}
+
 func (a *app) whoCmd() *cobra.Command {
 	who := &cobra.Command{
 		Use:   "who",
@@ -316,6 +322,13 @@ func (a *app) runWhoAmI(cmd *cobra.Command) error {
 	var ans wire.WhoAmIAnswer
 	if err := json.Unmarshal(rep.Body, &ans); err != nil {
 		return fmt.Errorf("decoding the whoami answer: %w", err)
+	}
+
+	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+		enc := json.NewEncoder(cmd.OutOrStdout())
+		enc.SetIndent("", "  ")
+
+		return enc.Encode(whoAmIOutput{SchemaVersion: WhoSchemaVersion, UserLabel: ans.UserLabel})
 	}
 
 	if ans.UserLabel == "" {
