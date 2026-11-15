@@ -138,12 +138,26 @@ type Forwarder func(ctx context.Context, req handoff.Request) (json.RawMessage, 
 
 // Node is a running node.
 type Node struct {
-	opts   Options
-	cl     *client
-	https  bool
-	term   time.Duration
-	keep   time.Duration
-	label  atomic.Value
+	opts  Options
+	cl    *client
+	https bool
+	term  time.Duration
+	keep  time.Duration
+	label atomic.Value
+
+	// actingFor is true once the broker said at registration that it reads explicit acting_for. A
+	// broker that predates it ignores the field and replaces the value, so a claim for another user
+	// would count in the wrong scope.
+	actingFor atomic.Bool
+
+	// mailReplies is true once the broker said at registration that it reads a mail send's reply_to. A
+	// broker that predates it would carry a reply as a first message.
+	mailReplies atomic.Bool
+
+	// reportDue is true from registration until the complete mail report reaches the broker. The broker
+	// holds mail from another user until then, so the node keeps trying.
+	reportDue atomic.Bool
+
 	seen   map[string]struct{}
 	seenQ  []string
 	forwrd map[string]Forwarder
@@ -167,12 +181,7 @@ func New(opts Options) (*Node, error) {
 		return nil, ErrNoMachineID
 	}
 
-	base, https, err := brokerURL(opts.Config)
-	if err != nil {
-		return nil, err
-	}
-
-	tr, err := newTransport(opts.Config, !https)
+	base, https, httpClient, err := brokerHTTP(opts.Config)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +224,7 @@ func New(opts Options) (*Node, error) {
 		ringAfter: map[string]time.Time{},
 		cl: &client{
 			base:      base,
-			http:      newHTTPClient(tr),
+			http:      httpClient,
 			machineID: opts.Machine.ID,
 			uid:       opts.UID,
 		},
@@ -230,6 +239,10 @@ func New(opts Options) (*Node, error) {
 	}
 
 	if !https {
+		if err := refusePlain(opts.StateDir); err != nil {
+			return nil, err
+		}
+
 		n.warn("the broker at " + opts.Config.Broker + " is reached over plain HTTP. Anyone on the path can read and change leases. " +
 			"Give the broker a certificate.")
 	}
@@ -264,7 +277,7 @@ func (n *Node) Run(ctx context.Context) error {
 
 	defer lock.Close()
 
-	key, err := loadKey(dir.Path())
+	key, err := LoadKey(dir.Path())
 	if err != nil {
 		return err
 	}
@@ -337,42 +350,12 @@ func (n *Node) reconnectLoop(ctx context.Context, exe fingerprint) error {
 // session registers, opens the stream, and then sends snapshots until the stream or the executable
 // goes away.
 func (n *Node) session(ctx context.Context, exe fingerprint) error {
-	reg, err := n.register(ctx)
+	sctx, streamErr, cleanup, err := n.setupSession(ctx)
 	if err != nil {
 		return err
 	}
 
-	n.label.Store(reg.Label)
-	n.term = time.Duration(reg.TermMillis) * time.Millisecond
-	n.keep = time.Duration(reg.KeepaliveMillis) * time.Millisecond
-
-	n.book.setConnected(true)
-
-	// What the node stored and read goes first, so the broker resends only what it did not store.
-	n.reportMail(ctx)
-
-	defer func() {
-		n.book.setConnected(false)
-		n.publishDeadlinesNow()
-	}()
-
-	sctx, cancel := context.WithCancel(ctx)
-	exited := make(chan struct{})
-
-	// The stream goroutine shares the node's dedupe state and keepalive. The next session must not
-	// start until it is gone.
-	defer func() {
-		cancel()
-		<-exited
-	}()
-
-	streamErr := make(chan error, 1)
-
-	go func() {
-		defer close(exited)
-
-		streamErr <- n.stream(sctx)
-	}()
+	defer cleanup()
 
 	changes, regChanges, err := n.watchState(sctx)
 	if err != nil {
@@ -385,6 +368,53 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 
 	n.maintain(sctx)
 
+	return n.runEventLoop(ctx, sctx, exe, streamErr, changes, regChanges)
+}
+
+func (n *Node) setupSession(ctx context.Context) (sctx context.Context, streamErr <-chan error, cleanup func(), err error) {
+	reg, err := n.register(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	n.actingFor.Store(reg.ActingForExplicit)
+	n.mailReplies.Store(reg.MailReplies)
+	n.label.Store(reg.Label)
+	n.term = time.Duration(reg.TermMillis) * time.Millisecond
+	n.keep = time.Duration(reg.KeepaliveMillis) * time.Millisecond
+
+	if reg.CrossUser {
+		if err := RecordCrossUserEnabled(n.opts.StateDir); err != nil {
+			return nil, nil, nil, fmt.Errorf("recording cross-user flag: %w", err)
+		}
+	}
+
+	n.book.setConnected(true)
+	n.reportDue.Store(true)
+	n.retryReport(ctx)
+
+	var cancel context.CancelFunc
+	sctx, cancel = context.WithCancel(ctx)
+	exited := make(chan struct{})
+	errChan := make(chan error, 1)
+	streamErr = errChan
+
+	go func() {
+		defer close(exited)
+		errChan <- n.stream(sctx)
+	}()
+
+	cleanup = func() {
+		cancel()
+		<-exited
+		n.book.setConnected(false)
+		n.publishDeadlinesNow()
+	}
+
+	return
+}
+
+func (n *Node) runEventLoop(ctx, sctx context.Context, exe fingerprint, streamErr <-chan error, changes, regChanges <-chan struct{}) error {
 	lastTick := n.clockNow()
 
 	beat := n.opts.Heartbeat
@@ -450,6 +480,7 @@ func (n *Node) session(ctx context.Context, exe fingerprint) error {
 			n.ringMail()
 			n.reportReads(sctx)
 		case <-mailTick.C:
+			n.retryReport(sctx)
 			n.serviceMail(sctx)
 		case <-execTick.C:
 			if n.executableChanged(exe) {

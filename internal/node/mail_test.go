@@ -121,6 +121,17 @@ func (mp *mailPair) approve(t *testing.T, run *running, stateDir string) {
 	}
 }
 
+// streamLive reports whether the broker holds a live stream for the node.
+func (mp *mailPair) streamLive(key broker.NodeKey) bool {
+	for _, v := range mp.r.b.Nodes() {
+		if v.Key == key {
+			return v.StreamLive
+		}
+	}
+
+	return false
+}
+
 func (mp *mailPair) register(t *testing.T, stateDir string, m record.Machine, pid int, start record.ProcessStart, session, socket string) mailbox.Registration {
 	t.Helper()
 

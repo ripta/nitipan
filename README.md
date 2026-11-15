@@ -373,6 +373,228 @@ and `mail status` reports missing or stale presence. Restart the service after r
 on one shared host keep separate mailboxes and ring ledgers. Every wake path only signals; the session runs
 `nitipan mail read` to consume its mail.
 
+## Broker authentication
+
+The broker authenticates users whose machines call it. Each node keeps a pinned bearer key. The broker binds each key's
+label to one user. The broker owner is the user approved on the broker host. Other users sign in through OIDC on a page
+the broker serves.
+
+### Broker configuration
+
+The broker config names an OIDC identity provider in its `oidc` block:
+
+```json
+{
+  "store": "...",
+  "listen": "...",
+  "oidc": {
+    "issuer": "https://idp.example.com",
+    "client_id": "nitipan-broker",
+    "client_secret": "...",
+    "redirect_url": "https://broker.example.com/callback",
+    "ca_file": "/path/to/ca.pem"
+  }
+}
+```
+
+The `issuer` and `redirect_url` must be `https`. Loopback addresses are exempt for tests. The broker refuses to start
+with a `redirect_url` that is missing or plain HTTP off loopback. The `client_secret` lives
+only in the broker config on the broker host. No node or agent sandbox reaches it. The `ca_file` is optional. Use it
+for a self-hosted issuer with a private CA.
+
+The broker fetches the provider's discovery document on the first sign-in, not at start. A provider that is down when
+the broker starts leaves leases and mail working, and every existing binding keeps working. The sign-in page answers
+503 until the provider can be reached, so only new bindings, delegations, and grants wait.
+
+### Upgrading to store 2.0
+
+On upgrade, the broker store becomes version 2.0. Every pinned label is bound to the broker owner in one step. The
+broker keeps the previous store file beside it for rollback. After you confirm the upgrade with
+`nitipan broker confirm-upgrade` on the broker host, a rollback is impossible. The command deletes the kept file.
+
+### Binding a coworker's machine
+
+A coworker whose machine needs broker access is admitted on the broker host, then binds their label through the
+broker's sign-in page.
+
+On the broker host, list pending admissions with `nitipan broker admissions`, then admit the user with
+`nitipan broker admit <issuer> <sub> <email>`. The issuer and `sub` come from the identity provider. The broker maps
+them to a broker-assigned user ID.
+
+On the coworker's machine, run `nitipan node pair`. It prints the machine's label, its key's fingerprint, and a
+four-word pairing code. The code expires in 10 minutes. The coworker opens the broker's sign-in page, signs in with their identity provider,
+and enters the label and the pairing code on the form. The binding pins the key that sent the code and discards the
+label's other pending keys. Five wrong codes from one signed-in user for one label lock that user out of that label until the code
+expires.
+
+After a machine is forgotten with `nitipan broker forget <label>`, run `nitipan node rekey` on that machine to
+generate a new key. The label stays the same. Then approve the new key on the broker host with `nitipan broker approve
+<label> <fingerprint>`, or run `nitipan node pair` and bind the label it prints through the sign-in page with the
+fresh code. The old key stays refused, even when it registers again.
+
+### Broker-host commands
+
+These commands run on the broker host only. No node or network path reaches them.
+
+```
+nitipan broker pending                         # list unapproved labels with fingerprints
+nitipan broker approve <label> <fingerprint>   # pin the key, bind the label to the broker owner
+nitipan broker forget <label>                  # unpin a label whose machine was reinstalled
+nitipan broker confirm-upgrade                 # delete the kept v1 file, making rollback impossible
+nitipan broker admissions                      # list people who signed in but are not admitted
+nitipan broker admit <issuer> <sub> <email>    # admit a user by their issuer plus sub, and print their user ID
+nitipan broker link <issuer> <sub> <user-id>   # map a new issuer plus sub to an existing user
+nitipan broker bindings                        # list each user's bound labels with last-seen times
+nitipan broker revoke-user <user-id>           # forget a user's labels, end their leases, and print what it removed
+nitipan broker cross-user <true|false>         # turn cross-user features on or off
+nitipan broker break <lease-id>                # end any broker lease as the broker owner
+```
+
+The `approve` command binds the label to the broker owner when run on the broker host. A coworker binds through the
+sign-in page instead.
+
+### Turning cross-user features on
+
+Cross-user features stay off until the broker owner turns them on with `nitipan broker cross-user true` on the broker
+host. The command refuses when:
+
+- No OIDC provider is configured in the broker config. Configure an `oidc` block and retry.
+- The broker's listener is neither on a loopback address nor serving TLS itself. Set `cert_file` and `key_file` in the
+  broker config to serve TLS, or listen on `127.0.0.1` or `::1`. An ingress on another host may terminate TLS and
+  re-encrypt to the broker. An ingress that speaks plain HTTP to the broker over a private hop is not enough.
+- Any label's current key, or its pinned key, reported plain HTTP to the broker. Once a node sends its key over plain
+  HTTP, that key may have been read on the LAN. The mark stays with the key, so a later HTTPS report does not clear it.
+  Forget each such label with `nitipan broker forget <label>` on the broker host, then have the node run `nitipan
+  node rekey` and approve its new key.
+- Any label's current key, or its pinned key, never reported its scheme. Every key from store 1.x is one. Forget the
+  label, upgrade the node's nitipan binary, run `nitipan node rekey`, and approve the new key.
+
+A forgotten label has no current key, so it never blocks the command.
+
+The broker always has an owner, so the owner never blocks the command. The broker assigns its owner when it first
+opens its store, and an upgrade from store 1.x keeps the owner its migration assigned. A store whose owner record went
+missing gets it back under the same user ID when the broker opens it, so every label bound to the owner stays bound.
+
+Once cross-user features are on, an unbound label is refused for leases and mail. A node records the flag and never
+sends its key over plain HTTP again, even when a later response omits the flag.
+
+While cross-user features are off, the broker serves only the owner's labels and unbound labels. A label bound to any
+other user is refused for leases, discovery, break, and mail, with an error that names `nitipan broker cross-user
+true`. A coworker can still bind their machine on the sign-in page while the features are off, so setup can happen
+first. `nitipan broker cross-user false` turns them off again. The coworker's machines are then refused, and their
+bindings, leases, delegations, and grants stay as they are for when the features come back on.
+
+### Checking your user label
+
+`nitipan who am-i` prints the caller's user label through the node. The user label is what `acting_for`, cross-user
+mail, delegations, and grants use to name users.
+
+### Lease scopes across users
+
+Each bound user has their own `user` scope. Two users' `user` leases on overlapping names do not conflict. Two labels
+of one user do. Every bound user shares one `shared` scope. A `user` lease and a `shared` lease on overlapping names
+conflict, whichever user holds each. An overlap report never shows another user's mirrored `machine` lease, at any
+reach.
+
+While cross-user features are off, the broker runs one scope, as before. A label nobody approved counts in the broker
+owner's scope then, and its claims for another user are refused.
+
+### Delegating to a shared agent
+
+A shared agent serves several users. It claims in a user's scope only under that user's standing delegation to the
+agent's label. Grant or revoke a delegation on the broker's sign-in page with "Grant Delegation" or "Revoke
+Delegation". Each action needs its own sign-in. Type the agent's label on the form that follows. No request through a
+node can grant or revoke a delegation.
+
+The agent claims for a user with `nitipan acquire --acting-for <user label>`. The user tells the agent their user
+label, which `nitipan who am-i` prints. The lease then counts in that user's `user` scope only. A claim for another
+user without that user's delegation is refused, and the error names the sign-in page. A node from before this feature
+answers such a claim with "node too old", and nitipan writes no request. A node whose broker is from before this
+feature answers "broker too old", and forwards nothing.
+
+A claim without `--acting-for`, or from an older nitipan, acts as the label's own bound user. The broker replaces any
+other value it carries.
+
+Revoking a delegation ends every lease the agent's label holds for that user. The agent's node writes the holder a
+notice. An ended lease is never revived. `nitipan broker revoke-user` ends every lease held for that user, and every
+lease the user's labels hold for others, the same way.
+
+### Releasing and breaking across users
+
+A lease is a user's own when its holder's label is bound to that user, or when its `acting_for` names that user. Any
+of the user's labels may release or `break --force` it. That includes a lease a shared agent holds for the user.
+Name the lease by its ID: `nitipan release <lease-id>`. A release by a label other than the holder's ends the lease,
+and the holder's node writes its holder a notice.
+
+A user may not `break --force` a coworker's lease. A coworker's live `shared` lease ends when its holder releases it,
+when its term runs out, on a death report, or by a break from its own user. The broker owner may end any lease with
+`nitipan broker break <lease-id>` on the broker host. The holder's node then writes a notice that names the broker
+owner by user label, as in "broker owner <user label>". The refusal of a coworker's break names each of these ways forward.
+
+### Discovery across users
+
+`nitipan who holds`, `nitipan who is`, and `nitipan list` show every bound user's `shared` leases. A coworker's
+`user` leases and mirrored `machine` leases show only to that coworker, and to labels holding their delegation. A
+lookup by holder name across users matches only `shared` leases. A lease whose owner the broker cannot resolve shows
+only when it is `shared`.
+
+While cross-user features are off, discovery shows every lease.
+
+### A claim refused by a lease you cannot see
+
+A coworker's hidden `user` lease can refuse your `shared` claim. The refusal then names no holder, path, node, or
+user. It says the name is held at `user` reach by another user. Wait for that lease to end, or ask the broker owner.
+Leases you can see are still listed in full. The refusal is an ordinary message, so an older nitipan prints it the
+same way.
+
+The coworker's node writes them one notice per lease per refused user. It names only their own lease and your user
+label, never the name you asked for. The notice is delivered on the holder's next nitipan call. It never rings, wakes
+no session, and prints nothing from a turn hook. The broker records each notice in the lease, so a broker restart
+sends no second one.
+
+### Mail across users
+
+Mail between your own machines works as before. Mail to another user's session needs that user's grant, and cross-user
+features on. Grant or revoke mail from a coworker on the broker's sign-in page with "Grant Mail From a User" or "Revoke
+Mail From a User". Each action needs its own sign-in. Type the coworker's user label on the form that follows. No
+request through a node can grant or revoke one. Mail to a shared agent follows the grants of the agent's own user, not
+the users it acts for.
+
+Even under a grant, a coworker's first message reaches only a session of yours that holds a live or lapsed `shared`
+lease. A session you never made discoverable cannot be reached. Otherwise the send is refused, and the error says why.
+
+The recipient answers with `nitipan mail send --reply-to <message-id> <sender address> [message]`. A reply goes from
+the address that received the message to that message's sender. It needs no lease on either side, so a requestor
+holding no lease still gets its answer. A reply is accepted for 7 days after the message it answers was read, and
+refused after that. Every reply rides the grant that admitted the conversation's first message. An older nitipan
+cannot send a reply. A node from before replies answers "node too old", and a broker from before them gets "broker too
+old".
+
+The broker checks the grant and the reach again before it delivers. A message bounces back to its sender with "sender
+no longer allowed" once the grant was revoked. That covers every later message of the conversation, replies included.
+A first message bounces with "recipient holds no `shared` lease" once the lease ended. A reconnecting node reports
+what it stored and read before the broker re-checks anything, so no message is both read and bounced. A recipient node
+too old for mail across users gets none. The sender is told "recipient node too old", and mail already queued for it
+bounces. A sender node that old is refused at send.
+
+`nitipan mail read` frames such mail with the sender's user outside the body:
+
+```
+=== message <id> ===
+from: <mail name>@<label> (another user's machine, NOT one of yours)
+from user: <user label> (stamped by the broker)
+reply with: nitipan mail send --reply-to <id> <mail name>@<label>
+```
+
+It never carries the verified mark, which means one of your own machines sent the mail. An older nitipan shows it as
+not verified, never as yours.
+
+### Running the broker safely
+
+Run the broker as an OS user, or on a host, where no agent session runs. The broker-host commands act on the broker
+directly as its OS user. An agent session running as that OS user on that host could run them and approve its own
+machine.
+
 ## Codex and opencode
 
 Run `nitipan setup codex` or `nitipan setup opencode` to print what each agent needs. Neither command edits a settings

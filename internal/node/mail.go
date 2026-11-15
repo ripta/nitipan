@@ -162,7 +162,7 @@ func (n *Node) storeMail(eventKind string, m wire.MailEvent) (refusal string, er
 
 	err = mailbox.Store(root, mailbox.Message{
 		ID: m.ID, Kind: kind, ToSession: m.ToSession, ToAddress: m.ToAddress, Sender: m.Sender, SenderVerified: m.SenderVerified,
-		Body: m.Body, Reason: m.Reason, Orig: m.Orig, BodyDropped: m.BodyDropped, StoredAt: n.opts.Now().UTC(),
+		SenderUser: m.SenderUser, Body: m.Body, Reason: m.Reason, Orig: m.Orig, BodyDropped: m.BodyDropped, StoredAt: n.opts.Now().UTC(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("storing mail %s: %w", m.ID, err)
@@ -223,21 +223,37 @@ func (n *Node) handleStage(ev wire.Event) error {
 	return err
 }
 
-// reportMail tells the broker what this node stored and read. A reconnecting node sends it first, so
-// the broker resends only what the node did not store.
-func (n *Node) reportMail(ctx context.Context) {
-	if !n.https {
+// retryReport sends the complete mail report while one is due. A report that fails is tried again on
+// the slow mail tick, and the broker holds mail from another user until one arrives.
+func (n *Node) retryReport(ctx context.Context) {
+	if !n.reportDue.Load() {
 		return
 	}
 
+	if err := n.reportMail(ctx); err != nil {
+		n.warn(err.Error())
+
+		return
+	}
+
+	n.reportDue.Store(false)
+}
+
+// reportMail tells the broker what this node stored and read. A reconnecting node sends it first, so
+// the broker resends only what the node did not store. It is marked complete and goes even when the
+// node holds nothing, since the broker re-checks mail from another user, and may bounce it, only after
+// it. So no message the node stored or read is ever bounced.
+func (n *Node) reportMail(ctx context.Context) error {
+	if !n.https {
+		return nil
+	}
+
 	root := n.opts.StateDir
-	rep := wire.MailReport{Version: wire.Current}
+	rep := wire.MailReport{Version: wire.Current, Complete: true}
 
 	accepted, err := mailbox.AcceptedAll(root)
 	if err != nil {
-		n.warn(fmt.Sprintf("reading the mail ledger: %v", err))
-
-		return
+		return fmt.Errorf("reading the mail ledger: %w", err)
 	}
 
 	for id, a := range accepted {
@@ -261,11 +277,12 @@ func (n *Node) reportMail(ctx context.Context) {
 
 	rep.Stored, rep.Read = uniq(rep.Stored), uniq(rep.Read)
 
-	if len(rep.Stored) == 0 {
-		return
+	err = n.sendReport(ctx, rep, reads)
+	if err == nil || errors.Is(err, ErrBrokerTooOld) {
+		return nil
 	}
 
-	n.sendReport(ctx, rep, reads)
+	return fmt.Errorf("reporting mail to the broker: %w", err)
 }
 
 func uniq(ids []string) []string {
@@ -275,16 +292,9 @@ func uniq(ids []string) []string {
 }
 
 // sendReport posts a report and, once the broker has it, settles the read markers it carried.
-func (n *Node) sendReport(ctx context.Context, rep wire.MailReport, reads []string) {
-	err := n.cl.call(ctx, wire.PathMailReport, rep, nil)
-	if errors.Is(err, ErrBrokerTooOld) {
-		return
-	}
-
-	if err != nil {
-		n.warn(fmt.Sprintf("reporting mail to the broker: %v", err))
-
-		return
+func (n *Node) sendReport(ctx context.Context, rep wire.MailReport, reads []string) error {
+	if err := n.cl.call(ctx, wire.PathMailReport, rep, nil); err != nil {
+		return err
 	}
 
 	for _, id := range reads {
@@ -298,6 +308,8 @@ func (n *Node) sendReport(ctx context.Context, rep wire.MailReport, reads []stri
 
 		mailbox.ClearRead(n.opts.StateDir, id)
 	}
+
+	return nil
 }
 
 // reportReads tells the broker which messages readers consumed. It lists one directory, so it runs on
@@ -308,8 +320,13 @@ func (n *Node) reportReads(ctx context.Context) {
 	}
 
 	reads, _ := mailbox.PendingReads(n.opts.StateDir)
-	if len(reads) > 0 {
-		n.sendReport(ctx, wire.MailReport{Version: wire.Current, Stored: reads, Read: reads}, reads)
+	if len(reads) == 0 {
+		return
+	}
+
+	err := n.sendReport(ctx, wire.MailReport{Version: wire.Current, Stored: reads, Read: reads}, reads)
+	if err != nil && !errors.Is(err, ErrBrokerTooOld) {
+		n.warn(fmt.Sprintf("reporting mail to the broker: %v", err))
 	}
 }
 
@@ -618,15 +635,27 @@ func (n *Node) forwardMailSend(ctx context.Context, req handoff.Request) (json.R
 		return nil, err
 	}
 
+	if body.ReplyTo != "" && !n.mailReplies.Load() {
+		return nil, fmt.Errorf("the broker predates replies to mail, and would carry this one as a first message. "+
+			"Upgrade the broker: %w", ErrBrokerTooOld)
+	}
+
 	// Publish the sender's registration first. The broker sends only for a session the node reported.
 	if err := n.sendSnapshot(ctx); err != nil {
 		return nil, err
+	}
+
+	// A reply answers a message that was read. Report reads first, so a reply right after a read finds
+	// the broker already knowing it.
+	if body.ReplyTo != "" {
+		n.reportReads(ctx)
 	}
 
 	var out wire.MailSent
 
 	err := n.cl.call(ctx, wire.PathMailSend, wire.MailSend{
 		Version: wire.Current, ID: req.ID, To: body.To, Body: body.Body, FromAgent: body.FromAgent, FromSession: body.FromSession,
+		ReplyTo: body.ReplyTo,
 	}, &out)
 	if err != nil {
 		return nil, err

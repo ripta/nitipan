@@ -60,8 +60,9 @@ func newHarness(t *testing.T, mutate func(*Config)) *harness {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "broker.json")
+	wall := &wallClock{t: wallStart}
 
-	store, err := OpenStore(path, StoreOptions{Volume: localVolume{}})
+	store, err := OpenStore(path, StoreOptions{Volume: localVolume{}, Now: wall.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,6 @@ func newHarness(t *testing.T, mutate func(*Config)) *harness {
 	t.Cleanup(func() { _ = store.Close() })
 
 	clock := monoclock.NewFake(time.Hour)
-	wall := &wallClock{t: wallStart}
 	cfg := Config{Store: store, Term: testTerm, Keepalive: 20 * time.Millisecond, Clock: clock, Now: wall.Now, Version: "test"}
 
 	if mutate != nil {
@@ -140,13 +140,32 @@ func (h *harness) register(n nodeID) *wire.Registered {
 	return got
 }
 
-// tryRegister registers a node and returns the broker's refusal, if any.
+// tryRegister registers a node that reached the broker over HTTPS, and returns the broker's refusal, if
+// any.
 func (h *harness) tryRegister(n nodeID) (*wire.Registered, *wire.Error) {
+	h.t.Helper()
+
+	return h.tryRegisterOver(n, true)
+}
+
+// registerOver registers a node that reports whether it reached the broker over HTTPS. It must succeed.
+func (h *harness) registerOver(n nodeID, https bool) *wire.Registered {
+	h.t.Helper()
+
+	got, e := h.tryRegisterOver(n, https)
+	if e != nil {
+		h.t.Fatalf("register %+v: %v", n, e)
+	}
+
+	return got
+}
+
+func (h *harness) tryRegisterOver(n nodeID, https bool) (*wire.Registered, *wire.Error) {
 	h.t.Helper()
 
 	resp := h.do(http.MethodPost, wire.PathRegister, n, wire.Register{
 		Version: wire.Current, MachineID: n.Machine, UID: n.UID, User: "u" + strconv.Itoa(n.UID), Host: "host-" + n.Machine,
-		NodeVersion: "test", HTTPS: false,
+		NodeVersion: "test", HTTPS: https,
 	})
 
 	if resp.StatusCode == http.StatusOK {
@@ -211,7 +230,7 @@ func (h *harness) restart(restore []byte) {
 		}
 	}
 
-	store, err := OpenStore(h.path, StoreOptions{Volume: localVolume{}})
+	store, err := OpenStore(h.path, StoreOptions{Volume: localVolume{}, Now: h.wall.Now})
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -225,6 +244,47 @@ func (h *harness) restart(restore []byte) {
 	h.t.Cleanup(h.srv.Close)
 }
 
+// admin sends one request to the admin socket's handler, as a broker-host command does.
+func (h *harness) admin(method, path string, body any) *httptest.ResponseRecorder {
+	h.t.Helper()
+
+	var rd io.Reader = http.NoBody
+
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+
+		rd = bytes.NewReader(data)
+	}
+
+	w := httptest.NewRecorder()
+	h.b.AdminHandler().ServeHTTP(w, httptest.NewRequest(method, path, rd))
+
+	return w
+}
+
+// pair sends the hash of a pairing code from node n, as nitipan node pair does. It returns the status and
+// the label the broker says the code binds.
+func (h *harness) pair(n nodeID, code string) (status int, label string) {
+	h.t.Helper()
+
+	resp := h.do(http.MethodPost, wire.PathPair, n, map[string]any{"version": wire.Current, "pairing_hash": HashPairingCode(code)})
+
+	var ans struct {
+		Label string `json:"label"`
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&ans); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+
+	return resp.StatusCode, ans.Label
+}
+
 // data returns the store's current state. The broker swaps whole copies in under its lock, so a copy
 // read here is never written again.
 func (h *harness) data() *Data {
@@ -232,4 +292,36 @@ func (h *harness) data() *Data {
 	defer h.b.mu.Unlock()
 
 	return h.store.Data()
+}
+
+// createIssuer is the issuer tests admit users under when the issuer plays no part in the test.
+const createIssuer = "https://create.test"
+
+// setupPairingCode is the code bindNode pairs with. Tests that are about the code itself send their own.
+const setupPairingCode = "setup-pairing-code-words"
+
+// bindNode binds the label of the registered node n to the user userID, as the user's bind on the sign-in
+// page does: n sends a pairing code through the pair route, and the signed-in user submits it. It is setup
+// for tests that need a bound label, so it calls the page's bind directly rather than driving the page. It
+// returns the label.
+func (h *harness) bindNode(t *testing.T, n nodeID, userID string) string {
+	t.Helper()
+
+	status, label := h.pair(n, setupPairingCode)
+	if status != http.StatusOK {
+		t.Fatalf("pairing %s: status %d", n.Machine, status)
+	}
+
+	u, ok := h.data().Users[userID]
+	if !ok {
+		t.Fatalf("binding %s: no user %q", label, userID)
+	}
+
+	h.signIn(t, u)
+
+	if _, err := h.b.BindPaired(testDelegationIssuer, u.ID, label, setupPairingCode, h.wall.Now()); err != nil {
+		t.Fatalf("binding %s to %s: %v", label, u.UserLabel, err)
+	}
+
+	return label
 }

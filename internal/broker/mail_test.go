@@ -389,7 +389,7 @@ func TestApproveByFingerprintPinsThatKeyAndDiscardsTheOthers(t *testing.T) {
 
 	want := wire.Fingerprint(wire.KeyHash(alice.Key))
 
-	if pinned, err := h.b.Approve(label, strings.ToUpper(want)); err != nil || !pinned {
+	if ans, err := h.b.Approve(label, strings.ToUpper(want)); err != nil || !ans.Pinned {
 		t.Fatalf("approve by fingerprint: %v", err)
 	}
 
@@ -434,9 +434,9 @@ func TestAFloodOfFreshKeysCannotEvictTheRealKeyFromAnApprovalItNeverGets(t *test
 		t.Fatal("the real key registered while the hostile stream was live")
 	}
 
-	pinned, err := h.b.Approve(label, wire.Fingerprint(wire.KeyHash(real.Key)))
-	if err != nil || pinned {
-		t.Fatalf("approve of a key that never became pending = %v, %v, want it recorded as awaited", pinned, err)
+	ans, err := h.b.Approve(label, wire.Fingerprint(wire.KeyHash(real.Key)))
+	if err != nil || ans.Pinned {
+		t.Fatalf("approve of a key that never became pending = %+v, %v, want it recorded as awaited", ans, err)
 	}
 
 	if got := h.data().Pins[label]; got.PinnedHash != "" || got.Awaiting == "" {
@@ -825,9 +825,15 @@ func TestEveryStageOfAMessageCarriesAMonotonicRank(t *testing.T) {
 }
 
 func TestTheNetworkHandlerServesNoApprovalRoute(t *testing.T) {
-	h := newHarness(t, nil)
+	h := newCrossUserHarness(t)
 
-	for _, p := range []string{AdminPathPending, AdminPathApprove, AdminPathForget, "/v1/approve", "/v1/forget", "/v1/pending"} {
+	adminPaths := []string{
+		AdminPathPending, AdminPathApprove, AdminPathForget, AdminPathConfirmUpgrade, AdminPathAdmissions, AdminPathAdmit,
+		AdminPathLink, AdminPathBindings, AdminPathRevokeUser, AdminPathCrossUser, AdminPathBreak,
+		"/v1/approve", "/v1/forget", "/v1/pending",
+	}
+
+	for _, p := range adminPaths {
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			resp := h.do(method, p, alice, map[string]string{"label": "x", "fingerprint": "y"})
 			if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
@@ -837,7 +843,7 @@ func TestTheNetworkHandlerServesNoApprovalRoute(t *testing.T) {
 	}
 }
 
-func TestAStore10ReadsUnder11AndAnOlderBrokerRefusesA11Store(t *testing.T) {
+func TestAStore10ReadsUnder20AndAnOlderBrokerRefusesA20Store(t *testing.T) {
 	dir, err := os.MkdirTemp("", "nitipan-store")
 	if err != nil {
 		t.Fatal(err)
@@ -854,9 +860,14 @@ func TestAStore10ReadsUnder11AndAnOlderBrokerRefusesA11Store(t *testing.T) {
 
 	_ = old.Close()
 
-	cur, err := OpenStore(path, StoreOptions{Volume: localVolume{}})
+	cur, err := OpenStore(path, StoreOptions{
+		Volume: localVolume{},
+		Migrations: map[int]Migration{
+			1: MigrateV1ToV2,
+		},
+	})
 	if err != nil {
-		t.Fatalf("a 1.1 broker could not read a 1.0 store: %v", err)
+		t.Fatalf("a 2.0 broker could not read a 1.0 store: %v", err)
 	}
 
 	if cur.Data().Mail == nil || cur.Data().Pins == nil {

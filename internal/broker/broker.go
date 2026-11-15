@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/space-armada/nitipan/internal/monoclock"
+	"github.com/space-armada/nitipan/internal/oidc"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
@@ -108,6 +109,15 @@ type Config struct {
 	// and nothing can then be approved.
 	AdminSocket string
 
+	// OIDCConfig configures the OIDC identity provider. When nil, only the broker owner can bind labels.
+	OIDCConfig *oidc.Config
+
+	// Listen is the broker's listen address, used to check whether cross-user features can be enabled.
+	Listen string
+
+	// TLS reports whether the broker serves with TLS.
+	TLS bool
+
 	KeyPolicy KeyPolicy
 	Logger    *slog.Logger
 }
@@ -117,6 +127,8 @@ type Broker struct {
 	cfg   Config
 	store *Store
 	boot  string
+
+	signInMgr *SignInManager
 
 	mu    sync.Mutex
 	nodes map[NodeKey]*nodeState
@@ -149,6 +161,23 @@ type nodeState struct {
 
 	// liveSessions is the set of session IDs the node's last snapshot reported as live.
 	liveSessions map[string]bool
+
+	// conn counts the node's registrations. A node registers, sends its complete mail report, and only
+	// then opens its stream, so a registration is one connection. A stream belongs to the registration it
+	// opened under, and a stream from an earlier one was left behind by the node.
+	conn int
+
+	// mailReported is true once the node's complete mail report arrived since it last registered. Mail
+	// from another user is re-checked and sent only after it, and only on a stream of that registration.
+	mailReported bool
+
+	// sentSinceReport holds the mail from another user sent to the node since it last registered.
+	//
+	// The broker sends such mail only after the complete report, so the report cannot say whether the
+	// node stored it. The re-check skips it until the node acks it or reports again on its next
+	// connection. A stream whose connection is gone, which the broker has not noticed yet, then cannot
+	// bounce mail the node may hold.
+	sentSinceReport map[string]bool
 }
 
 type queued struct {
@@ -163,6 +192,9 @@ type streamState struct {
 	// keyHash is the hash of the key the stream opened with. Mail goes only to a stream whose key is the
 	// one the label is pinned to, so a stream left over from an earlier key never receives it.
 	keyHash string
+
+	// conn is the node's registration count when the stream opened.
+	conn int
 }
 
 // New builds a broker over an opened store.
@@ -209,6 +241,17 @@ func New(cfg Config) *Broker {
 		boot:  hex.EncodeToString(boot[:]),
 		nodes: map[NodeKey]*nodeState{},
 		done:  make(chan struct{}),
+	}
+
+	// The client fetches the provider's discovery document on the first sign-in, so a provider that is down
+	// now delays only sign-ins. A config the client refuses, such as a plain-HTTP issuer, fails the broker.
+	if cfg.OIDCConfig != nil {
+		oidcClient, err := oidc.New(*cfg.OIDCConfig)
+		if err != nil {
+			b.fail(fmt.Errorf("initializing OIDC client: %w", err))
+		} else {
+			b.signInMgr = NewSignInManager(b, oidcClient)
+		}
 	}
 
 	if err := b.startGrants(); err != nil {
@@ -297,6 +340,7 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathSnapshot, b.authed(b.handleSnapshot))
 	mux.HandleFunc("POST "+wire.PathHeartbeat, b.authed(b.handleHeartbeat))
 	mux.HandleFunc("POST "+wire.PathPing, b.authed(b.handlePing))
+	mux.HandleFunc("POST "+wire.PathPair, b.handlePair)
 	mux.HandleFunc("POST "+wire.PathClaim, b.authed(b.handleClaim))
 	mux.HandleFunc("POST "+wire.PathRenew, b.authed(b.handleRenew))
 	mux.HandleFunc("POST "+wire.PathRelease, b.authed(b.handleRelease))
@@ -305,10 +349,26 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST "+wire.PathFence, b.authed(b.handleFence))
 	mux.HandleFunc("POST "+wire.PathWhoHolds, b.authed(b.handleWhoHolds))
 	mux.HandleFunc("POST "+wire.PathWhoIs, b.authed(b.handleWhoIs))
+	mux.HandleFunc("POST "+wire.PathWhoAmI, b.authed(b.handleWhoAmI))
 	mux.HandleFunc("POST "+wire.PathMailSend, b.authed(b.handleMailSend))
 	mux.HandleFunc("POST "+wire.PathMailAck, b.authed(b.handleMailAck))
 	mux.HandleFunc("POST "+wire.PathMailReport, b.authed(b.handleMailReport))
 	mux.HandleFunc("POST "+wire.PathMailStatus, b.authed(b.handleMailStatus))
+
+	if b.signInMgr != nil {
+		mux.HandleFunc("GET /signin", b.handleSignInPage)
+		mux.HandleFunc("POST /bind", b.handleBindLabel)
+		mux.HandleFunc("POST /grant", b.handleGrantDelegation)
+		mux.HandleFunc("POST /revoke", b.handleRevokeDelegation)
+		mux.HandleFunc("POST /mail-grant", b.handleStartMailGrant)
+		mux.HandleFunc("POST /mail-revoke", b.handleStartMailRevoke)
+		mux.HandleFunc("GET /callback", b.handleCallback)
+		mux.HandleFunc("POST /bind-submit", b.handleBindSubmit)
+		mux.HandleFunc("POST /grant-submit", b.handleGrantSubmit)
+		mux.HandleFunc("POST /revoke-submit", b.handleRevokeSubmit)
+		mux.HandleFunc("POST /mail-grant-submit", b.handleMailGrantSubmit)
+		mux.HandleFunc("POST /mail-revoke-submit", b.handleMailRevokeSubmit)
+	}
 
 	return mux
 }
@@ -357,16 +417,41 @@ func decodeBody(w http.ResponseWriter, r *http.Request, into any, version func()
 
 type nodeHandler func(w http.ResponseWriter, r *http.Request, key NodeKey)
 
+// unboundRefusal is what the broker tells a label nobody bound once cross-user features are on.
+const unboundRefusal = "this label is not bound to a user. Bind it on the broker host with 'nitipan broker approve', " +
+	"or on the broker's sign-in page with 'nitipan node pair' and the pairing code"
+
+// crossUserOffRefusal is what the broker tells a label bound to a user other than its owner while
+// cross-user features are off.
+const crossUserOffRefusal = "this label is bound to another user, and cross-user features are off on this broker. " +
+	"The broker owner turns them on with 'nitipan broker cross-user true' on the broker host"
+
+// nodeKeyOf reads the machine ID and uid a request names in its headers.
+func nodeKeyOf(r *http.Request) (NodeKey, bool) {
+	uid, err := strconv.Atoi(r.Header.Get(wire.HeaderUID))
+	machine := r.Header.Get(wire.HeaderMachine)
+
+	return NodeKey{MachineID: machine, UID: uid}, err == nil && machine != ""
+}
+
 // authed refuses a request unless its bearer key matches the key registered for the machine ID and
-// uid in its headers.
+// uid in its headers, and the label acts in a scope. See scopeRefusalLocked for which labels act in none.
 func (b *Broker) authed(next nodeHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		uid, err := strconv.Atoi(r.Header.Get(wire.HeaderUID))
-		machine := r.Header.Get(wire.HeaderMachine)
-		key := NodeKey{MachineID: machine, UID: uid}
+		key, ok := nodeKeyOf(r)
 
-		if err != nil || machine == "" || !b.checkKey(key, bearer(r)) {
+		if !ok || !b.checkKey(key, bearer(r)) {
 			writeErr(w, http.StatusUnauthorized, wire.CodeUnauthorized, "the instance key does not match the one registered for this node")
+
+			return
+		}
+
+		b.mu.Lock()
+		refusal := b.scopeRefusalLocked(b.store.Data().Nodes[key.String()].Label)
+		b.mu.Unlock()
+
+		if refusal != "" {
+			writeErr(w, http.StatusForbidden, wire.CodeForbidden, refusal)
 
 			return
 		}
@@ -432,7 +517,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// A key the user approved before it arrived pins on arrival, and replaces whatever key holds the label.
 	pin := b.store.Data().Pins[label]
-	awaited := pin.PinnedHash == "" && pin.Awaiting != "" && pin.Awaiting == wire.Fingerprint(hash)
+	awaited := pin.PinnedHash == "" && pin.Awaiting != "" && fingerprintMatches(hash, pin.Awaiting)
 
 	var err error
 
@@ -455,13 +540,56 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		ns.stream.cancel()
 	}
 
-	err = b.commit(func(d *Data) error {
+	if err := b.recordRegistrationLocked(req, label, hash, awaited); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, wire.CodeUnavailable, err.Error())
+
+		return
+	}
+
+	ns.user, ns.host = req.User, req.Host
+	ns.conn++
+	ns.mailReported = false
+	ns.sentSinceReport = nil
+	b.beat(ns)
+
+	b.cfg.Logger.Info("node registered", "label", label, "uid", req.UID, "node_version", req.NodeVersion, "https", req.HTTPS)
+
+	crossUserEnabled := b.store.Data().CrossUserEnabled
+
+	writeJSON(w, http.StatusOK, wire.Registered{
+		Version:         wire.Current,
+		Label:           label,
+		LabelVersion:    LabelDerivation,
+		BrokerVersion:   b.cfg.Version,
+		TermMillis:      b.cfg.Term.Milliseconds(),
+		KeepaliveMillis: b.cfg.Keepalive.Milliseconds(),
+		CrossUser:       crossUserEnabled,
+
+		ActingForExplicit: true,
+		MailReplies:       true,
+	})
+}
+
+// recordRegistrationLocked stores a node's registration under its label. An awaited key was approved on
+// the broker host, so it pins and binds to the owner in the same commit. A store whose owner record is
+// missing pins it alone.
+func (b *Broker) recordRegistrationLocked(req wire.Register, label, hash string, awaited bool) error {
+	nk := NodeKey{MachineID: req.MachineID, UID: req.UID}
+	owner, hasOwner := b.ownerLocked()
+
+	var (
+		next    *gstate
+		senders []string
+	)
+
+	if awaited && hasOwner {
+		next = b.g.clone()
+	}
+
+	err := b.commit(func(d *Data) error {
 		d.Nodes[nk.String()] = NodeRecord{KeyHash: hash, Label: label, MailCap: req.MailCapability, HTTPS: req.HTTPS}
 		notePending(d, label, hash, b.cfg.Now())
 
-		if awaited {
-			d.Pins[label] = PinRecord{PinnedHash: hash}
-		}
 		d.Labels[label] = LabelRecord{
 			MachineID:  req.MachineID,
 			UID:        req.UID,
@@ -471,27 +599,53 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 			LastSeen:   b.cfg.Now(),
 		}
 
+		noteScheme(d, hash, req.HTTPS)
+
+		switch {
+		case next != nil:
+			senders = b.bindInto(d, next, label, owner, hash, b.cfg.Now())
+
+			return next.encode(d)
+		case awaited:
+			d.Pins[label] = PinRecord{PinnedHash: hash}
+		}
+
 		return nil
 	})
 	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, wire.CodeUnavailable, err.Error())
-
-		return
+		return err
 	}
 
-	ns.user, ns.host = req.User, req.Host
-	b.beat(ns)
+	if next != nil {
+		b.g = next
+	}
 
-	b.cfg.Logger.Info("node registered", "label", label, "uid", req.UID, "node_version", req.NodeVersion, "https", req.HTTPS)
+	for _, l := range senders {
+		b.wakeSendersLocked(l)
+	}
 
-	writeJSON(w, http.StatusOK, wire.Registered{
-		Version:         wire.Current,
-		Label:           label,
-		LabelVersion:    LabelDerivation,
-		BrokerVersion:   b.cfg.Version,
-		TermMillis:      b.cfg.Term.Milliseconds(),
-		KeepaliveMillis: b.cfg.Keepalive.Milliseconds(),
-	})
+	return nil
+}
+
+// Schemes a key can be marked with in KeySchemes.
+const (
+	schemeHTTP       = "http"
+	schemeHTTPS      = "https"
+	schemeUnreported = "unreported"
+)
+
+// noteScheme records the scheme a key reported at registration. Only an https mark gives way, to http.
+// A key that once crossed plain HTTP, or came from a store before scheme reports, keeps its mark, since it
+// may have been read on a plain hop. It runs inside a commit.
+func noteScheme(d *Data, hash string, https bool) {
+	cur, seen := d.KeySchemes[hash]
+
+	switch {
+	case !seen && https:
+		d.KeySchemes[hash] = schemeHTTPS
+	case !https && (!seen || cur == schemeHTTPS):
+		d.KeySchemes[hash] = schemeHTTP
+	}
 }
 
 func sameKey(rec NodeRecord, hash string) bool {
@@ -585,6 +739,68 @@ func (b *Broker) handlePing(w http.ResponseWriter, r *http.Request, key NodeKey)
 	writeJSON(w, http.StatusOK, wire.Pong{Version: wire.Current, Label: label})
 }
 
+// handlePair stores the hash of a pairing code the node printed, tied to the key that sent it, and answers
+// with the label the code binds. A pending key sends it, which the label presented at registration and
+// nobody approved yet, so the route needs no binding. That is the state pairing exists to leave.
+func (b *Broker) handlePair(w http.ResponseWriter, r *http.Request) {
+	key, ok := nodeKeyOf(r)
+	hash := keyHash(bearer(r))
+
+	if !ok || bearer(r) == "" {
+		writeErr(w, http.StatusUnauthorized, wire.CodeUnauthorized, "pair with the node's key and its machine headers")
+
+		return
+	}
+
+	var req wire.Pair
+
+	if !decodeBody(w, r, &req, func() wire.Version { return req.Version }) {
+		return
+	}
+
+	if req.PairingHash == "" {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, "the pairing request carries no code hash")
+
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	rec, registered := b.store.Data().Nodes[key.String()]
+	pinned := b.store.Data().Pins[rec.Label].PinnedHash
+
+	switch {
+	case !registered:
+		writeErr(w, http.StatusUnauthorized, wire.CodeUnauthorized, "no node registered for this machine and user. Run the node, then pair again")
+
+		return
+	case pinned != "" && subtle.ConstantTimeCompare([]byte(pinned), []byte(hash)) == 1:
+		writeErr(w, http.StatusConflict, wire.CodeKeyConflict, fmt.Sprintf("label %s is already approved under this key. "+
+			"If its machine was reinstalled, run nitipan broker forget on the broker host first", rec.Label))
+
+		return
+	case !b.pendingKeyLocked(rec.Label, hash):
+		writeErr(w, http.StatusUnauthorized, wire.CodeUnauthorized, "this key is not waiting for approval under the node's label. "+
+			"Run the node so it registers the key, then pair again")
+
+		return
+	}
+
+	err := b.commit(func(d *Data) error {
+		d.PairingCodes[rec.Label] = PairingCodeRecord{Hash: req.PairingHash, KeyHash: hash, ExpiresAt: b.cfg.Now().Add(PairingCodeExpiry)}
+
+		return nil
+	})
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, wire.CodeUnavailable, err.Error())
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, wire.Paired{Version: wire.Current, Label: rec.Label})
+}
+
 func (b *Broker) handleStream(w http.ResponseWriter, r *http.Request, key NodeKey) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -605,6 +821,7 @@ func (b *Broker) handleStream(w http.ResponseWriter, r *http.Request, key NodeKe
 		ns.stream.cancel()
 	}
 
+	st.conn = ns.conn
 	ns.stream = st
 	b.beat(ns)
 
@@ -644,7 +861,7 @@ func (b *Broker) handleStream(w http.ResponseWriter, r *http.Request, key NodeKe
 			return
 		}
 
-		if err := b.flushMail(w, key, st.keyHash, sentMail); err != nil {
+		if err := b.flushMail(w, key, st, sentMail); err != nil {
 			return
 		}
 

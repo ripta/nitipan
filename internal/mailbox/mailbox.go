@@ -71,9 +71,14 @@ type Message struct {
 	ToAddress string `json:"to_address"`
 
 	// Sender is the <mail name>@<label> the broker stamped. SenderVerified is absent for an unverified
-	// sender, and a reader treats absent as unverified.
+	// sender, and a reader treats absent as unverified. It means one of the user's own machines sent it.
+	//
+	// SenderUser is the user label of the sender's user, which the broker stamps on mail from another
+	// user. Such mail never carries SenderVerified, so a reader that predates SenderUser shows it as
+	// unverified, never as the user's own.
 	Sender         string `json:"sender,omitempty"`
 	SenderVerified bool   `json:"sender_verified,omitempty"`
+	SenderUser     string `json:"sender_user,omitempty"`
 
 	Body string `json:"body"`
 

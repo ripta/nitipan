@@ -7,9 +7,17 @@ import (
 	"time"
 )
 
-// MailCapability is the mail protocol level this binary speaks. A node reports it at registration. A
-// node that reports none predates mail, and the broker never sends it a mail event kind.
-const MailCapability = 1
+// Mail protocol levels a node reports at registration. A node that reports none predates mail, and the
+// broker never sends it a mail event kind. MailCapabilityBasic carries mail between one user's machines.
+// MailCapabilityCrossUser also knows mail from another user: the sender-user field, the bounce reasons
+// for a grant or reach that lapsed, replies, and the reconnect report that comes before any re-check.
+const (
+	MailCapabilityBasic     = 1
+	MailCapabilityCrossUser = 2
+)
+
+// MailCapability is the mail protocol level this binary speaks.
+const MailCapability = MailCapabilityCrossUser
 
 // MaxMailBody is the largest message body, in bytes. The broker refuses a larger one at send, which
 // keeps queued and bounced mail small in the whole-file store.
@@ -56,6 +64,13 @@ const (
 	ReasonLabelState   = "the recipient's machine stayed unapproved or forgotten for 7 days"
 	ReasonForgotten    = "the recipient's machine was forgotten with the message stored but unread"
 	ReasonBadRecipient = "the recipient could not be resolved"
+	ReasonRebound      = "the recipient's machine was bound to a different user"
+
+	// ReasonNotAllowed and ReasonNoSharedLease bounce mail from another user that the broker re-checked
+	// before delivery. The grant that admitted its conversation was revoked, or a first message's
+	// recipient no longer holds a `shared` lease.
+	ReasonNotAllowed    = "sender no longer allowed"
+	ReasonNoSharedLease = "recipient holds no `shared` lease"
 )
 
 // Error codes the mail calls return, beside the codes in wire.go.
@@ -66,6 +81,14 @@ const (
 	CodeNotApproved   = "not_approved"
 	CodePlainHTTP     = "plain_http"
 	CodeNotMailable   = "not_mailable"
+
+	// CodeSenderTooOld refuses mail to another user from a node that does not know mail across users.
+	CodeSenderTooOld = "sender_node_too_old"
+
+	// CodeNotGranted refuses mail to another user that no grant admits: the recipient's user granted the
+	// sender's user nothing, a first message's recipient holds no `shared` lease, or a reply names no
+	// message it may answer.
+	CodeNotGranted = "not_granted"
 )
 
 // MailSession is one session ID a node holds a live or past registration for. The broker keeps every
@@ -87,6 +110,10 @@ type MailSend struct {
 	Body        string  `json:"body"`
 	FromAgent   string  `json:"from_agent"`
 	FromSession string  `json:"from_session"`
+
+	// ReplyTo names the message this one answers. A reply to mail from another user rides the grant of
+	// that message's conversation, and needs no `shared` lease on either side.
+	ReplyTo string `json:"reply_to,omitempty"`
 }
 
 // MailSent answers a MailSend.
@@ -99,13 +126,18 @@ type MailSent struct {
 
 // MailEvent is the data of a mail or bounce event. Sender is the stamped <mail name>@<label> of the
 // sending session, and the empty string for a bounce from the broker. SenderVerified is absent for an
-// unverified sender.
+// unverified sender. It means the sender is one of the recipient user's own machines.
+//
+// SenderUser is the user label of the sender's user, set only on mail from another user. Such mail
+// never carries SenderVerified, so a reader that predates SenderUser shows it as unverified, never as
+// the user's own.
 type MailEvent struct {
 	ID             string `json:"id"`
 	ToSession      string `json:"to_session"`
 	ToAddress      string `json:"to_address"`
 	Sender         string `json:"sender,omitempty"`
 	SenderVerified bool   `json:"sender_verified,omitempty"`
+	SenderUser     string `json:"sender_user,omitempty"`
 	Body           string `json:"body"`
 
 	// Reason and Orig are set on a bounce. Orig is the ID of the message that bounced.
@@ -151,11 +183,16 @@ type ExpiredMail struct {
 
 // MailReport tells the broker what a node holds. A reconnecting node sends it before the broker
 // resends anything, so only messages the node did not store are sent again.
+//
+// Complete marks the report a reconnecting node sends of everything it holds. The broker re-checks mail
+// from another user, and may bounce it, only after the connection's complete report arrived, so no
+// message the node stored or read is ever bounced.
 type MailReport struct {
-	Version Version       `json:"version"`
-	Stored  []string      `json:"stored,omitempty"`
-	Read    []string      `json:"read,omitempty"`
-	Expired []ExpiredMail `json:"expired,omitempty"`
+	Version  Version       `json:"version"`
+	Complete bool          `json:"complete,omitempty"`
+	Stored   []string      `json:"stored,omitempty"`
+	Read     []string      `json:"read,omitempty"`
+	Expired  []ExpiredMail `json:"expired,omitempty"`
 }
 
 // MailStatusRequest asks for the stage of a message the node sent.

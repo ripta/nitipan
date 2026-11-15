@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -88,7 +89,35 @@ func (a *app) nodeFor(kind string) error {
 		return err
 	}
 
-	if err := p.Supports(kind, handoff.RequestVersion); err != nil {
+	version := handoff.KindSince(kind)
+	if version == 0 {
+		version = handoff.RequestVersion
+	}
+
+	if err := p.Supports(kind, version); err != nil {
+		return fmt.Errorf("%w. Upgrade the node's nitipan: it restarts on its own when its executable changes", err)
+	}
+
+	return nil
+}
+
+// nodeAt is nodeFor at an explicit request version, or nodeFor itself for a version of 0.
+func (a *app) nodeAt(kind string, version int) error {
+	if version == 0 {
+		return a.nodeFor(kind)
+	}
+
+	return a.nodeForVersion(kind, version)
+}
+
+// nodeForVersion requires a live node that knows the request kind at the given version.
+func (a *app) nodeForVersion(kind string, version int) error {
+	p, err := a.requireNode()
+	if err != nil {
+		return err
+	}
+
+	if err := p.Supports(kind, version); err != nil {
 		return fmt.Errorf("%w. Upgrade the node's nitipan: it restarts on its own when its executable changes", err)
 	}
 
@@ -99,6 +128,14 @@ func (a *app) nodeFor(kind string) error {
 // request the node claimed and did not answer leaves an in-flight record, so a retry of the same
 // command reuses the request ID and the broker returns the same answer.
 func (a *app) roundTrip(stateDir, kind, id, inflight string, body any) (handoff.Reply, error) {
+	return a.roundTripAt(stateDir, kind, id, inflight, body, 0)
+}
+
+// roundTripAt is roundTrip at an explicit request version. A version of 0 writes the lowest version that
+// carries the kind. A request whose meaning a newer version changes rides that version, as a claim for
+// another user rides handoff.ActingForSince, so an older node answers it "node too old" instead of
+// forwarding it under the old meaning.
+func (a *app) roundTripAt(stateDir, kind, id, inflight string, body any, version int) (handoff.Reply, error) {
 	local, err := a.deps.Machine()
 	if err != nil {
 		return handoff.Reply{}, fmt.Errorf("identifying this machine: %w", err)
@@ -110,7 +147,14 @@ func (a *app) roundTrip(stateDir, kind, id, inflight string, body any) (handoff.
 	}
 
 	req := handoff.Request{ID: id, Kind: kind, Requester: a.requester(local), CreatedAt: a.deps.Now().UTC(), Body: raw}
-	if err := handoff.Submit(stateDir, req); err != nil {
+
+	if version != 0 {
+		err = handoff.SubmitVersion(stateDir, req, version)
+	} else {
+		err = handoff.Submit(stateDir, req)
+	}
+
+	if err != nil {
 		return handoff.Reply{}, fmt.Errorf("handing the %s request to the node: %w", kind, err)
 	}
 
@@ -212,7 +256,13 @@ func (a *app) runAcquireWide(cmd *cobra.Command, h adapter.Holder, reach string)
 			exitcode.ErrUsage, reach)
 	}
 
-	if err := a.nodeFor(handoff.KindClaim); err != nil {
+	// A claim for another user rides the request version that marks acting_for explicit.
+	version := 0
+	if af := optString(cmd, "acting-for"); af != nil && *af != h.User {
+		version = handoff.ActingForSince
+	}
+
+	if err := a.nodeAt(handoff.KindClaim, version); err != nil {
 		return err
 	}
 
@@ -260,8 +310,13 @@ func (a *app) runAcquireWide(cmd *cobra.Command, h adapter.Holder, reach string)
 	env := anchor.Envelope
 	env.Machine = local
 
+	actingFor := h.User
+	if af := optString(cmd, "acting-for"); af != nil {
+		actingFor = *af
+	}
+
 	body := handoff.ClaimBody{
-		Reach: reach, Entries: entries, Derivation: rootset.Version, Holder: env, ActingFor: h.User,
+		Reach: reach, Entries: entries, Derivation: rootset.Version, Holder: env, ActingFor: actingFor,
 		Anchor: handoff.Anchor{ID: anchor.ID, Keys: anchor.Domain.Keys, Covered: canon.Keys, Created: created},
 	}
 
@@ -277,7 +332,7 @@ func (a *app) runAcquireWide(cmd *cobra.Command, h adapter.Holder, reach string)
 		id = e.NewID()
 	}
 
-	rep, err := a.roundTrip(stateDir, handoff.KindClaim, id, flight, body)
+	rep, err := a.roundTripAt(stateDir, handoff.KindClaim, id, flight, body, version)
 	if err != nil {
 		// Only an unknown outcome keeps the anchor, since the claim may still be granted.
 		if !errors.Is(err, ErrOutcomeUnknown) {
@@ -610,7 +665,16 @@ func (a *app) releaseAnchors(e *lease.Engine, h adapter.Holder, stateDir string,
 }
 
 // brokerTargets splits release arguments into local lease IDs, broker lease IDs, and typed names.
+//
+// An ID with no record on this machine may name a broker lease another of the user's machines holds,
+// such as one a shared agent holds for them. It goes to the broker while a node runs here, and the
+// broker decides whether it is the user's to release.
 func (a *app) brokerTargets(stateDir string, env record.Envelope, ids []string) (local, remote []string, names []repoid.Name, err error) {
+	nodeRuns := sync.OnceValue(func() bool {
+		_, err := a.requireNode()
+
+		return err == nil
+	})
 	for _, id := range ids {
 		switch {
 		case strings.HasPrefix(id, repoid.Prefix):
@@ -627,6 +691,8 @@ func (a *app) brokerTargets(stateDir string, env record.Envelope, ids []string) 
 
 			switch {
 			case rerr == nil, len(handoff.InflightSidecars(stateDir, key, a.deps.Now())) > 0:
+				remote = append(remote, id)
+			case !isLocalID(stateDir, id) && nodeRuns():
 				remote = append(remote, id)
 			default:
 				local = append(local, id)

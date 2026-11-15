@@ -77,6 +77,11 @@ const (
 	// whose sub-lease ended by any act but its own revoke.
 	CauseParentEnded   = "parent-ended"
 	CauseSubLeaseEnded = "sub-lease-ended"
+
+	// CauseSharedClaimRefused goes to the holder of a broker lease that refused a coworker's `shared`
+	// claim while hidden from that coworker. It never rings, turn hooks included. A refused claim costs
+	// the coworker nothing, so a ringing notice would let them wake the holder's agent with no mail grant.
+	CauseSharedClaimRefused = "shared-claim-refused"
 )
 
 // Notice tells a holder about something that happened to a lease or request of theirs. It is

@@ -64,17 +64,21 @@ func (g *gateRule) release() { g.once.Do(func() { close(g.open) }) }
 func newWideFixture(t *testing.T) *wideFixture {
 	t.Helper()
 
-	return newWideFixtureWith(t, false)
+	return newWideFixtureWith(t, false, nil)
 }
 
-// newWideFixtureTLS serves the broker over TLS, which mail requires of a node.
-func newWideFixtureTLS(t *testing.T) *wideFixture {
+// newWideFixtureWith builds the fixture. useTLS serves the broker over TLS, which mail requires of a node.
+// prep, when set, edits the store before the broker starts, the way an earlier broker run would have left
+// it.
+func newWideFixtureWith(t *testing.T, useTLS bool, prep func(*broker.Data)) *wideFixture {
 	t.Helper()
 
-	return newWideFixtureWith(t, true)
+	return newWideFixtureConfig(t, useTLS, prep, nil)
 }
 
-func newWideFixtureWith(t *testing.T, useTLS bool) *wideFixture {
+// newWideFixtureConfig is newWideFixtureWith with configure, when set, editing the broker config before the
+// broker starts.
+func newWideFixtureConfig(t *testing.T, useTLS bool, prep func(*broker.Data), configure func(*broker.Config)) *wideFixture {
 	t.Helper()
 
 	store, err := broker.OpenStore(filepath.Join(t.TempDir(), "broker.json"), broker.StoreOptions{Volume: okVolume{}})
@@ -84,8 +88,21 @@ func newWideFixtureWith(t *testing.T, useTLS bool) *wideFixture {
 
 	t.Cleanup(func() { _ = store.Close() })
 
+	if prep != nil {
+		prep(store.Data())
+
+		if err := store.Persist(store.Data()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	f := &wideFixture{t: t, store: store, clock: monoclock.NewFake(time.Hour)}
-	f.b = broker.New(broker.Config{Store: store, Term: 5 * time.Minute, Keepalive: 30 * time.Millisecond, Clock: f.clock, Version: "test"})
+	cfg := broker.Config{Store: store, Term: 5 * time.Minute, Keepalive: 30 * time.Millisecond, Clock: f.clock, Version: "test"}
+	if configure != nil {
+		configure(&cfg)
+	}
+
+	f.b = broker.New(cfg)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p := f.missing.Load(); p != nil && *p == r.URL.Path {

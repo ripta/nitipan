@@ -145,6 +145,64 @@ func newHTTPClient(tr http.RoundTripper) *http.Client {
 	}
 }
 
+// brokerHTTP applies the address rules to the config's broker URL and builds the client that reaches it. It
+// reports whether the client uses HTTPS. Everything that sends the node's key to the broker goes through it.
+func brokerHTTP(c config.Node) (*url.URL, bool, *http.Client, error) {
+	base, https, err := brokerURL(c)
+	if err != nil {
+		return nil, false, nil, err
+	}
+
+	tr, err := newTransport(c, !https)
+	if err != nil {
+		return nil, false, nil, err
+	}
+
+	return base, https, newHTTPClient(tr), nil
+}
+
+// refusePlain refuses plain HTTP to the broker once this node recorded that the broker turned cross-user
+// features on.
+func refusePlain(stateDir string) error {
+	if !IsCrossUserEnabled(stateDir) {
+		return nil
+	}
+
+	return errors.New("refusing plain HTTP to the broker: cross-user features were enabled on the broker, and this node " +
+		"recorded that. The node will not send its key over plain HTTP. Use https, or forget this label on the broker host " +
+		"with 'nitipan broker forget', then run 'nitipan node rekey' and approve the new key")
+}
+
+// Pair sends the hash of a pairing code to the broker under the node's key, through the same address
+// rules, CA file, and plain-HTTP refusal the node itself uses. It returns the label the broker says the
+// code binds. The broker ties the code to the key, so the node must have registered the key first.
+func Pair(ctx context.Context, cfg config.Node, stateDir, machineID string, uid int, pairingHash string) (string, error) {
+	base, https, httpClient, err := brokerHTTP(cfg)
+	if err != nil {
+		return "", err
+	}
+
+	if !https {
+		if err := refusePlain(stateDir); err != nil {
+			return "", err
+		}
+	}
+
+	key, err := LoadKey(stateDir)
+	if err != nil {
+		return "", err
+	}
+
+	cl := &client{base: base, http: httpClient, key: key, machineID: machineID, uid: uid}
+
+	var ans wire.Paired
+	if err := cl.call(ctx, wire.PathPair, wire.Pair{Version: wire.Current, PairingHash: pairingHash}, &ans); err != nil {
+		return "", err
+	}
+
+	return ans.Label, nil
+}
+
 // client talks to the broker with the node's credential on every request.
 type client struct {
 	base *url.URL

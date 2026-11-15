@@ -19,8 +19,9 @@ import (
 
 // File names under the state directory. V1 binaries never scan either one.
 const (
-	lockName = "node.lock"
-	keyName  = "node-key"
+	lockName      = "node.lock"
+	keyName       = "node-key"
+	crossUserFile = "cross-user-enabled"
 )
 
 // ErrNodeRunning means another node holds the lock for this machine and user.
@@ -47,9 +48,9 @@ func lockNode(dir string) (*os.File, error) {
 	return f, nil
 }
 
-// loadKey returns the node's instance key, creating a random one on first run. The key narrows
+// LoadKey returns the node's instance key, creating a random one on first run. The key narrows
 // takeover: taking a node's stream needs a file in the user's 0700 state directory. It is not auth.
-func loadKey(dir string) (string, error) {
+func LoadKey(dir string) (string, error) {
 	path := filepath.Join(dir, keyName)
 
 	data, err := os.ReadFile(path)
@@ -162,10 +163,70 @@ func Fingerprint(dir string) (string, error) {
 		return "", fmt.Errorf("creating the state directory %s: %w", dir, err)
 	}
 
-	key, err := loadKey(dir)
+	key, err := LoadKey(dir)
 	if err != nil {
 		return "", err
 	}
 
 	return wire.Fingerprint(wire.KeyHash(key)), nil
+}
+
+// Rekey generates a new instance key for a forgotten label. It removes the old key and generates a
+// fresh random one.
+func Rekey(dir string) error {
+	path := filepath.Join(dir, keyName)
+
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing the old key: %w", err)
+	}
+
+	_, err := LoadKey(dir)
+
+	return err
+}
+
+// RecordCrossUserEnabled persists that cross-user features are enabled on the broker. Once set, the
+// node refuses to send its key over plain HTTP even when a later registration omits the flag.
+func RecordCrossUserEnabled(dir string) error {
+	path := filepath.Join(dir, crossUserFile)
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("creating cross-user flag: %w", err)
+	}
+
+	if _, err := f.WriteString("1\n"); err != nil {
+		_ = f.Close()
+
+		return fmt.Errorf("writing cross-user flag: %w", err)
+	}
+
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+
+		return fmt.Errorf("syncing cross-user flag: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing cross-user flag: %w", err)
+	}
+
+	return nil
+}
+
+// IsCrossUserEnabled reports whether the node has ever seen the broker report cross-user features
+// enabled. Once true, it stays true. It fails closed: any error other than fs.ErrNotExist returns
+// true, so a permission error does not let the node send its key over plain HTTP.
+func IsCrossUserEnabled(dir string) bool {
+	path := filepath.Join(dir, crossUserFile)
+	_, err := os.Stat(path)
+	if err == nil {
+		return true
+	}
+
+	return !errors.Is(err, fs.ErrNotExist)
 }

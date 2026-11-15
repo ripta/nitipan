@@ -18,6 +18,17 @@ const (
 // EventLease is the event kind that carries a Lease whose state changed.
 const EventLease = "lease"
 
+// EventClaimRefused carries a ClaimRefused to the node of a lease that refused a coworker's claim the
+// coworker cannot see. A node that predates it ignores the kind, as it ignores every kind it does not know.
+const EventClaimRefused = "claim-refused"
+
+// ClaimRefused names the holder's own lease and the coworker's user label. It never carries the names
+// the coworker asked for, so the coworker puts no text of its choosing in front of the holder.
+type ClaimRefused struct {
+	Lease    string `json:"lease"`
+	Coworker string `json:"coworker"`
+}
+
 // Reaches a broker grants.
 const (
 	ReachUser   = "user"
@@ -100,15 +111,16 @@ type Lease struct {
 // Claim asks for a lease. The ID is both the request ID, which is the idempotency key, and the lease ID
 // on a grant.
 type Claim struct {
-	Version     Version       `json:"version"`
-	ID          string        `json:"id"`
-	Reach       string        `json:"reach"`
-	Entries     []repoid.Name `json:"entries"`
-	Derivation  int           `json:"derivation"`
-	Anchor      string        `json:"anchor"`
-	Holder      Holder        `json:"holder"`
-	ActingFor   string        `json:"acting_for,omitempty"`
-	Description string        `json:"description,omitempty"`
+	Version           Version       `json:"version"`
+	ID                string        `json:"id"`
+	Reach             string        `json:"reach"`
+	Entries           []repoid.Name `json:"entries"`
+	Derivation        int           `json:"derivation"`
+	Anchor            string        `json:"anchor"`
+	Holder            Holder        `json:"holder"`
+	ActingFor         string        `json:"acting_for,omitempty"`
+	ActingForExplicit bool          `json:"acting_for_explicit,omitempty"`
+	Description       string        `json:"description,omitempty"`
 }
 
 // Release ends a lease its holder no longer wants, or that a node found dead or unanchored. With Name

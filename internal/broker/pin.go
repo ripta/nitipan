@@ -2,15 +2,18 @@ package broker
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -29,6 +32,11 @@ var (
 	// ErrAdminPeer means the process on the admin socket is not the broker's OS user.
 	ErrAdminPeer = errors.New("the admin socket accepts only the broker's own OS user")
 )
+
+// fingerprintMatches returns true if the hash's fingerprint equals the fingerprint, in constant time.
+func fingerprintMatches(hash, fingerprint string) bool {
+	return subtle.ConstantTimeCompare([]byte(wire.Fingerprint(hash)), []byte(fingerprint)) == 1
+}
 
 // notePending records a key a node presented, unless the label is pinned to it. It runs inside a
 // commit.
@@ -118,42 +126,53 @@ var fingerprintPattern = regexp.MustCompile(`^[0-9a-f]{4}(-[0-9a-f]{4}){3}$`)
 
 // Approve pins the pending key of a label that has the fingerprint, and discards every other pending
 // key for the label, so a host that submits a key of its own cannot block the approval. It reports
-// whether a key was pinned.
+// whether a key was pinned, and the owner it binds the label to.
 //
 // A fingerprint no pending key has is recorded as awaited, and the label pins the first key that
 // presents it. A bounded list of pending keys can be flooded off by a host that registers fresh keys
 // while the real machine sleeps, and approval must not depend on that list. The fingerprint is a 64-bit
 // prefix of the key's hash, so a host cannot present a key that matches without the user's own.
 //
+// Approval binds the label to the broker owner, since a command on the broker host is the owner's. An
+// awaited key binds when it pins. With no owner record, approval pins the key alone.
+//
+// Approving a label again under its pinned key binds it, so a label pinned but left unbound has a way
+// back.
+//
+// A label a coworker bound through the page is refused until it is forgotten. Taking it for the owner
+// would bounce the coworker's mail.
+//
 // It is reachable only through the admin socket and by a caller in this process. No HTTP route and no
 // request handoff kind calls it, since a session can reach both.
-func (b *Broker) Approve(label, fingerprint string) (pinned bool, err error) {
+func (b *Broker) Approve(label, fingerprint string) (AdminApproved, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	fingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
 	if !fingerprintPattern.MatchString(fingerprint) {
-		return false, fmt.Errorf("%q: %w", fingerprint, ErrBadFingerprint)
+		return AdminApproved{}, fmt.Errorf("%q: %w", fingerprint, ErrBadFingerprint)
 	}
 
 	row, ok := b.store.Data().Labels[label]
 	if !ok {
-		return false, fmt.Errorf("label %q: %w", label, ErrUnknownLabel)
+		return AdminApproved{}, fmt.Errorf("label %q: %w", label, ErrUnknownLabel)
 	}
 
-	if pin := b.store.Data().Pins[label]; pin.PinnedHash != "" {
-		if wire.Fingerprint(pin.PinnedHash) == fingerprint {
-			return true, nil
-		}
-
-		return false, fmt.Errorf("label %q is already approved with another key: %w", label, ErrAlreadyPinned)
-	}
+	owner, hasOwner := b.ownerLocked()
+	pin := b.store.Data().Pins[label]
 
 	var hash string
 
-	for h := range b.store.Data().Pins[label].Pending {
-		if wire.Fingerprint(h) == fingerprint {
-			hash = h
+	switch {
+	case pin.PinnedHash != "" && !fingerprintMatches(pin.PinnedHash, fingerprint):
+		return AdminApproved{}, fmt.Errorf("label %q is already approved with another key: %w", label, ErrAlreadyPinned)
+	case pin.PinnedHash != "":
+		hash = pin.PinnedHash
+	default:
+		for h := range pin.Pending {
+			if fingerprintMatches(h, fingerprint) {
+				hash = h
+			}
 		}
 	}
 
@@ -166,12 +185,36 @@ func (b *Broker) Approve(label, fingerprint string) (pinned bool, err error) {
 			return nil
 		})
 
-		return false, err
+		return AdminApproved{Owner: owner.UserLabel}, err
 	}
 
-	nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
+	bound, isBound := b.labelBoundUserLocked(label)
 
-	return true, b.pinLocked(label, nk, hash)
+	switch {
+	case !hasOwner && pin.PinnedHash != "":
+		return AdminApproved{Pinned: true}, nil
+	case !hasOwner:
+		return AdminApproved{Pinned: true}, b.pinLocked(label, NodeKey{MachineID: row.MachineID, UID: row.UID}, hash)
+	case pin.PinnedHash != "" && isBound && bound.ID == owner.ID:
+		return AdminApproved{Pinned: true, Owner: owner.UserLabel}, nil
+	case pin.PinnedHash != "" && isBound:
+		return AdminApproved{}, fmt.Errorf("label %q is bound to the user %s: %w", label, bound.UserLabel, ErrAlreadyPinned)
+	}
+
+	return AdminApproved{Pinned: true, Owner: owner.UserLabel}, b.bindLocked(label, owner, hash, b.cfg.Now())
+}
+
+// ownerLocked returns the broker owner's user record, and false when the broker has none.
+func (b *Broker) ownerLocked() (UserRecord, bool) {
+	d := b.store.Data()
+
+	if d.OwnerID == "" {
+		return UserRecord{}, false
+	}
+
+	owner, ok := d.Users[d.OwnerID]
+
+	return owner, ok
 }
 
 // pinLocked pins a key to a label, makes it the node's key, and closes a stream opened under another.
@@ -202,43 +245,32 @@ func (b *Broker) pinLocked(label string, nk NodeKey, hash string) error {
 	return nil
 }
 
-// Forget unpins a label, drops its node's key, and settles its mail. Mail still queued waits for the
-// label's next approved key and is never handed to an unapproved one. Mail already stored on the
-// forgotten machine and never read bounces to its sender without its body, since the broker no longer
-// holds it.
+// Forget unpins a label, drops its node's key and its pairing code, and settles its mail. Mail still
+// queued waits for the label's next approved key and is never handed to an unapproved one. Mail already
+// stored on the forgotten machine and never read bounces to its sender without its body, since the broker
+// no longer holds it.
+//
+// The label's binding loses its user and keeps its last bound user, so the next binding can tell a new
+// user from the same one. Delegations to the label stay, and act on nothing while the label is unbound. A
+// binding to the same user, such as a reinstalled machine, keeps them. A binding to another user drops
+// them.
 func (b *Broker) Forget(label string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	row, ok := b.store.Data().Labels[label]
-	if !ok {
+	return b.forgetLocked(label)
+}
+
+// forgetLocked forgets one label in its own commit, as Forget describes.
+func (b *Broker) forgetLocked(label string) error {
+	if _, ok := b.store.Data().Labels[label]; !ok {
 		return fmt.Errorf("label %q: %w", label, ErrUnknownLabel)
 	}
 
-	nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
 	now := b.cfg.Now()
 
 	err := b.commit(func(d *Data) error {
-		d.Pins[label] = PinRecord{Forgotten: true, ForgottenAt: now}
-		delete(d.Nodes, nk.String())
-
-		for id, m := range d.Mail {
-			if m.ToLabel != label || m.Bounced {
-				continue
-			}
-
-			switch m.Stage {
-			case wire.StageStored:
-				if m.Kind == wire.EventMail {
-					b.bounceInto(d, m, wire.ReasonForgotten, false, now)
-				}
-			case wire.StageQueued:
-				// An ack lost before the wipe can no longer be told apart from a message that never
-				// arrived. The next approved key receives it again.
-				m.Sent = false
-				d.Mail[id] = m
-			}
-		}
+		b.forgetInto(d, label, now)
 
 		return nil
 	})
@@ -246,7 +278,53 @@ func (b *Broker) Forget(label string) error {
 		return err
 	}
 
-	if ns, ok := b.nodes[nk]; ok {
+	b.forgottenLocked(label)
+
+	return nil
+}
+
+// forgetInto makes a forget's changes to the store inside a commit, so a caller can forget several labels
+// in one write. Its caller runs forgottenLocked for each label once the commit lands.
+func (b *Broker) forgetInto(d *Data, label string, now time.Time) {
+	row := d.Labels[label]
+	nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
+
+	d.Pins[label] = PinRecord{Forgotten: true, ForgottenAt: now}
+	delete(d.Nodes, nk.String())
+
+	if binding, ok := d.Bindings[label]; ok && binding.UserID != "" {
+		binding.LastBoundUser = binding.UserID
+		binding.UserID = ""
+		d.Bindings[label] = binding
+	}
+
+	delete(d.PairingCodes, label)
+
+	for id, m := range d.Mail {
+		if m.ToLabel != label || m.Bounced {
+			continue
+		}
+
+		switch m.Stage {
+		case wire.StageStored:
+			if m.Kind == wire.EventMail {
+				b.bounceInto(d, m, wire.ReasonForgotten, false, now)
+			}
+		case wire.StageQueued:
+			// An ack lost before the wipe can no longer be told apart from a message that never
+			// arrived. The next approved key receives it again.
+			m.Sent = false
+			d.Mail[id] = m
+		}
+	}
+}
+
+// forgottenLocked does what a forget does outside the store, once its commit landed. It closes the
+// label's stream, drops its live sessions, and strips its hash from the kept file.
+func (b *Broker) forgottenLocked(label string) {
+	row := b.store.Data().Labels[label]
+
+	if ns, ok := b.nodes[NodeKey{MachineID: row.MachineID, UID: row.UID}]; ok {
 		if ns.stream != nil {
 			ns.stream.cancel()
 		}
@@ -254,7 +332,9 @@ func (b *Broker) Forget(label string) error {
 		ns.liveSessions = nil
 	}
 
-	return nil
+	if err := b.store.StripHashFromKeptFile(label); err != nil {
+		b.cfg.Logger.Error("stripping hash from kept file", "label", label, "error", err)
+	}
 }
 
 // wakeLabelLocked wakes the stream of the node that owns a label, so queued mail goes out.
@@ -306,6 +386,10 @@ type adminForget struct {
 // AdminApproved answers the approve command. Pinned is false when the fingerprint is awaited.
 type AdminApproved struct {
 	Pinned bool `json:"pinned"`
+
+	// Owner is the user label of the broker owner the label is bound to, or binds to once an awaited key
+	// pins. It is empty when the store's owner record is missing, and nothing is bound.
+	Owner string `json:"owner,omitempty"`
 }
 
 // AdminPending answers the pending command.
@@ -315,9 +399,17 @@ type AdminPending struct {
 
 // Paths the admin socket serves. They exist only there. The network handler serves none of them.
 const (
-	AdminPathPending = "/pending"
-	AdminPathApprove = "/approve"
-	AdminPathForget  = "/forget"
+	AdminPathPending        = "/pending"
+	AdminPathApprove        = "/approve"
+	AdminPathForget         = "/forget"
+	AdminPathConfirmUpgrade = "/confirm-upgrade"
+	AdminPathAdmissions     = "/admissions"
+	AdminPathAdmit          = "/admit"
+	AdminPathLink           = "/link"
+	AdminPathBindings       = "/bindings"
+	AdminPathRevokeUser     = "/revoke-user"
+	AdminPathCrossUser      = "/cross-user"
+	AdminPathBreak          = "/break"
 )
 
 // AdminHandler serves the approval commands. It is mounted on the admin socket only.
@@ -327,39 +419,296 @@ func (b *Broker) AdminHandler() http.Handler {
 	mux.HandleFunc("GET "+AdminPathPending, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, AdminPending{Labels: b.Pending()})
 	})
-
-	mux.HandleFunc("POST "+AdminPathApprove, func(w http.ResponseWriter, r *http.Request) {
-		var req adminApprove
-
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
-
-			return
-		}
-
-		pinned, err := b.Approve(req.Label, req.Fingerprint)
-		if err != nil {
-			b.adminResult(w, err)
-
-			return
-		}
-
-		writeJSON(w, http.StatusOK, AdminApproved{Pinned: pinned})
-	})
-
-	mux.HandleFunc("POST "+AdminPathForget, func(w http.ResponseWriter, r *http.Request) {
-		var req adminForget
-
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
-
-			return
-		}
-
-		b.adminResult(w, b.Forget(req.Label))
-	})
+	mux.HandleFunc("POST "+AdminPathApprove, b.handleAdminApprove)
+	mux.HandleFunc("POST "+AdminPathForget, b.handleAdminForget)
+	mux.HandleFunc("POST "+AdminPathConfirmUpgrade, b.handleAdminConfirmUpgrade)
+	mux.HandleFunc("GET "+AdminPathAdmissions, b.handleAdminAdmissions)
+	mux.HandleFunc("POST "+AdminPathAdmit, b.handleAdminAdmit)
+	mux.HandleFunc("POST "+AdminPathLink, b.handleAdminLink)
+	mux.HandleFunc("GET "+AdminPathBindings, b.handleAdminBindings)
+	mux.HandleFunc("POST "+AdminPathRevokeUser, b.handleAdminRevokeUser)
+	mux.HandleFunc("POST "+AdminPathCrossUser, b.handleAdminCrossUser)
+	mux.HandleFunc("POST "+AdminPathBreak, b.handleAdminBreak)
 
 	return mux
+}
+
+func (b *Broker) handleAdminApprove(w http.ResponseWriter, r *http.Request) {
+	var req adminApprove
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	ans, err := b.Approve(req.Label, req.Fingerprint)
+	if err != nil {
+		b.adminResult(w, err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ans)
+}
+
+func (b *Broker) handleAdminForget(w http.ResponseWriter, r *http.Request) {
+	var req adminForget
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	b.adminResult(w, b.Forget(req.Label))
+}
+
+func (b *Broker) handleAdminConfirmUpgrade(w http.ResponseWriter, _ *http.Request) {
+	if err := b.store.DeleteKeptFile(); err != nil {
+		writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// AdminAdmissions answers the admissions command, sorted by when each issuer plus sub first signed in.
+type AdminAdmissions struct {
+	Admissions []AdmissionRecord `json:"admissions"`
+}
+
+func (b *Broker) handleAdminAdmissions(w http.ResponseWriter, _ *http.Request) {
+	b.mu.Lock()
+	ans := AdminAdmissions{Admissions: slices.Collect(maps.Values(b.store.Data().PendingAdmissions))}
+	b.mu.Unlock()
+
+	slices.SortFunc(ans.Admissions, func(x, y AdmissionRecord) int {
+		if c := x.FirstSeen.Compare(y.FirstSeen); c != 0 {
+			return c
+		}
+
+		return strings.Compare(x.Issuer+"\x00"+x.Sub, y.Issuer+"\x00"+y.Sub)
+	})
+
+	writeJSON(w, http.StatusOK, ans)
+}
+
+func (b *Broker) handleAdminAdmit(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Issuer string `json:"issuer"`
+		Sub    string `json:"sub"`
+		Email  string `json:"email"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	user, err := b.AdmitUser(req.Issuer, req.Sub, req.Email, b.cfg.Now())
+	if err != nil {
+		b.adminResult(w, err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (b *Broker) handleAdminLink(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Issuer string `json:"issuer"`
+		Sub    string `json:"sub"`
+		UserID string `json:"user_id"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	if err := b.LinkIssuerSub(req.Issuer, req.Sub, req.UserID); err != nil {
+		b.adminResult(w, err)
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// AdminBinding is one bound label in the bindings list.
+type AdminBinding struct {
+	Label     string    `json:"label"`
+	UserID    string    `json:"user_id"`
+	UserLabel string    `json:"user_label"`
+	Email     string    `json:"email"`
+	Host      string    `json:"host"`
+	User      string    `json:"user"`
+	LastSeen  time.Time `json:"last_seen"`
+	BoundAt   time.Time `json:"bound_at"`
+}
+
+// AdminBindings answers the bindings command. It lists only labels that are bound now, sorted by label.
+type AdminBindings struct {
+	Bindings []AdminBinding `json:"bindings"`
+}
+
+func (b *Broker) handleAdminBindings(w http.ResponseWriter, _ *http.Request) {
+	b.mu.Lock()
+
+	d := b.store.Data()
+
+	var ans AdminBindings
+
+	for _, label := range slices.Sorted(maps.Keys(d.Bindings)) {
+		user, bound := b.labelBoundUserLocked(label)
+		if !bound {
+			continue
+		}
+
+		row := d.Labels[label]
+
+		ans.Bindings = append(ans.Bindings, AdminBinding{
+			Label:     label,
+			UserID:    user.ID,
+			UserLabel: user.UserLabel,
+			Email:     user.Email,
+			Host:      row.Host,
+			User:      row.User,
+			LastSeen:  row.LastSeen,
+			BoundAt:   d.Bindings[label].BoundAt,
+		})
+	}
+
+	b.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, ans)
+}
+
+func (b *Broker) handleAdminRevokeUser(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	revoked, err := b.RevokeUser(req.UserID)
+	if err != nil {
+		b.adminResult(w, err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, revoked)
+}
+
+func (b *Broker) handleAdminCrossUser(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enable bool `json:"enable"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	unbound, err := b.SetCrossUserEnabled(req.Enable)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AdminCrossUser{Enabled: req.Enable, Unbound: unbound})
+}
+
+// AdminCrossUser answers the cross-user command. Unbound lists, when the command turned cross-user
+// features on, every label that can reach the broker and is bound to nobody. Each is refused from then on.
+type AdminCrossUser struct {
+	Enabled bool     `json:"enabled"`
+	Unbound []string `json:"unbound_labels,omitempty"`
+}
+
+func (b *Broker) handleAdminBreak(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LeaseID string `json:"lease_id"`
+	}
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
+
+		return
+	}
+
+	if req.LeaseID == "" {
+		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, "the break names no lease ID")
+
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.sweepLocked()
+
+	g := b.g.grants[req.LeaseID]
+	if g == nil {
+		writeErr(w, http.StatusNotFound, wire.CodeNotFound, "the broker has no such lease")
+
+		return
+	}
+
+	over := g.State == wire.StateTaken || g.State == wire.StateEnded
+	if over {
+		err := b.mutate(func(s *gstate) error {
+			delete(s.grants, req.LeaseID)
+
+			return nil
+		})
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
+
+			return
+		}
+
+		delete(b.dl, req.LeaseID)
+		w.WriteHeader(http.StatusNoContent)
+
+		return
+	}
+
+	by := "broker owner"
+	if owner := b.store.Data().Users[b.store.Data().OwnerID].UserLabel; owner != "" {
+		by += " " + owner
+	}
+
+	err := b.mutate(func(s *gstate) error {
+		e := s.grants[req.LeaseID]
+		e.State = wire.StateEnded
+		e.Revision++
+		e.EndedBy = by
+
+		return nil
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
+
+		return
+	}
+
+	delete(b.dl, req.LeaseID)
+	b.announceLocked(b.g.grants[req.LeaseID])
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (b *Broker) adminResult(w http.ResponseWriter, err error) {

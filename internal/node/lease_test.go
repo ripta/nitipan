@@ -82,7 +82,13 @@ type leaseRig struct {
 func newLeaseRig(t *testing.T, tweak func(*Options)) *leaseRig {
 	t.Helper()
 
-	r := newRig(t)
+	return newLeaseRigOn(t, newRig(t), tweak)
+}
+
+// newLeaseRigOn starts the lease rig's node on a rig the caller prepared, such as one whose intercept
+// must already see the node's registration.
+func newLeaseRigOn(t *testing.T, r *rig, tweak func(*Options)) *leaseRig {
+	t.Helper()
 
 	table := proctest.New(record.PlatformDarwin, 1)
 	table.Add(4242, proctest.Process{Start: holderStart})

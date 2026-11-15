@@ -17,6 +17,7 @@ import (
 	"github.com/space-armada/nitipan/internal/handoff"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/node"
+	"github.com/space-armada/nitipan/internal/oidc"
 	"github.com/space-armada/nitipan/internal/session"
 	"github.com/space-armada/nitipan/internal/setup"
 	"github.com/space-armada/nitipan/internal/state"
@@ -40,6 +41,8 @@ func (a *app) nodeCmd() *cobra.Command {
 	cmd.Flags().String("codex-path", "", "trusted Codex executable from the LaunchAgent")
 	cmd.Flags().String("codex-home", "", "trusted Codex home from the LaunchAgent")
 	cmd.AddCommand(a.nodeFingerprintCmd())
+	cmd.AddCommand(a.nodePairCmd())
+	cmd.AddCommand(a.nodeRekeyCmd())
 
 	return cmd
 }
@@ -163,24 +166,48 @@ func (a *app) runBroker() error {
 		path = broker.DefaultStorePath(home)
 	}
 
-	store, err := broker.OpenStore(path, broker.StoreOptions{})
+	store, err := broker.OpenStore(path, broker.StoreOptions{
+		Migrations: map[int]broker.Migration{
+			1: broker.MigrateV1ToV2,
+		},
+	})
 	if err != nil {
 		return err
 	}
 
 	defer store.Close()
 
-	b := broker.New(broker.Config{
-		Store:       store,
-		AdminSocket: broker.AdminSocketPath(path),
-		Version:     version.Version,
-		Logger:      slog.New(slog.NewTextHandler(a.deps.Stderr, nil)),
-	})
+	b := broker.New(brokerConfig(cfg, store, path, slog.New(slog.NewTextHandler(a.deps.Stderr, nil))))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	return b.Serve(ctx, cfg.Listen, cfg.CertFile, cfg.KeyFile)
+}
+
+// brokerConfig turns the broker's config file into the broker's own config, over a store opened at
+// storePath. Everything the broker takes from the file passes through here.
+func brokerConfig(cfg config.Broker, store *broker.Store, storePath string, logger *slog.Logger) broker.Config {
+	out := broker.Config{
+		Store:       store,
+		AdminSocket: broker.AdminSocketPath(storePath),
+		Version:     version.Version,
+		Listen:      cfg.Listen,
+		TLS:         cfg.CertFile != "" && cfg.KeyFile != "",
+		Logger:      logger,
+	}
+
+	if o := cfg.OIDC; o != nil {
+		out.OIDCConfig = &oidc.Config{
+			Issuer:       o.Issuer,
+			ClientID:     o.ClientID,
+			ClientSecret: o.ClientSecret,
+			RedirectURL:  o.RedirectURL,
+			CAFile:       o.CAFile,
+		}
+	}
+
+	return out
 }
 
 // daemonInput describes this nitipan for the LaunchAgent text.

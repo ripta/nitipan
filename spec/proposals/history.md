@@ -12,3 +12,4 @@
 | NIT-007 M1 | NIT-004 M3 | Mail addresses go through NIT-004 M3's discovery queries. Split from M2: NIT-005 M3 goes between |
 | NIT-005 M3 | NIT-005 M2 | Split from M2: Claude Code mail lands first |
 | NIT-007 M2 | NIT-007 M1 | Split from M1: NIT-005 M3 goes between |
+| NIT-006 M1-M3 | NIT-007 M1, NIT-004 M3 | Binds the labels NIT-007 M1 pins. M2 filters NIT-004 M3's discovery |

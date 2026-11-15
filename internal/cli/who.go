@@ -77,7 +77,18 @@ more than one holder is flagged and never resolved to one. Stop and ask the user
 		},
 	}
 
-	for _, c := range []*cobra.Command{holds, is} {
+	am := &cobra.Command{
+		Use:   "am-i",
+		Short: "Print this node's user label",
+		Long: `Ask the broker for this node's user label. It needs the node and a broker.
+The user label is what acting_for, cross-user mail, delegations, and grants use to name users.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.wrapErr(a.runWhoAmI(cmd))
+		},
+	}
+
+	for _, c := range []*cobra.Command{holds, is, am} {
 		c.Flags().Bool("json", false, "print JSON")
 		who.AddCommand(c)
 	}
@@ -285,4 +296,33 @@ func whoState(f wire.Found) string {
 	}
 
 	return f.State
+}
+
+func (a *app) runWhoAmI(cmd *cobra.Command) error {
+	stateDir, err := a.deps.StateDir()
+	if err != nil {
+		return fmt.Errorf("resolving the state directory: %w", err)
+	}
+
+	if err := a.nodeFor(handoff.KindWhoAmI); err != nil {
+		return err
+	}
+
+	rep, err := a.roundTrip(stateDir, handoff.KindWhoAmI, state.NewID(), "", wire.WhoAmI{Version: wire.Current})
+	if err != nil {
+		return err
+	}
+
+	var ans wire.WhoAmIAnswer
+	if err := json.Unmarshal(rep.Body, &ans); err != nil {
+		return fmt.Errorf("decoding the whoami answer: %w", err)
+	}
+
+	if ans.UserLabel == "" {
+		fmt.Fprintln(cmd.OutOrStdout(), "This node is not bound to a user.")
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "User label: %s\n", ans.UserLabel)
+	}
+
+	return nil
 }

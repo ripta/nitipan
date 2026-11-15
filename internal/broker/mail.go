@@ -177,7 +177,23 @@ func (b *Broker) handleMailSend(w http.ResponseWriter, r *http.Request, key Node
 		return
 	}
 
-	b.enqueueMailLocked(w, rec.Label, req)
+	// A conversation is keyed by its first message's ID, and outlives that message while its replies are
+	// held. A new message under that ID would rebind the conversation to another grant, so it is refused.
+	if _, held := b.store.Data().Conversations[req.ID]; held {
+		writeErr(w, http.StatusConflict, wire.CodeBadRequest, fmt.Sprintf("message ID %s already names a conversation the broker "+
+			"holds. Send the message under a new ID", req.ID))
+
+		return
+	}
+
+	cross, status, code, msg := b.checkCrossUserLocked(rec, req)
+	if code != "" {
+		writeErr(w, status, code, msg)
+
+		return
+	}
+
+	b.enqueueMailLocked(w, rec.Label, req, cross)
 }
 
 // checkSenderLocked judges the sending node and session. It returns the status, code, and message of
@@ -231,7 +247,7 @@ func (b *Broker) checkRecipientLocked(req wire.MailSend) (status int, code, msg 
 
 	row := b.store.Data().Labels[label]
 
-	if rec, ok := b.store.Data().Nodes[NodeKey{MachineID: row.MachineID, UID: row.UID}.String()]; ok && rec.MailCap < wire.MailCapability {
+	if rec, ok := b.store.Data().Nodes[NodeKey{MachineID: row.MachineID, UID: row.UID}.String()]; ok && rec.MailCap < wire.MailCapabilityBasic {
 		return http.StatusConflict, wire.CodeNodeTooOld, fmt.Sprintf("recipient node too old: the node under %s predates mail. "+
 			"Upgrade its nitipan", label)
 	}
@@ -239,21 +255,186 @@ func (b *Broker) checkRecipientLocked(req wire.MailSend) (status int, code, msg 
 	return 0, "", ""
 }
 
-func (b *Broker) enqueueMailLocked(w http.ResponseWriter, fromLabel string, req wire.MailSend) {
+// mailUserLocked names the user ID a label's mail belongs to: the user whose scope the label acts in. It
+// is empty for a label nobody bound once cross-user features are on, and no mail crosses to such a label.
+func (b *Broker) mailUserLocked(label string) string {
+	user, _ := b.scopeUserLocked(label)
+
+	return user.ID
+}
+
+// crossMail is what admits one message across users. Its zero value is mail between one user's own
+// machines, which no grant governs.
+type crossMail struct {
+	// SenderUser and RecipientUser are user IDs. SenderLabel is the sender user's user label, which the
+	// message carries in place of sender_verified.
+	SenderUser, RecipientUser, SenderLabel string
+
+	// Conversation is the conversation whose grant admits the message. Opens is true on its first
+	// message, which creates the conversation record.
+	Conversation string
+	Opens        bool
+}
+
+func (c crossMail) across() bool { return c.Conversation != "" }
+
+// checkCrossUserLocked judges mail whose sender and recipient belong to different users. A first message
+// needs the recipient user's grant to the sender's user, and an address whose session holds a live or
+// lapsed `shared` lease. A reply needs neither. It rides the grant of the conversation of the message it
+// answers, and must come from that message's recipient address, within 7 days of its read.
+//
+// acting_for plays no part. The recipient's user is the bound user of the address's label, so mail to a
+// shared agent follows the grants of the agent's own user.
+func (b *Broker) checkCrossUserLocked(rec NodeRecord, req wire.MailSend) (cross crossMail, status int, code, msg string) {
+	d := b.store.Data()
+
+	_, toLabel, _ := strings.Cut(req.To, "@")
+	senderUser, recipientUser := b.mailUserLocked(rec.Label), b.mailUserLocked(toLabel)
+
+	if senderUser == recipientUser {
+		return crossMail{}, 0, "", ""
+	}
+
+	if !d.CrossUserEnabled {
+		return crossMail{}, http.StatusForbidden, wire.CodeNotGranted, "mail to another user's machine needs cross-user features on. " +
+			"The broker owner turns them on with nitipan broker cross-user true on the broker host"
+	}
+
+	if rec.MailCap < wire.MailCapabilityCrossUser {
+		return crossMail{}, http.StatusForbidden, wire.CodeSenderTooOld, "this node's nitipan predates mail to another user. " +
+			"Upgrade it, then send again"
+	}
+
+	row := d.Labels[toLabel]
+	if to, ok := d.Nodes[NodeKey{MachineID: row.MachineID, UID: row.UID}.String()]; ok && to.MailCap < wire.MailCapabilityCrossUser {
+		return crossMail{}, http.StatusConflict, wire.CodeNodeTooOld, fmt.Sprintf("recipient node too old: the node under %s predates "+
+			"mail from another user. Its user can upgrade its nitipan", toLabel)
+	}
+
+	sender, recipient := d.Users[senderUser], d.Users[recipientUser]
+	if sender.UserLabel == "" || recipient.UserLabel == "" {
+		return crossMail{}, http.StatusForbidden, wire.CodeNotGranted, "the broker cannot name the user of the sender or the recipient, " +
+			"so it carries no mail between them"
+	}
+
+	cross = crossMail{SenderUser: senderUser, RecipientUser: recipientUser, SenderLabel: sender.UserLabel}
+
+	if req.ReplyTo != "" {
+		conv, why := b.replyConversationLocked(rec, req, senderUser, recipientUser)
+		if why != "" {
+			return crossMail{}, http.StatusForbidden, wire.CodeNotGranted, why
+		}
+
+		cross.Conversation = conv
+
+		return cross, 0, "", ""
+	}
+
+	if _, ok := d.MailGrants[recipientUser][senderUser]; !ok {
+		return crossMail{}, http.StatusForbidden, wire.CodeNotGranted, fmt.Sprintf("user %s has not granted mail from your user, %s. "+
+			"They grant it on the broker's sign-in page", recipient.UserLabel, sender.UserLabel)
+	}
+
+	if !b.sharedReachLocked(toLabel, req.To) {
+		return crossMail{}, http.StatusForbidden, wire.CodeNotGranted, fmt.Sprintf("%s holds no live or lapsed `shared` lease, so a "+
+			"first message from another user cannot reach it. A reply to mail it sent you needs no lease", req.To)
+	}
+
+	cross.Conversation, cross.Opens = req.ID, true
+
+	return cross, 0, "", ""
+}
+
+// replyConversationLocked finds the conversation a reply rides. It returns the reason the reply is
+// refused, or an empty reason.
+func (b *Broker) replyConversationLocked(rec NodeRecord, req wire.MailSend, senderUser, recipientUser string) (conv, why string) {
+	d := b.store.Data()
+
+	orig, ok := d.Mail[req.ReplyTo]
+	if !ok || orig.Kind != wire.EventMail || orig.Conversation == "" || orig.Bounced {
+		return "", fmt.Sprintf("message %s is not mail from another user that the broker still holds. A reply answers such a "+
+			"message within 7 days of its read", req.ReplyTo)
+	}
+
+	from, _ := b.mailAddress(wire.Holder{Agent: req.FromAgent, SessionID: req.FromSession}, rec.Label)
+	if orig.ToLabel != rec.Label || orig.ToAddress != from {
+		return "", fmt.Sprintf("only %s, the address message %s was sent to, may reply to it", orig.ToAddress, req.ReplyTo)
+	}
+
+	if req.To != orig.FromAddress {
+		return "", fmt.Sprintf("a reply to message %s goes to its sender, %s", req.ReplyTo, orig.FromAddress)
+	}
+
+	if orig.Stage != wire.StageRead {
+		return "", fmt.Sprintf("message %s has not been read yet, and a reply answers a message that was read. Read it with "+
+			"nitipan mail read, then reply", req.ReplyTo)
+	}
+
+	if b.cfg.Now().Sub(orig.StageAt) > wire.MailRetention {
+		return "", fmt.Sprintf("message %s was read more than 7 days ago, so the window for a reply has closed", req.ReplyTo)
+	}
+
+	c, ok := d.Conversations[orig.Conversation]
+	if !ok || !sameUsers(c, senderUser, recipientUser) {
+		return "", fmt.Sprintf("the broker no longer holds the conversation of message %s", req.ReplyTo)
+	}
+
+	if _, ok := d.MailGrants[c.RecipientUser][c.SenderUser]; !ok {
+		return "", fmt.Sprintf("%s: the grant that admitted the conversation of message %s was revoked", wire.ReasonNotAllowed, req.ReplyTo)
+	}
+
+	return orig.Conversation, ""
+}
+
+// sameUsers reports whether two users are the two ends of a conversation, in either direction.
+func sameUsers(c ConversationRecord, a, b string) bool {
+	return (c.SenderUser == a && c.RecipientUser == b) || (c.SenderUser == b && c.RecipientUser == a)
+}
+
+// sharedReachLocked reports whether the session at an address holds a live or lapsed `shared` lease,
+// the reach cross-user discovery already gives it. A lease another holder took is not reach.
+func (b *Broker) sharedReachLocked(label, addr string) bool {
+	for _, g := range b.g.grants {
+		if g.Node != label || g.Reach != wire.ReachShared || (g.State != wire.StateLive && g.State != wire.StateLapsed) {
+			continue
+		}
+
+		if got, _ := b.mailAddress(g.Holder, label); got == addr {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (b *Broker) enqueueMailLocked(w http.ResponseWriter, fromLabel string, req wire.MailSend, cross crossMail) {
 	name, label, _ := strings.Cut(req.To, "@")
 	sid, _ := b.resolveRecipientLocked(label, name)
 	now := b.cfg.Now()
 
 	from, _ := b.mailAddress(wire.Holder{Agent: req.FromAgent, SessionID: req.FromSession}, fromLabel)
 
+	// sender_verified keeps its single-user meaning: the sender is one of the recipient user's own
+	// machines. Mail from another user carries that user's label instead.
 	m := MailRecord{
 		ID: req.ID, Kind: wire.EventMail, FromLabel: fromLabel, FromAgent: req.FromAgent, FromSession: req.FromSession, FromAddress: from,
-		ToLabel: label, ToSession: sid, ToAddress: req.To, Body: req.Body, Verified: true,
+		ToLabel: label, ToSession: sid, ToAddress: req.To, Body: req.Body, Verified: !cross.across(),
+		SenderUser: cross.SenderLabel, Conversation: cross.Conversation,
 		Stage: wire.StageQueued, StageAt: now, EnqueuedAt: now,
+	}
+
+	if cross.across() {
+		m.ReplyTo = req.ReplyTo
 	}
 
 	err := b.commit(func(d *Data) error {
 		d.Mail[m.ID] = m
+
+		if cross.Opens {
+			d.Conversations[cross.Conversation] = ConversationRecord{
+				SenderUser: cross.SenderUser, RecipientUser: cross.RecipientUser, CreatedAt: now,
+			}
+		}
 
 		return nil
 	})
@@ -273,7 +454,7 @@ func (b *Broker) enqueueMailLocked(w http.ResponseWriter, fromLabel string, req 
 func mailEventOf(m MailRecord) wire.MailEvent {
 	return wire.MailEvent{
 		ID: m.ID, ToSession: m.ToSession, ToAddress: m.ToAddress, Sender: m.FromAddress, SenderVerified: m.Verified,
-		Body: m.Body, Reason: m.Reason, Orig: m.Orig, BodyDropped: m.BodyDropped, EnqueuedAt: m.EnqueuedAt,
+		SenderUser: m.SenderUser, Body: m.Body, Reason: m.Reason, Orig: m.Orig, BodyDropped: m.BodyDropped, EnqueuedAt: m.EnqueuedAt,
 	}
 }
 
@@ -281,15 +462,23 @@ func mailEventOf(m MailRecord) wire.MailEvent {
 // label is pinned to the node's current key, that registered a mail capability, and that reaches the
 // broker over HTTPS. Marking a message sent is what stops it bouncing as unsent, so it is persisted
 // before the write.
-func (b *Broker) flushMail(w http.ResponseWriter, key NodeKey, streamKey string, sentThisStream map[string]bool) error {
+//
+// Mail from another user goes only to a node that knows it, and is re-checked first. The re-check runs
+// only once this connection's complete stored-and-read report arrived. Until then such mail is held, so
+// a message the node already stored or read is never bounced. The report covers only the stream's own
+// connection, and only mail sent before it, so the re-check skips what this connection was sent.
+//
+// A node that came back below the cross-user capability is sent none of it. Mail it was never sent bounces
+// at once. Mail it was sent as a newer binary bounces only once the complete report left it queued.
+func (b *Broker) flushMail(w http.ResponseWriter, key NodeKey, st *streamState, sentThisStream map[string]bool) error {
 	b.mu.Lock()
 
 	rec, ok := b.store.Data().Nodes[key.String()]
-	if ok && rec.MailCap < wire.MailCapability {
+	if ok && rec.MailCap < wire.MailCapabilityBasic {
 		b.bounceOldNodeLocked(rec.Label)
 	}
 
-	if !ok || rec.MailCap < wire.MailCapability || !rec.HTTPS || rec.KeyHash != streamKey {
+	if !ok || rec.MailCap < wire.MailCapabilityBasic || !rec.HTTPS || rec.KeyHash != st.keyHash {
 		b.mu.Unlock()
 
 		return nil
@@ -301,10 +490,37 @@ func (b *Broker) flushMail(w http.ResponseWriter, key NodeKey, streamKey string,
 		return nil
 	}
 
+	ns := b.node(key)
+	reported := ns.mailReported && st.conn == ns.conn
+
+	crossCapable := rec.MailCap >= wire.MailCapabilityCrossUser
+
+	switch {
+	case !crossCapable:
+		// A node that came back too old may hold mail it stored as a newer binary before its ack was
+		// lost. Such mail waits for this connection's complete report, which advances what the node holds.
+		b.bounceCrossUserLocked(rec.Label, func(m MailRecord) string {
+			if m.Sent && (!reported || ns.sentSinceReport[m.ID]) {
+				return ""
+			}
+
+			return wire.ReasonNodeTooOld
+		})
+	case reported:
+		b.bounceCrossUserLocked(rec.Label, func(m MailRecord) string {
+			if ns.sentSinceReport[m.ID] {
+				return ""
+			}
+
+			return b.recheckCrossUserLocked(m)
+		})
+	}
+
 	var out []MailRecord
 
 	for _, m := range b.store.Data().Mail {
-		if m.ToLabel == rec.Label && m.Stage == wire.StageQueued && !m.Bounced && !sentThisStream[m.ID] {
+		if m.ToLabel == rec.Label && m.Stage == wire.StageQueued && !m.Bounced && !sentThisStream[m.ID] &&
+			(m.Conversation == "" || (reported && crossCapable)) {
 			out = append(out, m)
 		}
 	}
@@ -325,6 +541,20 @@ func (b *Broker) flushMail(w http.ResponseWriter, key NodeKey, streamKey string,
 
 		return nil
 	})
+
+	if err == nil {
+		for _, m := range out {
+			if m.Conversation == "" {
+				continue
+			}
+
+			if ns.sentSinceReport == nil {
+				ns.sentSinceReport = map[string]bool{}
+			}
+
+			ns.sentSinceReport[m.ID] = true
+		}
+	}
 
 	b.mu.Unlock()
 
@@ -474,7 +704,7 @@ func (b *Broker) afterMailChangeLocked(changed []MailRecord) {
 		nk := NodeKey{MachineID: row.MachineID, UID: row.UID}
 
 		rec, ok := b.store.Data().Nodes[nk.String()]
-		if !ok || rec.MailCap < wire.MailCapability {
+		if !ok || rec.MailCap < wire.MailCapabilityBasic {
 			continue
 		}
 
@@ -514,8 +744,17 @@ func (b *Broker) handleMailReport(w http.ResponseWriter, r *http.Request, key No
 		}
 
 		for _, id := range req.Read {
-			if m, ok := d.Mail[id]; ok && m.ToLabel == label {
-				changed = append(changed, b.advanceInto(d, m, wire.StageRead, now)...)
+			m, ok := d.Mail[id]
+			if !ok || m.ToLabel != label {
+				continue
+			}
+
+			read := b.advanceInto(d, m, wire.StageRead, now)
+			changed = append(changed, read...)
+
+			if c, ok := d.Conversations[m.Conversation]; ok && len(read) > 0 {
+				c.LastMessageRead = now
+				d.Conversations[m.Conversation] = c
 			}
 		}
 
@@ -543,6 +782,12 @@ func (b *Broker) handleMailReport(w http.ResponseWriter, r *http.Request, key No
 
 	for l := range senders {
 		b.wakeSendersLocked(l)
+	}
+
+	// The complete report is what lets the stream re-check mail from another user.
+	if req.Complete {
+		b.node(key).mailReported = true
+		b.wakeLabelLocked(label)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -589,6 +834,8 @@ func (b *Broker) handleMailStatus(w http.ResponseWriter, r *http.Request, key No
 // message the broker sent and saw no ack for never bounces here. Its node reports it when it returns.
 func (b *Broker) sweepMailLocked() {
 	wall := b.cfg.Now()
+
+	b.sweepConversationsLocked(wall)
 
 	due := false
 
@@ -671,6 +918,100 @@ func (b *Broker) bounceOldNodeLocked(label string) {
 			if m.ToLabel == label && m.Stage == wire.StageQueued && !m.Bounced && m.Kind == wire.EventMail {
 				b.bounceInto(d, m, wire.ReasonNodeTooOld, true, now)
 			}
+		}
+
+		return nil
+	})
+
+	for _, l := range senders {
+		b.wakeSendersLocked(l)
+	}
+}
+
+// sweepConversationsLocked drops a conversation once the broker holds none of its messages and its last
+// read is more than 7 days old. A reply needs the message it answers, which the broker drops 7 days after
+// its read, so a dropped conversation could admit no reply anyway.
+func (b *Broker) sweepConversationsLocked(wall time.Time) {
+	held := map[string]bool{}
+
+	for _, m := range b.store.Data().Mail {
+		if m.Conversation != "" {
+			held[m.Conversation] = true
+		}
+	}
+
+	var done []string
+
+	for id, c := range b.store.Data().Conversations {
+		if !held[id] && (c.LastMessageRead.IsZero() || wall.Sub(c.LastMessageRead) > wire.MailRetention) {
+			done = append(done, id)
+		}
+	}
+
+	if len(done) == 0 {
+		return
+	}
+
+	_ = b.commit(func(d *Data) error {
+		for _, id := range done {
+			delete(d.Conversations, id)
+		}
+
+		return nil
+	})
+}
+
+// recheckCrossUserLocked judges a queued message from another user again before delivery. It returns
+// the bounce reason, or an empty reason. The grant that admitted the conversation must still stand, and a
+// first message's recipient must still hold a live or lapsed `shared` lease.
+func (b *Broker) recheckCrossUserLocked(m MailRecord) string {
+	d := b.store.Data()
+
+	c, ok := d.Conversations[m.Conversation]
+	if !ok || !d.CrossUserEnabled {
+		return wire.ReasonNotAllowed
+	}
+
+	if _, ok := d.MailGrants[c.RecipientUser][c.SenderUser]; !ok {
+		return wire.ReasonNotAllowed
+	}
+
+	if m.ReplyTo == "" && !b.sharedReachLocked(m.ToLabel, m.ToAddress) {
+		return wire.ReasonNoSharedLease
+	}
+
+	return ""
+}
+
+// bounceCrossUserLocked bounces queued mail from another user to a label, and wakes its senders. The reason
+// func judges each message. It returns the bounce reason, or an empty reason to keep the message queued.
+func (b *Broker) bounceCrossUserLocked(label string, reason func(MailRecord) string) {
+	bounce := map[string]string{}
+
+	for id, m := range b.store.Data().Mail {
+		if m.ToLabel != label || m.Kind != wire.EventMail || m.Conversation == "" || m.Stage != wire.StageQueued || m.Bounced {
+			continue
+		}
+
+		if why := reason(m); why != "" {
+			bounce[id] = why
+		}
+	}
+
+	if len(bounce) == 0 {
+		return
+	}
+
+	now := b.cfg.Now()
+
+	var senders []string
+
+	_ = b.commit(func(d *Data) error {
+		for id, why := range bounce {
+			m := d.Mail[id]
+			senders = append(senders, m.FromLabel)
+
+			b.bounceInto(d, m, why, true, now)
 		}
 
 		return nil

@@ -38,6 +38,11 @@ type grant struct {
 	Machine    string `json:"machine"`
 	UID        int    `json:"uid"`
 	Derivation int    `json:"derivation"`
+
+	// RefusalNoticed lists the coworkers' user labels whose claim this lease refused while hidden from
+	// them, and whose refusal its holder was already told of. It holds the notice to one per coworker,
+	// across broker restarts.
+	RefusalNoticed []string `json:"refusal_noticed,omitempty"`
 }
 
 func (g *grant) nodeKey() NodeKey { return NodeKey{MachineID: g.Machine, UID: g.UID} }
@@ -394,6 +399,88 @@ func validRequestID(id string) bool {
 	return id != "" && len(id) <= 64 && !strings.ContainsAny(id, "/\x00")
 }
 
+// resolveActingFor names the scope a claim counts in. A claim from before explicit acting_for carries an
+// unauthenticated value, so the label's own scope replaces it, delegations included. An explicit value
+// stands only when it is that scope's user, or a user who delegated to the label.
+//
+// A label nobody bound acts in the broker owner's scope while cross-user features are off, and the broker
+// refuses it before any claim reaches here once they are on. It has no binding to check a delegation
+// against, so its explicit claim for anyone else is refused.
+func (b *Broker) resolveActingFor(label, actingFor string, explicit bool) (string, error) {
+	user := b.scopeUserLabel(label)
+
+	if !explicit || actingFor == "" || actingFor == user {
+		return user, nil
+	}
+
+	if _, bound := b.labelBoundUserLocked(label); !bound {
+		return "", fmt.Errorf("label %s is not bound to a user, so it cannot claim for %s. Bind it on the broker "+
+			"host with 'nitipan broker approve', or on the broker's sign-in page with 'nitipan node pair' and the "+
+			"pairing code", label, actingFor)
+	}
+
+	if b.labelHoldsDelegation(label, actingFor) {
+		return actingFor, nil
+	}
+
+	return "", fmt.Errorf("label %s cannot act as %s without a standing delegation from that user, granted on the broker's sign-in page", label, actingFor)
+}
+
+// labelHoldsDelegation reports whether label holds a delegation from the user whose user label is
+// userLabel. A delegation to a label nobody is bound to acts on nothing, so a forgotten label's key that
+// registers again gets none of the scope its delegations once gave it.
+func (b *Broker) labelHoldsDelegation(label, userLabel string) bool {
+	if _, bound := b.labelBoundUserLocked(label); !bound {
+		return false
+	}
+
+	delegator, err := b.userByLabelLocked(userLabel)
+	if err != nil {
+		return false
+	}
+
+	_, ok := b.store.Data().Delegations[delegator.ID][label]
+
+	return ok
+}
+
+// inConflictingScope reports whether an existing grant g conflicts with a new claim at reach newReach
+// whose scope is newActingFor. Every bound user shares the `shared` scope. While cross-user features are
+// off, the broker runs one scope, so `user` leases conflict whoever holds them. Once they are on, a
+// `user` lease conflicts only within the user its acting_for names.
+func (b *Broker) inConflictingScope(g *grant, newReach, newActingFor string) bool {
+	if g.Reach == wire.ReachShared || newReach == wire.ReachShared || !b.store.Data().CrossUserEnabled {
+		return true
+	}
+
+	return g.ActingFor == newActingFor
+}
+
+func (b *Broker) findConflicts(req wire.Claim, node NodeKey, actingFor string) (live, lapsed []*grant) {
+	for _, g := range b.g.grants {
+		if g.ID == req.ID || !repoid.OverlapAny(g.Entries, req.Entries) {
+			continue
+		}
+
+		if sameHolder(g, node, req.Holder) {
+			continue
+		}
+
+		if !b.inConflictingScope(g, req.Reach, actingFor) {
+			continue
+		}
+
+		switch g.State {
+		case wire.StateLive:
+			live = append(live, g)
+		case wire.StateLapsed:
+			lapsed = append(lapsed, g)
+		}
+	}
+
+	return live, lapsed
+}
+
 func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKey) {
 	var req wire.Claim
 
@@ -429,56 +516,41 @@ func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKe
 		return
 	}
 
-	var live, lapsed []*grant
-
-	for _, g := range b.g.grants {
-		if g.ID == req.ID || !repoid.OverlapAny(g.Entries, req.Entries) {
-			continue
-		}
-
-		if sameHolder(g, node, req.Holder) {
-			// A holder never conflicts with itself. The same names again return the lease it holds.
-			if g.State == wire.StateLive && sameEntries(g.Entries, req.Entries) {
-				res := wire.Result{
-					Code: wire.CodeGranted, Message: "already held", Lease: ptr(b.viewOf(g)),
-					Overlaps: b.overlapsFor(g, b.mirrorsLocked()),
-				}
-				b.answer(w, node, req.ID, res, nil)
-
-				return
-			}
-
-			continue
-		}
-
-		switch g.State {
-		case wire.StateLive:
-			live = append(live, g)
-		case wire.StateLapsed:
-			lapsed = append(lapsed, g)
-		}
-	}
-
-	if len(live) > 0 {
-		sort.Slice(live, func(i, j int) bool { return live[i].ID < live[j].ID })
-
-		res := wire.Result{Code: wire.CodeRefused, Message: "the claim overlaps " + b.holders(live)}
-		for _, g := range live {
-			res.Others = append(res.Others, b.viewOf(g))
-		}
-
-		b.answer(w, node, req.ID, res, nil)
+	rec := b.store.Data().Nodes[node.String()]
+	actingFor, err := b.resolveActingFor(rec.Label, req.ActingFor, req.ActingForExplicit)
+	if err != nil {
+		writeErr(w, http.StatusForbidden, wire.CodeForbidden, err.Error())
 
 		return
 	}
 
-	rec := b.store.Data().Nodes[node.String()]
+	// A holder never conflicts with itself. The same names again return the lease it holds.
+	for _, g := range b.g.grants {
+		if sameHolder(g, node, req.Holder) && g.State == wire.StateLive && sameEntries(g.Entries, req.Entries) {
+			res := wire.Result{
+				Code: wire.CodeGranted, Message: "already held", Lease: ptr(b.viewOf(g)),
+				Overlaps: b.overlapsFor(node, g, b.mirrorsLocked()),
+			}
+			b.answer(w, node, req.ID, res, nil)
+
+			return
+		}
+	}
+
+	live, lapsed := b.findConflicts(req, node, actingFor)
+
+	if len(live) > 0 {
+		b.refuseClaimLocked(w, node, req.ID, rec.Label, live)
+
+		return
+	}
+
 	taker := holderText(req.Holder) + " on " + rec.Label
 
 	fresh := &grant{
 		Lease: wire.Lease{
 			ID: req.ID, Reach: req.Reach, State: wire.StateLive, Revision: 1,
-			Entries: req.Entries, Anchor: req.Anchor, Holder: req.Holder, ActingFor: req.ActingFor,
+			Entries: req.Entries, Anchor: req.Anchor, Holder: req.Holder, ActingFor: actingFor,
 			Description: req.Description, Node: rec.Label, Liveness: wire.LiveAlive,
 		},
 		Machine: node.MachineID, UID: node.UID, Derivation: req.Derivation,
@@ -495,7 +567,7 @@ func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKe
 	// The token is fixed once, here. The reply and the committed change both use it, so they never differ.
 	fresh.Token = nextToken(b.g.counter, b.cfg.Now())
 
-	res := wire.Result{Code: wire.CodeGranted, Lease: ptr(b.viewOf(fresh)), Overlaps: b.overlapsFor(fresh, b.mirrorsLocked())}
+	res := wire.Result{Code: wire.CodeGranted, Lease: ptr(b.viewOf(fresh)), Overlaps: b.overlapsFor(node, fresh, b.mirrorsLocked())}
 	change := func(s *gstate) {
 		s.counter = fresh.Token
 		s.grants[fresh.ID] = fresh
@@ -510,6 +582,76 @@ func (b *Broker) handleClaim(w http.ResponseWriter, r *http.Request, node NodeKe
 
 	b.answer(w, node, req.ID, res, change)
 	b.settleGrantLocked(req.ID, taken)
+}
+
+// hiddenRefusal is the refusal text for the conflicting leases the asker's discovery does not show. It
+// names no holder, path, node, or user, and it says what the asker can do next.
+const hiddenRefusal = "the name you asked about is held at user reach by another user. Wait for that lease " +
+	"to end, or ask the broker owner"
+
+// refuseClaimLocked refuses a claim that live leases conflict with. A lease shows in the refusal only
+// at the detail discovery would show the asker. The result is filtered before answer stores it, so a
+// replay of the request ID returns the same filtered bytes.
+//
+// The holder of each hidden lease is told once per coworker. The mark rides the same write as the
+// stored outcome, and the event goes out only once that write succeeded.
+func (b *Broker) refuseClaimLocked(w http.ResponseWriter, node NodeKey, id, label string, live []*grant) {
+	sort.Slice(live, func(i, j int) bool { return live[i].ID < live[j].ID })
+
+	var shown, hidden []*grant
+
+	for _, g := range live {
+		if b.grantVisibleTo(node, g) {
+			shown = append(shown, g)
+		} else {
+			hidden = append(hidden, g)
+		}
+	}
+
+	res := wire.Result{Code: wire.CodeRefused}
+	for _, g := range shown {
+		res.Others = append(res.Others, b.viewOf(g))
+	}
+
+	switch {
+	case len(hidden) == 0:
+		res.Message = "the claim overlaps " + b.holders(shown)
+	case len(shown) == 0:
+		res.Message = hiddenRefusal
+	default:
+		res.Message = "the claim overlaps " + b.holders(shown) + ". Also, " + hiddenRefusal
+	}
+
+	coworker := b.scopeUserLabel(label)
+
+	var tell []string
+
+	for _, g := range hidden {
+		if coworker != "" && !slices.Contains(g.RefusalNoticed, coworker) {
+			tell = append(tell, g.ID)
+		}
+	}
+
+	var change func(*gstate)
+	if len(tell) > 0 {
+		change = func(s *gstate) {
+			for _, gid := range tell {
+				t := s.grants[gid]
+				t.RefusalNoticed = append(slices.Clone(t.RefusalNoticed), coworker)
+			}
+		}
+	}
+
+	b.answer(w, node, id, res, change)
+
+	for _, gid := range tell {
+		g := b.g.grants[gid]
+		if g == nil || !slices.Contains(g.RefusalNoticed, coworker) {
+			continue
+		}
+
+		_, _ = b.enqueueLocked(g.nodeKey(), wire.EventClaimRefused, wire.ClaimRefused{Lease: g.ID, Coworker: coworker})
+	}
 }
 
 // settleGrantLocked runs after a grant's write. A write that failed leaves no grant, so its deadline
@@ -665,6 +807,22 @@ func (ns *nodeState) hasAnchor(id string) bool {
 	return slices.ContainsFunc(ns.snapshot, func(m wire.MirroredLease) bool { return m.ID == id })
 }
 
+// isOwnLease reports whether the lease belongs to the asking node or to the user it is bound to. A
+// lease is a user's own when its holder's bound user is that user, or when its acting_for is that user.
+// So a user can release or break a lease a shared agent holds for them.
+func (b *Broker) isOwnLease(g *grant, node NodeKey) bool {
+	if g.nodeKey() == node {
+		return true
+	}
+
+	user := b.scopeUserLabel(b.store.Data().Nodes[node.String()].Label)
+	if user == "" {
+		return false
+	}
+
+	return g.ActingFor == user || b.scopeUserLabel(g.Node) == user
+}
+
 func (b *Broker) handleRelease(w http.ResponseWriter, r *http.Request, node NodeKey) {
 	var req wire.Release
 
@@ -687,10 +845,18 @@ func (b *Broker) handleRelease(w http.ResponseWriter, r *http.Request, node Node
 		return
 	}
 
-	var hit []*grant
+	var hit, ended []*grant
 
 	for _, g := range b.g.grants {
 		if g.nodeKey() != node {
+			// Another node holds the lease. Its user may still release it by ID, as when a shared agent
+			// holds it for them. The holder's node keeps the lease's anchor, so the release ends the
+			// lease the way a break does, and the holder's node learns of it from the end fact.
+			if req.Cause == wire.CauseReleased && req.ID != "" && g.ID == req.ID &&
+				(g.State == wire.StateLive || g.State == wire.StateLapsed) && b.isOwnLease(g, node) {
+				ended = append(ended, g)
+			}
+
 			continue
 		}
 
@@ -705,6 +871,12 @@ func (b *Broker) handleRelease(w http.ResponseWriter, r *http.Request, node Node
 			repoid.OverlapAny(g.Entries, []repoid.Name{*req.Name}):
 			hit = append(hit, g)
 		}
+	}
+
+	if len(ended) > 0 {
+		b.endForOwnerLocked(w, node, req.RequestID, ended[0], wire.CodeReleased, holderText(req.Holder))
+
+		return
 	}
 
 	if len(hit) == 0 {
@@ -763,9 +935,27 @@ func (b *Broker) handleBreak(w http.ResponseWriter, r *http.Request, node NodeKe
 	over := g.State == wire.StateTaken || g.State == wire.StateEnded
 
 	// An end fact stays until its owner acks it, so the holder still learns who took or ended the
-	// lease. Only the owner's own node may clear it early.
+	// lease. Only the owner's own node may clear it early. The fact carries the lease only to a node
+	// whose discovery shows it.
 	if over && g.nodeKey() != node {
-		b.answer(w, node, req.RequestID, wire.Result{Code: wire.CodeEnded, Lease: ptr(b.viewOf(g))}, nil)
+		res := wire.Result{Code: wire.CodeEnded, Message: "lease " + g.ID + " already ended"}
+		if b.grantVisibleTo(node, g) {
+			res.Lease = ptr(b.viewOf(g))
+		}
+
+		b.answer(w, node, req.RequestID, res, nil)
+
+		return
+	}
+
+	// Once cross-user features are on, a user may break only their own leases. A coworker's live lease
+	// ends by release, its term, a death report, or a break by its own user or the broker owner.
+	if !over && b.store.Data().CrossUserEnabled && !b.isOwnLease(g, node) {
+		msg := fmt.Sprintf("lease %s belongs to another user, and only its own user may break it. "+
+			"It ends when its holder releases it, when its term runs out, or on a death report. "+
+			"Otherwise ask its user to break it, or ask the broker owner to run 'nitipan broker break %s' on the broker host",
+			g.ID, g.ID)
+		b.answer(w, node, req.RequestID, wire.Result{Code: wire.CodeRefused, Message: msg}, nil)
 
 		return
 	}
@@ -782,16 +972,28 @@ func (b *Broker) handleBreak(w http.ResponseWriter, r *http.Request, node NodeKe
 		return
 	}
 
-	by := holderText(req.By)
+	if !over {
+		b.endForOwnerLocked(w, node, req.RequestID, g, wire.CodeBroken, holderText(req.By))
+
+		return
+	}
+
 	prev := b.viewOf(g)
 
 	b.answer(w, node, req.RequestID, wire.Result{Code: wire.CodeBroken, Lease: &prev}, func(s *gstate) {
-		if over {
-			delete(s.grants, g.ID)
+		delete(s.grants, g.ID)
+	})
 
-			return
-		}
+	delete(b.dl, g.ID)
+}
 
+// endForOwnerLocked ends a live or lapsed lease for a node allowed to end it, and answers with code.
+// The lease stays as an end fact naming by, and the holder's node is told, so its local anchor does not
+// outlive the lease.
+func (b *Broker) endForOwnerLocked(w http.ResponseWriter, node NodeKey, requestID string, g *grant, code, by string) {
+	prev := b.viewOf(g)
+
+	b.answer(w, node, requestID, wire.Result{Code: code, Lease: &prev}, func(s *gstate) {
 		e := s.grants[g.ID]
 		e.State = wire.StateEnded
 		e.Revision++
@@ -800,8 +1002,8 @@ func (b *Broker) handleBreak(w http.ResponseWriter, r *http.Request, node NodeKe
 
 	delete(b.dl, g.ID)
 
-	if !over && b.g.grants[g.ID] != nil {
-		b.announceLocked(b.g.grants[g.ID])
+	if e := b.g.grants[g.ID]; e != nil && e.State == wire.StateEnded {
+		b.announceLocked(e)
 	}
 }
 
@@ -852,7 +1054,7 @@ func (b *Broker) handleFence(w http.ResponseWriter, r *http.Request, _ NodeKey) 
 	writeJSON(w, http.StatusOK, wire.FenceVerdict{Version: wire.Current, Verdict: verdict, Counter: b.g.counter})
 }
 
-func (b *Broker) handleList(w http.ResponseWriter, r *http.Request, _ NodeKey) {
+func (b *Broker) handleList(w http.ResponseWriter, r *http.Request, asker NodeKey) {
 	var req wire.ListRequest
 
 	if !decodeBody(w, r, &req, func() wire.Version { return req.Version }) {
@@ -865,7 +1067,7 @@ func (b *Broker) handleList(w http.ResponseWriter, r *http.Request, _ NodeKey) {
 	b.sweepLocked()
 
 	writeJSON(w, http.StatusOK, wire.Listed{Version: wire.Current, Leases: b.leasesLocked(func(g *grant) bool {
-		return g.State == wire.StateLive || g.State == wire.StateLapsed
+		return (g.State == wire.StateLive || g.State == wire.StateLapsed) && b.grantVisibleTo(asker, g)
 	})})
 }
 

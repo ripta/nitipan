@@ -208,9 +208,15 @@ func (n *Node) withLock(fn func(*state.Locked) error) error {
 func (n *Node) notice(env record.Envelope, target, cause string, rev uint64, detail string) {
 	cause = fmt.Sprintf("%s-r%d", cause, rev)
 
+	n.publishNotice(env, record.NoticeID(target, cause), target, cause, detail)
+}
+
+// publishNotice writes a notice under the given ID. A notice already published under it stays, so a
+// repeated event writes nothing new.
+func (n *Node) publishNotice(env record.Envelope, id, target, cause, detail string) {
 	note := &record.Notice{
 		Envelope: record.Envelope{
-			Version: record.ParentVersion, ID: record.NoticeID(target, cause), Footprint: record.NoneFootprint(),
+			Version: record.ParentVersion, ID: id, Footprint: record.NoneFootprint(),
 			ClearWhenDead: true, Liveness: env.Liveness, Machine: env.Machine, Holder: env.Holder,
 		},
 		Cause: cause, Target: target, Detail: detail, At: n.opts.Now().UTC(),
@@ -297,11 +303,41 @@ func (n *Node) handleEvent(ev wire.Event) error {
 		n.onLease(l, false)
 	}
 
+	if ev.Kind == wire.EventClaimRefused {
+		var cr wire.ClaimRefused
+		if err := json.Unmarshal(ev.Data, &cr); err != nil {
+			return fmt.Errorf("decoding a claim-refused event: %w", err)
+		}
+
+		n.onClaimRefused(cr)
+	}
+
 	if n.opts.OnEvent != nil {
 		return n.opts.OnEvent(ev)
 	}
 
 	return nil
+}
+
+// onClaimRefused tells the holder of a lease that it refused a coworker's `shared` claim. The notice
+// names only the holder's own lease and the coworker's user label. Its ID carries the coworker, so each
+// coworker gets one notice per lease. A lease with no sidecar here has no holder to tell.
+func (n *Node) onClaimRefused(cr wire.ClaimRefused) {
+	sc, err := handoff.ReadSidecar(n.opts.StateDir, cr.Lease)
+	if err != nil {
+		return
+	}
+
+	id := record.NoticeID(cr.Lease, record.CauseSharedClaimRefused) + "-" + cr.Coworker
+	if !state.ValidName(id + ".json") {
+		n.warn(fmt.Sprintf("a claim-refused event for %s names an unusable coworker label", cr.Lease))
+
+		return
+	}
+
+	n.publishNotice(sc.Holder, id, cr.Lease, record.CauseSharedClaimRefused, fmt.Sprintf("your broker lease %s refused a "+
+		"shared claim by your coworker %s, who cannot see your lease. Release it if you are done, or reach out to them",
+		cr.Lease, cr.Coworker))
 }
 
 func (n *Node) applySnapshotAck(ack wire.SnapshotAck) {

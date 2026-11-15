@@ -24,6 +24,7 @@ const (
 	PathSnapshot  = Prefix + "/snapshot"
 	PathHeartbeat = Prefix + "/heartbeat"
 	PathPing      = Prefix + "/ping"
+	PathPair      = Prefix + "/pair"
 )
 
 // Headers a node sends on every request after registration. The broker checks the bearer key
@@ -85,6 +86,7 @@ func (v Version) Check() error {
 // Error codes the broker returns in an Error body.
 const (
 	CodeUnauthorized  = "unauthorized"
+	CodeForbidden     = "forbidden"
 	CodeKeyConflict   = "key_conflict"
 	CodeLabelConflict = "label_collision"
 	CodeBadRequest    = "bad_request"
@@ -139,6 +141,18 @@ type Registered struct {
 	// is how often the stream carries a comment, so the node can tell a dead stream from a quiet one.
 	TermMillis      int64 `json:"term_ms"`
 	KeepaliveMillis int64 `json:"keepalive_ms"`
+
+	// CrossUser is true when the broker has cross-user features enabled. Once a node sees this set,
+	// it refuses to send its key over plain HTTP.
+	CrossUser bool `json:"cross_user,omitempty"`
+
+	// ActingForExplicit is true when the broker reads a claim's acting_for_explicit field. A broker
+	// that predates it omits it, and the node then answers a claim for another user "broker too old".
+	ActingForExplicit bool `json:"acting_for_explicit,omitempty"`
+
+	// MailReplies is true when the broker reads a mail send's reply_to field. A broker that predates it
+	// omits it, and the node then answers a reply "broker too old".
+	MailReplies bool `json:"mail_replies,omitempty"`
 }
 
 // MirroredLease is one lease of the machine's state directory, as the node saw it. A record the node
@@ -241,4 +255,17 @@ func ClassifyIP(ip net.IP) string {
 	default:
 		return HostPublic
 	}
+}
+
+// Pair sends the hash of a pairing code the node printed. The broker ties the code to the key that sent
+// it, so a bind by the code pins that key.
+type Pair struct {
+	Version     Version `json:"version"`
+	PairingHash string  `json:"pairing_hash"`
+}
+
+// Paired answers a Pair with the label the code binds.
+type Paired struct {
+	Version Version `json:"version"`
+	Label   string  `json:"label"`
 }

@@ -571,3 +571,39 @@ func TestOldNodeSnapshotWithNoAckedFieldStillWorks(t *testing.T) {
 		t.Fatalf("the snapshot must not disturb the lease: %+v", h.b.Leases())
 	}
 }
+
+// TestSubstituteActingForPreventsCrossUserClaiming proves that with cross-user features off, an old-version
+// claim from a bound label that names another user's label in acting_for acts as the label's own user. It
+// catches a broker that skips the substitution until the switch is on, which would let a label claim in a
+// scope the owner never gave it the moment the owner turns the features on.
+func TestSubstituteActingForPreventsCrossUserClaiming(t *testing.T) {
+	h := newHarness(t, nil)
+	h.twoNodes()
+
+	owner := h.data().Users[h.data().OwnerID]
+	approveKey(h, h.data().Nodes[laptop.key().String()].Label, laptop.Key)
+
+	other, err := h.b.AdmitUser(createIssuer, "other@example.com", "other@example.com", wallStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var res wire.Result
+	req := wire.Claim{
+		Version: wire.Current, ID: "L1", Reach: wire.ReachUser, Derivation: 1, Anchor: "anchor-L1",
+		Entries: name("svc"), Holder: holder("a"), ActingFor: other.UserLabel,
+	}
+
+	if h.call(laptop, wire.PathClaim, req, &res) != http.StatusOK || res.Code != wire.CodeGranted {
+		t.Fatalf("claim failed: %+v", res)
+	}
+
+	leases := h.b.Leases()
+	if len(leases) != 1 {
+		t.Fatalf("lease count = %d, want 1", len(leases))
+	}
+
+	if leases[0].ActingFor != owner.UserLabel {
+		t.Errorf("stored lease ActingFor = %q, want the label's bound user %q", leases[0].ActingFor, owner.UserLabel)
+	}
+}
