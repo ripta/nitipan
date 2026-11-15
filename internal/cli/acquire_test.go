@@ -179,11 +179,11 @@ func TestAcquireRefusesADeadHolderThatOnlyANewerNitipanMayClear(t *testing.T) {
 	w := newWorld(t)
 	repo := w.dir("repo")
 
-	id := w.plant(plantSpec{PID: 777, Paths: []string{repo}, Version: "1.3", KeepAfterDeath: true})
+	id := w.plant(plantSpec{PID: 777, Paths: []string{repo}, Version: "1.4", KeepAfterDeath: true})
 
 	res := w.run(w.claude(200, "s1"), "acquire", "--checkout", repo)
 	wantStatus(t, res, exitcode.Refused)
-	wantContains(t, "stderr", res.Stderr, "1.3", "newer nitipan", "Upgrade nitipan")
+	wantContains(t, "stderr", res.Stderr, "1.4", "newer nitipan", "Upgrade nitipan")
 	wantAbsent(t, "stderr", res.Stderr, "--force")
 
 	if w.leaseByID(id) == nil {

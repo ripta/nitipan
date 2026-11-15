@@ -32,8 +32,12 @@ const stateToken = `"@@STATEDIR@@"`
 type Installed struct {
 	Path string
 
-	// Action is "wrote", "unchanged", or "replaced".
+	// Action is "wrote", "unchanged", or "replaced". Installing git hooks adds "removed", "restored",
+	// and "unset".
 	Action string
+
+	// Note adds what a person needs to know about the action. It is empty for most.
+	Note string
 }
 
 // InstallOpencode writes the opencode plugin files into <dir>/nitipan, with nitipan's absolute path
@@ -143,6 +147,10 @@ func render(executable, stateDir string) ([]pluginFile, error) {
 }
 
 func writeAtomic(dest string, data []byte) error {
+	return writeAtomicMode(dest, data, 0o644)
+}
+
+func writeAtomicMode(dest string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(dest), ".nitipan-install-")
 	if err != nil {
 		return fmt.Errorf("writing %s: %w", dest, err)
@@ -156,7 +164,7 @@ func writeAtomic(dest string, data []byte) error {
 		return fmt.Errorf("writing %s: %w", dest, err)
 	}
 
-	if err := tmp.Chmod(0o644); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 
 		return fmt.Errorf("writing %s: %w", dest, err)

@@ -27,7 +27,7 @@ func checker(alive bool) *liveness.Checker {
 }
 
 const unknownKindRecord = `{
-  "version": "1.3",
+  "version": "1.4",
   "id": "01JAAAAAAAAAAAAAAAAAAAAAAA",
   "footprint": [{"type": "name", "name": "cpu:heavy"}],
   "clear_when_dead": false,
@@ -86,7 +86,7 @@ func TestListJSONEmitsALeaseOfAnUnknownKindWithItsLivenessAndFootprint(t *testin
 
 		lease := firstLease(t, doc)
 
-		if lease["kind"] != "future" || lease["usable"] != true || lease["version"] != "1.3" {
+		if lease["kind"] != "future" || lease["usable"] != true || lease["version"] != "1.4" {
 			t.Errorf("lease = %v", lease)
 		}
 
@@ -273,7 +273,7 @@ func TestListJSONAlwaysWritesRequestsAndNoticesAsArrays(t *testing.T) {
 		}
 	}
 
-	if doc["schema_version"] != "1.2" {
+	if doc["schema_version"] != "1.3" {
 		t.Errorf("schema_version = %v", doc["schema_version"])
 	}
 }

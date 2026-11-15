@@ -13,7 +13,7 @@ import (
 // higher major is not.
 const (
 	CurrentMajor = 1
-	CurrentMinor = 2
+	CurrentMinor = 3
 )
 
 // Version is a record format version, written as "major.minor".
@@ -40,6 +40,9 @@ var (
 	// ParentVersion is the minor that adds the parent field of a sub-lease, and the request and
 	// notice records. A record that uses none of them keeps its lower minor.
 	ParentVersion = Version{Major: CurrentMajor, Minor: 2}
+
+	// MarkVersion is the minor that adds the fence mark.
+	MarkVersion = Version{Major: CurrentMajor, Minor: 3}
 )
 
 // ParseVersion parses "major.minor".

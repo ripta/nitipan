@@ -26,7 +26,13 @@ Breaking a lease that has sub-leases removes only that lease. Its sub-leases sta
 as ordinary leases of their holders, and the output lists them. Breaking a sub-lease returns its keys to
 the lease it came from, and the output says so.
 
-A file whose name is not a lease ID cannot be named here. It has to be deleted by hand.`,
+A file whose name is not a lease ID cannot be named here. It has to be deleted by hand.
+
+Breaking a live holder's lease also leaves a fence mark for that holder. The mark outlives the
+tombstone: it refuses the holder's claim on those paths, and, where nitipan's git hook is in force,
+its ref updates there. The mark lifts for a path once another session holds it, or once the holder
+dies. list shows marks, and break takes a mark's ID to remove one without --force. A holder cannot
+remove a mark that guards against itself.`,
 		RunE: func(cmd *cobra.Command, ids []string) error {
 			return a.wrapErr(a.runBreak(cmd, ids))
 		},
@@ -64,6 +70,10 @@ func (a *app) runBreak(cmd *cobra.Command, ids []string) error {
 			for _, line := range standingLines(t.Standing) {
 				fmt.Fprintln(a.deps.Stdout, line)
 			}
+
+			for _, line := range hooksLines(t.Hooks) {
+				fmt.Fprintln(a.deps.Stdout, line)
+			}
 		}
 	}
 
@@ -72,8 +82,12 @@ func (a *app) runBreak(cmd *cobra.Command, ids []string) error {
 
 func breakLine(t lease.BrokenLease) string {
 	kind := "lease"
-	if t.WasTombstone {
+
+	switch {
+	case t.WasTombstone:
 		kind = "tombstone"
+	case t.WasMark:
+		kind = "fence mark"
 	}
 
 	switch t.Outcome {
@@ -81,8 +95,30 @@ func breakLine(t lease.BrokenLease) string {
 		return fmt.Sprintf("cleared %s %s of a dead holder", kind, t.ID)
 	case lease.Broken:
 		return fmt.Sprintf("broken %s %s; a tombstone waits for its holder", kind, t.ID)
+	case lease.RemovedMark:
+		return fmt.Sprintf("removed fence mark %s; its holder may claim those paths again", t.ID)
 	default:
 		return fmt.Sprintf("removed unusable %s %s; no tombstone written, because nitipan cannot tell whose it was",
 			kind, t.ID)
 	}
+}
+
+// hooksLines says whether the broken lease is fenced. A break is fenced against the holder's next ref
+// update only where nitipan's git hook is in force.
+func hooksLines(hooks []lease.GitHooks) []string {
+	var out []string
+
+	for _, h := range hooks {
+		switch {
+		case h.Checkout == "":
+			out = append(out, "  this lease is not inside a git checkout, so no git hook fences it")
+		case h.InForce:
+			out = append(out, fmt.Sprintf("  the git hook is in force in %s, so the holder's ref updates there are fenced", h.Checkout))
+		default:
+			out = append(out, fmt.Sprintf("  the git hook is not in force in %s (%s), so the holder's ref updates there are "+
+				"not fenced", h.Checkout, h.Why))
+		}
+	}
+
+	return out
 }

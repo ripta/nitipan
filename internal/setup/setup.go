@@ -3,8 +3,9 @@
 //
 // `nitipan setup` prints it, and every blocked write prints the same words. nitipan never edits an
 // agent's settings: Claude Code's sandbox denies writes to its own settings file, and the other
-// agents keep comments in theirs that a round-trip would drop. The one thing it writes is the
-// opencode plugin files, into a directory the user names.
+// agents keep comments in theirs that a round-trip would drop. It writes two things, each into a
+// place the user names: the opencode plugin files, and the git hook that `setup git` installs into a
+// checkout. Neither is a settings file.
 package setup
 
 import (
@@ -18,6 +19,9 @@ const (
 	Claude   = "claude"
 	Codex    = "codex"
 	Opencode = "opencode"
+
+	// Git is not an agent. `setup git` installs the git hook that fences ref updates.
+	Git = "git"
 )
 
 // Agents lists the agent names setup accepts.

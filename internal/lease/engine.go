@@ -45,6 +45,10 @@ type Hooks struct {
 	// AfterRevokeTombstone lets a test crash a revoke that published its tombstone and has not yet
 	// removed the sub-lease.
 	AfterRevokeTombstone func() error
+
+	// BeforeBreakMark lets a test fail the write of a break's fence mark, to check that the break
+	// leaves nothing of the broken holder's notice behind.
+	BeforeBreakMark func() error
 }
 
 // Engine runs lease operations against one state directory.
@@ -72,6 +76,10 @@ type Engine struct {
 	Notify Notify
 
 	Hooks Hooks
+
+	// GitHooks reports whether nitipan's git hooks are in force for a path. Nil means no path is
+	// checked, which is how a test without git runs. A path claim in a checkout needs the hooks.
+	GitHooks func(path string) (GitHooks, error)
 
 	// Sessions reads and writes the files that Codex hooks and opencode plugins report. Nil means no
 	// agent of liveness kind session can acquire.

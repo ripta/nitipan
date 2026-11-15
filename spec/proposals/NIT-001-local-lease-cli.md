@@ -2,7 +2,7 @@
 
 **Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-10-24
+**Updated:** 2026-10-25
 
 ## Dependencies
 
@@ -188,7 +188,7 @@ anyway. When it is false, `break` needs `--force`, like a record of a higher min
 tombstone. The tombstone names the broken lease, who broke it, and when. It also lists the lease's paths, so the broken
 holder can recognize the lease. `break` runs under the same lock as `acquire`.
 
-Amended 2026-10-20; see Decision Log.
+Amended 2026-10-20; see Decision Log. Superseded in part by NIT-005; see Decision Log.
 
 Tombstones are keyed by the broken holder's identity, not by the domain. A tombstone never blocks a claim, so the
 breaker can claim the domain at once, unless another live lease overlaps it. A broken NIT-003 sub-lease's keys return

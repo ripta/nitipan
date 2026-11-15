@@ -30,6 +30,9 @@ type app struct {
 	// lockBudget overrides the lock retry budget when it is not zero. The hook command has 3 seconds
 	// in all, so it waits for the lock at most 2.
 	lockBudget time.Duration
+
+	// hooksSeen keeps what the git hook check found for a directory during this command.
+	hooksSeen map[string]lease.GitHooks
 }
 
 func (a *app) resolver() *adapter.Resolver {
@@ -49,6 +52,16 @@ func (a *app) holder() (adapter.Holder, error) {
 
 // engine opens the state directory and builds the engine over it.
 func (a *app) engine() (*lease.Engine, error) {
+	return a.openEngine(state.Open)
+}
+
+// readEngine builds an engine over a state directory that is opened for reading. The git hook uses
+// it, since it takes no lock and must not create the directory.
+func (a *app) readEngine() (*lease.Engine, error) {
+	return a.openEngine(state.OpenRead)
+}
+
+func (a *app) openEngine(open func(string, state.Options) (*state.Dir, error)) (*lease.Engine, error) {
 	path, err := a.deps.StateDir()
 	if err != nil {
 		return nil, fmt.Errorf("resolving the state directory: %w", err)
@@ -81,7 +94,7 @@ func (a *app) engine() (*lease.Engine, error) {
 		opts.LockBudget = a.lockBudget
 	}
 
-	dir, err := state.Open(path, opts)
+	dir, err := open(path, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -92,8 +105,34 @@ func (a *app) engine() (*lease.Engine, error) {
 	e.Hooks = a.deps.Hooks
 	e.Notify = lease.Notify{Delivered: a.deliverNotice, Notice: a.deliverRecordNotice, Warn: a.warn}
 	e.Sessions = sessions
+	e.GitHooks = a.gitHooksOf
 
 	return e, nil
+}
+
+// gitHooksOf tells the engine whether nitipan's git hooks are in force where a path lies. A claim
+// names several keys in one checkout, so the answer is kept for each directory it asks about.
+func (a *app) gitHooksOf(path string) (lease.GitHooks, error) {
+	dir := setup.ExistingDir(path)
+
+	if got, ok := a.hooksSeen[dir]; ok {
+		return got, nil
+	}
+
+	st, err := setup.HooksInForce(a.deps.Git, path)
+	if err != nil {
+		return lease.GitHooks{}, err
+	}
+
+	got := lease.GitHooks{Checkout: st.Checkout, InForce: st.InForce, Why: st.Why}
+
+	if a.hooksSeen == nil {
+		a.hooksSeen = map[string]lease.GitHooks{}
+	}
+
+	a.hooksSeen[dir] = got
+
+	return got, nil
 }
 
 // opencodeDB reads opencode's database, whose home comes from the user database like the state

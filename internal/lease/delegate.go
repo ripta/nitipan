@@ -66,6 +66,10 @@ func (e *Engine) Request(req SubLeaseRequest) (*SubLeaseRequestResult, error) {
 		return nil, fmt.Errorf("%w: %w", exitcode.ErrUsage, err)
 	}
 
+	if err := c.refuseMarked(h, domain.Keys); err != nil {
+		return nil, err
+	}
+
 	if err := c.firstUnusable(); err != nil {
 		return nil, err
 	}

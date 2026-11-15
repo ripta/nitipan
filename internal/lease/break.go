@@ -8,6 +8,7 @@ import (
 
 	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/exitcode"
+	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/state"
@@ -41,6 +42,10 @@ const (
 	// RemovedUnusable means the file was a record or a tombstone that nitipan cannot use. It was
 	// removed with no tombstone, because the holder named in it cannot be trusted.
 	RemovedUnusable
+
+	// RemovedMark means the target was a fence mark. The holder it guarded against can claim the
+	// keys again.
+	RemovedMark
 )
 
 // BrokenLease reports one target of a break.
@@ -63,6 +68,16 @@ type BrokenLease struct {
 
 	// WasTombstone is true when the target was an unusable tombstone and not a lease.
 	WasTombstone bool
+
+	// WasMark is true when the target was a fence mark. Mark is the mark that was removed, when it
+	// could be read.
+	WasMark bool
+	Mark    *record.Mark
+
+	// Hooks says, for each git checkout the broken lease's keys lie in, whether nitipan's git hooks
+	// were in force there. A broken lease with the hooks in force is fenced against its holder's
+	// next ref update. It is set only for a Broken lease.
+	Hooks []GitHooks
 }
 
 // BreakResult lists what a break removed.
@@ -76,6 +91,7 @@ type breakPlan struct {
 	outcome BreakOutcome
 	lease   *entry
 	tomb    *tombEntry
+	mark    *markEntry
 }
 
 // Break removes leases other holders own, under the same lock as acquire.
@@ -168,6 +184,17 @@ func (c *call) planBreak(id string, req BreakRequest) (breakPlan, error) {
 		}
 	}
 
+	marks, err := c.e.loadMarks()
+	if err != nil {
+		return breakPlan{}, err
+	}
+
+	for _, me := range marks {
+		if me.ID == id {
+			return c.planMark(me, req)
+		}
+	}
+
 	return breakPlan{}, failf(exitcode.ErrNoSuchLease, "no such lease %s; run list to see the leases that exist", id)
 }
 
@@ -183,6 +210,26 @@ func (c *call) planTombstone(te *tombEntry, req BreakRequest) (breakPlan, error)
 	}
 
 	return breakPlan{id: te.ID, outcome: RemovedUnusable, tomb: te}, nil
+}
+
+// planMark lets anyone but the guarded holder remove a fence mark. A mark that nitipan cannot use
+// needs force, like an unusable tombstone.
+func (c *call) planMark(me *markEntry, req BreakRequest) (breakPlan, error) {
+	if me.Mark == nil {
+		if !req.Force {
+			return breakPlan{}, failf(record.ErrUnusable, "fence mark %s cannot be used by this nitipan (%s); upgrade nitipan "+
+				"or ask the user", me.Path, me.Bad.Reason)
+		}
+
+		return breakPlan{id: me.ID, outcome: RemovedUnusable, mark: me}, nil
+	}
+
+	if req.Caller.Holder != nil && c.e.isHolder(*req.Caller.Holder, me.Mark.Envelope) {
+		return breakPlan{}, failf(exitcode.ErrNotYours, "fence mark %s guards against you. Only someone else can remove it; "+
+			"ask the user", me.ID)
+	}
+
+	return breakPlan{id: me.ID, outcome: RemovedMark, mark: me}, nil
 }
 
 func (c *call) planLease(en *entry, req BreakRequest) (breakPlan, error) {
@@ -246,6 +293,12 @@ func (c *call) execute(p breakPlan, req BreakRequest) (BrokenLease, error) {
 		return done, c.removeFile(state.TombstonesDir, p.id)
 	}
 
+	if p.mark != nil {
+		done.WasMark, done.Mark = true, p.mark.Mark
+
+		return done, c.removeFile(state.MarksDir, p.id)
+	}
+
 	if p.lease.Rec == nil {
 		return done, c.removeLeaseFile(p.lease)
 	}
@@ -259,6 +312,7 @@ func (c *call) execute(p breakPlan, req BreakRequest) (BrokenLease, error) {
 
 	if p.outcome == Broken {
 		tomb = c.newTombstone(p.lease, req)
+		tomb.Fenced = true
 		parentHow = "was broken by " + describeBreaker(tomb)
 		childHow = "it was broken by " + describeBreaker(tomb)
 	}
@@ -269,11 +323,17 @@ func (c *call) execute(p breakPlan, req BreakRequest) (BrokenLease, error) {
 	}
 
 	if tomb != nil {
-		if err := c.publishTombstone(tomb); err != nil {
+		held, markID, err := c.fence(p.lease, tomb)
+		if err != nil {
 			return done, err
 		}
 
+		if err := c.publishTombstone(tomb); err != nil {
+			return done, c.unfence(markID, err)
+		}
+
 		done.Tombstone = tomb
+		done.Hooks = c.hooksOf(held)
 	}
 
 	if err := c.removeLeaseFile(p.lease); err != nil {
@@ -290,6 +350,58 @@ func (c *call) execute(p breakPlan, req BreakRequest) (BrokenLease, error) {
 	}
 
 	return done, nil
+}
+
+// fence guards the keys of a broken path lease with a mark, and returns the keys it guards and the
+// mark's ID. The mark is written in the same locked call as the tombstone, and before it. A mark
+// that fails to write then leaves no tombstone behind to tell a holder whose lease still stands
+// that it was broken. Both exist before the lease is removed, so a reader that finds the lease gone
+// finds the tombstone and the mark.
+func (c *call) fence(en *entry, tomb *record.Tombstone) ([]keys.Key, string, error) {
+	held, ok := en.keysOf()
+	if !ok {
+		return nil, "", nil
+	}
+
+	if err := runHook(c.e.Hooks.BeforeBreakMark); err != nil {
+		return nil, "", err
+	}
+
+	markID, err := c.publishMark(tomb, held)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return held, markID, nil
+}
+
+// unfence takes back a mark whose tombstone could not be written, so the lease the break left
+// standing does not stay fenced against its own holder. It returns cause, joined with the failure
+// to take the mark back.
+func (c *call) unfence(markID string, cause error) error {
+	if markID == "" {
+		return cause
+	}
+
+	if err := c.removeFile(state.MarksDir, markID); err != nil {
+		return errors.Join(cause, err)
+	}
+
+	return cause
+}
+
+// hooksOf records whether the git hooks that enforce the mark are in force where the keys lie.
+func (c *call) hooksOf(held []keys.Key) []GitHooks {
+	if held == nil {
+		return nil
+	}
+
+	hooks, err := c.e.hooksFor(held)
+	if err != nil {
+		c.e.Notify.warn(err)
+	}
+
+	return hooks
 }
 
 // removeLeaseFile is removeLease for a break, which treats a file that is already gone as removed.

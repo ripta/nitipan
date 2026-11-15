@@ -56,6 +56,10 @@ const (
 	RequestsDir = "requests"
 	NoticesDir  = "notices"
 
+	// MarksDir holds the fence marks that `break --force` leaves for a broken holder. Writers create
+	// it on demand, and binaries that predate fencing never scan it.
+	MarksDir = "marks"
+
 	// The session directories hold what Codex hooks and opencode plugins report. They sit under
 	// sessions/, as paths relative to the state directory.
 	RegisteredDir = "sessions/registered"
@@ -172,6 +176,44 @@ func Open(path string, opts Options) (*Dir, error) {
 	}
 
 	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("checking the state directory %s: %w", path, err)
+	}
+
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s: %w", path, ErrNotDirectory)
+	}
+
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, fmt.Errorf("checking the owner of %s: no ownership information on this platform", path)
+	}
+
+	if int(st.Uid) != opts.UID {
+		return nil, fmt.Errorf("%s is owned by user %d, not %d: %w", path, st.Uid, opts.UID, ErrNotOwned)
+	}
+
+	return &Dir{path: path, opts: opts}, nil
+}
+
+// OpenRead opens the state directory for reading only. It creates nothing, so a directory that is
+// absent reads as empty, and a caller whose sandbox cannot write there can still read. It refuses a
+// directory the caller does not own, as Open does. The format marker gates writes only, and a
+// reader never takes the lock, so OpenRead does not look at it.
+func OpenRead(path string, opts Options) (*Dir, error) {
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("state directory %q: want an absolute path", path)
+	}
+
+	if opts.UID == 0 {
+		opts.UID = os.Getuid()
+	}
+
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return &Dir{path: path, opts: opts}, nil
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("checking the state directory %s: %w", path, err)
 	}

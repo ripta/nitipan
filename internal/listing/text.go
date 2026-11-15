@@ -21,6 +21,10 @@ func WriteText(w io.Writer, out Output) error {
 			return fmt.Errorf("writing the lease list: %w", err)
 		}
 
+		if err := writeMarks(w, out); err != nil {
+			return err
+		}
+
 		return writeSlotConfigPath(w, out)
 	}
 
@@ -36,7 +40,39 @@ func WriteText(w io.Writer, out Output) error {
 		}
 	}
 
+	if err := writeMarks(w, out); err != nil {
+		return err
+	}
+
 	return writeSlotConfigPath(w, out)
+}
+
+// writeMarks prints the fence marks after the leases, each as its own block.
+func writeMarks(w io.Writer, out Output) error {
+	for _, m := range out.Marks {
+		if _, err := io.WriteString(w, "\n"+markText(m)); err != nil {
+			return fmt.Errorf("writing the fence marks: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func markText(m Mark) string {
+	var b strings.Builder
+
+	if !m.Usable {
+		fmt.Fprintf(&b, "%s  fence mark, unknown\n", m.File)
+		fmt.Fprintf(&b, "  %s\n", m.Summary)
+
+		return b.String()
+	}
+
+	fmt.Fprintf(&b, "%s  fence mark, holder %s\n", m.ID, m.Liveness.Status)
+	fmt.Fprintf(&b, "  guards: %s\n", strings.Join(m.Keys, ", "))
+	fmt.Fprintf(&b, "  %s\n", m.Summary)
+
+	return b.String()
 }
 
 // groupText renders one group per top-level lease, then one for the requests whose lease is not

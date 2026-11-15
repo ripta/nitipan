@@ -106,9 +106,21 @@ func (c *call) deliver(h adapter.Holder) error {
 		return err
 	}
 
+	var marks []*markEntry
+
 	for _, te := range tombs {
 		if te.Tomb == nil || !c.e.addressedTo(h, te.Tomb) {
 			continue
+		}
+
+		if marks == nil {
+			if marks, err = c.e.loadMarks(); err != nil {
+				return err
+			}
+		}
+
+		if err := c.markDelivered(te.Tomb, marks); err != nil {
+			return err
 		}
 
 		c.delivered = append(c.delivered, te.Tomb)
