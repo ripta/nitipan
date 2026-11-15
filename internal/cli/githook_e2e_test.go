@@ -559,9 +559,11 @@ func waitForFile(t *testing.T, path string) {
 func TestAPinnedSalvageCommitLandedOnABranchIsStillChecked(t *testing.T) {
 	r, _, beta, _, _ := newPairedRig(t)
 
+	// Some git versions put HEAD in the transaction beside the branch, so the refusal can carry
+	// one salvage hint per ref. They all name the same commit, and one pin is enough here.
 	res := beta.run(`echo x >> src/a.txt
 git commit -qam c 2> "$SCRATCH/err" && exit 90
-cmd=$(sed -n 's/.*run: \(git update-ref refs\/nitipan\/salvage\/[A-Z0-9]* [0-9a-f]*\).*/\1/p' "$SCRATCH/err")
+cmd=$(sed -n 's/.*run: \(git update-ref refs\/nitipan\/salvage\/[A-Z0-9]* [0-9a-f]*\).*/\1/p' "$SCRATCH/err" | head -n 1)
 test -n "$cmd" || { cat "$SCRATCH/err"; exit 91; }
 $cmd || exit 92
 set -- $cmd
