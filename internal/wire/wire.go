@@ -143,6 +143,10 @@ type MirroredLease struct {
 	ID      string          `json:"id"`
 	Record  json.RawMessage `json:"record,omitempty"`
 	Unknown *UnknownLease   `json:"unknown,omitempty"`
+
+	// Derived carries the record's repo entries. It is absent for a resource lease, and for a path lease
+	// from a node that predates it, which discovery reads as unknown.
+	Derived *Derived `json:"derived,omitempty"`
 }
 
 // UnknownLease stands for a record the node cannot use. Its footprint blocks everything on its

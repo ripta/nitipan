@@ -280,6 +280,7 @@ func (a *app) runAcquireWide(cmd *cobra.Command, h adapter.Holder, reach string)
 
 	a.saveToken(stateDir, res.Lease.ID, res.Lease.Token)
 	a.printGranted(res.Lease, entries, text, anchor.ID, created)
+	a.printOverlaps(res.Overlaps)
 
 	return nil
 }

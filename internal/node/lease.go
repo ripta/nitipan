@@ -69,6 +69,10 @@ type lateReply struct {
 	holder record.Envelope
 	kind   string
 	anchor handoff.Anchor
+
+	// overlaps are the grant-side overlap keys the claim reply carries. The CLI prints them as warnings
+	// when it reads the reply, so they count as reported only once it has.
+	overlaps []string
 }
 
 func newBook() *leaseBook {
@@ -296,6 +300,8 @@ func (n *Node) applySnapshotAck(ack wire.SnapshotAck) {
 	for _, l := range ack.Leases {
 		n.onLease(l, false)
 	}
+
+	n.applyOverlaps(ack.Overlaps)
 }
 
 type localView struct {

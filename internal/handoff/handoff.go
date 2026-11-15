@@ -39,7 +39,7 @@ const (
 // Versions this binary writes. A reader refuses a version it does not know, and a node keeps
 // answering every request version it ever accepted.
 const (
-	RequestVersion  = 2
+	RequestVersion  = 3
 	PresenceVersion = 1
 )
 

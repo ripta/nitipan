@@ -2,10 +2,13 @@ package node
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
+	"github.com/space-armada/nitipan/internal/handoff"
 	"github.com/space-armada/nitipan/internal/record"
 	"github.com/space-armada/nitipan/internal/state"
 	"github.com/space-armada/nitipan/internal/wire"
@@ -25,25 +28,52 @@ func (n *Node) snapshot() (wire.Snapshot, error) {
 		return wire.Snapshot{}, err
 	}
 
+	// The derived files are listed before the leases are scanned. A file listed here belongs to a lease
+	// that existed at the scan unless it ended since, so a lease claimed in between never loses its file.
+	derived, err := handoff.DerivedIDs(n.opts.StateDir)
+	if err != nil {
+		n.warn(fmt.Sprintf("listing the derived entries: %v", err))
+	}
+
 	files, err := dir.Scan(state.LeasesDir)
 	if err != nil {
 		return wire.Snapshot{}, err
 	}
 
+	budget := &deriveBudget{until: time.Now().Add(n.deriveBudget())}
 	leases := make([]wire.MirroredLease, 0, len(files))
+	present := make(map[string]bool, len(files))
 
 	for _, f := range files {
-		leases = append(leases, mirrorOf(f))
+		present[f.ID] = true
+
+		m, rec := mirrorOf(f)
+		if rec != nil {
+			m.Derived = n.derivedFor(rec, budget)
+		}
+
+		leases = append(leases, m)
 	}
+
+	n.pruneDerived(derived, present)
 
 	sort.Slice(leases, func(i, j int) bool { return leases[i].ID < leases[j].ID })
 
 	return wire.Snapshot{Version: wire.Current, Leases: n.applyRecalls(leases)}, nil
 }
 
-func mirrorOf(f state.File) wire.MirroredLease {
+func (n *Node) deriveBudget() time.Duration {
+	if n.opts.DeriveBudget > 0 {
+		return n.opts.DeriveBudget
+	}
+
+	return DefaultDeriveBudget
+}
+
+// mirrorOf builds the mirror of one file. It also returns the decoded record when the node can use it.
+func mirrorOf(f state.File) (wire.MirroredLease, *record.Record) {
 	if f.BadName {
-		return unknownLease(f.ID, "the file name is not a lease ID", "")
+		return unknownLease(f.ID, "the file name is not a lease ID", ""), nil
 	}
 
 	rec, err := record.Decode(f.Data)
@@ -57,14 +87,14 @@ func mirrorOf(f state.File) wire.MirroredLease {
 			version = bad.Version.String()
 		}
 
-		return unknownLease(f.ID, string(bad.Reason), version)
+		return unknownLease(f.ID, string(bad.Reason), version), nil
 	case err != nil:
-		return unknownLease(f.ID, err.Error(), "")
+		return unknownLease(f.ID, err.Error(), ""), nil
 	case rec.ID != f.ID:
-		return unknownLease(f.ID, "the record's ID differs from its file name", "")
+		return unknownLease(f.ID, "the record's ID differs from its file name", ""), nil
 	}
 
-	return wire.MirroredLease{ID: f.ID, Record: append([]byte(nil), f.Data...)}
+	return wire.MirroredLease{ID: f.ID, Record: append([]byte(nil), f.Data...)}, rec
 }
 
 func unknownLease(id, reason, version string) wire.MirroredLease {

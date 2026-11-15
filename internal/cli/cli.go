@@ -221,6 +221,7 @@ func newRoot(a *app) *cobra.Command {
 		a.hookCmd(),
 		a.nodeCmd(),
 		a.brokerCmd(),
+		a.whoCmd(),
 	)
 
 	return root

@@ -23,6 +23,7 @@ import (
 	"github.com/space-armada/nitipan/internal/node"
 	"github.com/space-armada/nitipan/internal/proc/proctest"
 	"github.com/space-armada/nitipan/internal/record"
+	"github.com/space-armada/nitipan/internal/rootset"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
@@ -132,11 +133,15 @@ func (m *wideMachine) start() {
 		table.Add(pid, *p)
 	}
 
+	m.configureNode()
+
 	n, err := node.New(node.Options{
 		StateDir: m.w.state, UID: os.Getuid(), User: tester, Machine: m.w.machine, SelfPID: nodePID, SelfStart: startOf(nodePID),
 		Version: "test", Config: config.Node{Broker: m.f.srv.URL}, Heartbeat: 40 * time.Millisecond, Backoff: 10 * time.Millisecond,
 		Clock: m.f.clock, WakeGap: time.Hour, Checker: &liveness.Checker{Procs: table, Local: m.w.machine}, Finder: m.w.finder,
 		Now: func() time.Time { return *m.now.Load() }, ReplyGrace: m.replyGrace,
+		Warn:  func(msg string) { m.w.t.Log("node warning: " + msg) },
+		Roots: &rootset.Deriver{CachePath: filepath.Join(m.w.state, handoff.RootsCache)},
 	})
 	if err != nil {
 		m.w.t.Fatal(err)
@@ -154,6 +159,21 @@ func (m *wideMachine) start() {
 
 		return err == nil
 	})
+}
+
+// configureNode writes the node config file the CLI looks for, so machine claims record their repo entries.
+func (m *wideMachine) configureNode() {
+	m.w.t.Helper()
+
+	dir := config.Dir(filepath.Join(m.w.root, "userhome"))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		m.w.t.Fatal(err)
+	}
+
+	body := `{"version":"1.0","broker":"` + m.f.srv.URL + `"}`
+	if err := os.WriteFile(filepath.Join(dir, config.NodeFile), []byte(body), 0o600); err != nil {
+		m.w.t.Fatal(err)
+	}
 }
 
 func (m *wideMachine) stop() {

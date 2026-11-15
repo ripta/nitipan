@@ -76,6 +76,16 @@ func (b *Broker) ValidateAddress(addr string) (Address, error) {
 	return Address{Handle: local, Label: label, Machine: row}, nil
 }
 
+// FormatAddress writes the <handle>@<label> qualified name. A holder with no handle reads as "-", which
+// ValidateAddress refuses as an address, since nothing could be sent to it.
+func FormatAddress(handle, label string) string {
+	if handle == "" {
+		handle = "-"
+	}
+
+	return handle + "@" + label
+}
+
 func describeMachine(r LabelRecord) string {
 	return fmt.Sprintf("%s (machine %s, uid %d, user %s)", r.Host, r.MachineID, r.UID, r.User)
 }

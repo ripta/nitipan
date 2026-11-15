@@ -433,6 +433,41 @@ func TestSkewErrorsAreNamed(t *testing.T) {
 		}
 	})
 
+	t.Run("node too old for discovery", func(t *testing.T) {
+		tm := newTwoMachines(t)
+		tm.m1.stop()
+
+		old := handoff.Presence{PID: nodePID, Start: startOf(nodePID), Machine: tm.m1.w.machine, NodeVersion: "old", RequestVersion: 2,
+			Kinds: []string{"ping", handoff.KindClaim, handoff.KindList}}
+		if err := handoff.WritePresence(tm.m1.w.state, old); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, sub := range [][]string{{"who", "holds", tm.name("svc")}, {"who", "is", "guardian"}} {
+			res := tm.m1.w.run(tm.c1, sub...)
+			wantStatus(t, res, exitcode.Error)
+			wantContains(t, "stderr", res.Stderr, "node too old")
+		}
+	})
+
+	t.Run("broker too old for discovery", func(t *testing.T) {
+		tm := newTwoMachines(t)
+
+		for _, p := range []string{wire.PathWhoHolds, wire.PathWhoIs} {
+			path := p
+			tm.f.missing.Store(&path)
+
+			args := []string{"who", "holds", tm.name("svc")}
+			if p == wire.PathWhoIs {
+				args = []string{"who", "is", "guardian"}
+			}
+
+			res := tm.m1.w.run(tm.c1, args...)
+			wantStatus(t, res, exitcode.Error)
+			wantContains(t, "stderr", res.Stderr, "broker too old")
+		}
+	})
+
 	t.Run("broker too old", func(t *testing.T) {
 		tm := newTwoMachines(t)
 

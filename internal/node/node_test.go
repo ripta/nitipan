@@ -133,7 +133,7 @@ var unusableCases = []unusableCase{
 func TestUnusableRecordsMirrorAsAnUnknownHolderWithAnAllFootprint(t *testing.T) {
 	for _, tc := range unusableCases {
 		t.Run(tc.Name, func(t *testing.T) {
-			got := mirrorOf(state.File{ID: strings.TrimSuffix(tc.File, ".json"), BadName: !state.ValidID(strings.TrimSuffix(tc.File, ".json")), Data: []byte(tc.Content)})
+			got, _ := mirrorOf(state.File{ID: strings.TrimSuffix(tc.File, ".json"), BadName: !state.ValidID(strings.TrimSuffix(tc.File, ".json")), Data: []byte(tc.Content)})
 
 			if got.Unknown == nil || got.Unknown.Footprint != wire.FootprintAll || got.Record != nil {
 				t.Fatalf("mirror = %+v, want an unknown holder with an all footprint", got)
