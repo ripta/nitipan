@@ -34,7 +34,24 @@ var (
 
 	// ErrBrokerTooOld means the broker does not serve the call.
 	ErrBrokerTooOld = errors.New("broker too old")
+
+	// ErrBrokerUnreachable means the node could not get an answer from the broker. It is not a refusal.
+	ErrBrokerUnreachable = errors.New("the broker did not answer")
 )
+
+// brokerCallError is a broker call that failed on the broker's side or on the way there.
+type brokerCallError struct {
+	kind    string
+	message string
+}
+
+// Error implements error.
+func (e *brokerCallError) Error() string {
+	return fmt.Sprintf("the broker call for %s failed: %s", e.kind, e.message)
+}
+
+// Is matches ErrBrokerUnreachable.
+func (e *brokerCallError) Is(target error) bool { return target == ErrBrokerUnreachable }
 
 func (a *app) handoffWait() time.Duration {
 	if a.deps.HandoffWait > 0 {
@@ -156,6 +173,10 @@ func replyErr(kind string, rep handoff.Reply) error {
 		return fmt.Errorf("%w: the broker does not serve the %s call. %s (%s)", ErrBrokerTooOld, kind, hint, rep.Error.Message)
 	case handoff.CodeExpired:
 		return fmt.Errorf("%w. Run the command again", handoff.ErrRequestExpired)
+	}
+
+	if rep.Error.Code == handoff.CodeBroker {
+		return &brokerCallError{kind: kind, message: rep.Error.Message}
 	}
 
 	return fmt.Errorf("the broker call for %s failed: %s", kind, rep.Error.Message)
@@ -805,18 +826,9 @@ func (a *app) runRenew(ids []string) error {
 		return nil
 	}
 
-	if err := a.nodeFor(handoff.KindRenew); err != nil {
-		return err
-	}
-
-	rep, err := a.roundTrip(stateDir, handoff.KindRenew, state.NewID(), "", handoff.RenewBody{IDs: ids, Holder: env})
+	out, err := a.renewNow(stateDir, env, ids)
 	if err != nil {
 		return err
-	}
-
-	var out wire.Renewed
-	if err := json.Unmarshal(rep.Body, &out); err != nil {
-		return fmt.Errorf("decoding the renew result: %w", err)
 	}
 
 	var errs []error
@@ -838,6 +850,25 @@ func (a *app) runRenew(ids []string) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// renewNow renews broker leases through the node and waits for the broker's answer.
+func (a *app) renewNow(stateDir string, env record.Envelope, ids []string) (wire.Renewed, error) {
+	if err := a.nodeFor(handoff.KindRenew); err != nil {
+		return wire.Renewed{}, err
+	}
+
+	rep, err := a.roundTrip(stateDir, handoff.KindRenew, state.NewID(), "", handoff.RenewBody{IDs: ids, Holder: env})
+	if err != nil {
+		return wire.Renewed{}, err
+	}
+
+	var out wire.Renewed
+	if err := json.Unmarshal(rep.Body, &out); err != nil {
+		return wire.Renewed{}, fmt.Errorf("decoding the renew result: %w", err)
+	}
+
+	return out, nil
 }
 
 func tokenText(token uint64) string {

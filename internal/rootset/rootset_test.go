@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -261,6 +262,8 @@ func TestCachedAncestorWalksOnlyNewCommits(t *testing.T) {
 		return ExecRunner(ctx, dir, args...)
 	}
 
+	firstHead := git(t, dir, "rev-parse", "HEAD")
+
 	first, err := d.Derive(keys.Key{Path: dir})
 	if err != nil {
 		t.Fatal(err)
@@ -268,12 +271,14 @@ func TestCachedAncestorWalksOnlyNewCommits(t *testing.T) {
 
 	commit(t, dir, "b")
 
+	secondHead := git(t, dir, "rev-parse", "HEAD")
+
 	second, err := d.Derive(keys.Key{Path: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(walks) != 2 || walks[0] != "HEAD" || !strings.HasSuffix(walks[1], "..HEAD") {
+	if len(walks) != 2 || walks[0] != firstHead || walks[1] != firstHead+".."+secondHead {
 		t.Fatalf("walks = %v, want a full walk and then an incremental one", walks)
 	}
 
@@ -314,5 +319,74 @@ func TestCacheWriteLeavesNoTempFile(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(cacheDir, "sub"))
 	if err != nil || len(entries) != 1 || entries[0].Name() != "cache.json" {
 		t.Fatalf("entries = %v, %v", entries, err)
+	}
+}
+
+type rootsOfTest struct {
+	Name string
+
+	// Rev picks the commit whose roots are asked for.
+	Rev string
+
+	// WantRoots and WantFirst name the commits by the revision that finds them.
+	WantRoots []string
+	WantFirst string
+}
+
+var rootsOfTests = []rootsOfTest{
+	{Name: "main", Rev: "main", WantRoots: []string{"main~2"}, WantFirst: "main~2"},
+	{Name: "an orphan branch has its own root", Rev: "pages", WantRoots: []string{"pages"}, WantFirst: "pages"},
+	{Name: "a merge of unrelated histories has both roots and the first parent's is the text root", Rev: "joined",
+		WantRoots: []string{"main~2", "pages"}, WantFirst: "main~2"},
+	{Name: "a commit that is not HEAD", Rev: "main~1", WantRoots: []string{"main~2"}, WantFirst: "main~2"},
+}
+
+func TestRootsOfAnyCommitNotOnlyHEAD(t *testing.T) {
+	dir := newRepo(t)
+
+	commit(t, dir, "a.txt")
+	commit(t, dir, "b.txt")
+	commit(t, dir, "c.txt")
+
+	git(t, dir, "checkout", "--orphan", "pages")
+	git(t, dir, "rm", "-rf", "--quiet", ".")
+	commit(t, dir, "index.html")
+
+	git(t, dir, "checkout", "-b", "joined", "main")
+	git(t, dir, "merge", "--allow-unrelated-histories", "-m", "join", "pages")
+	git(t, dir, "checkout", "pages")
+
+	for _, test := range rootsOfTests {
+		t.Run(test.Name, func(t *testing.T) {
+			var want []string
+			for _, rev := range test.WantRoots {
+				want = append(want, git(t, dir, "rev-parse", rev))
+			}
+
+			slices.Sort(want)
+
+			roots, first, err := (&Deriver{}).RootsOf(dir, git(t, dir, "rev-parse", test.Rev))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !slices.Equal(roots, want) || first != git(t, dir, "rev-parse", test.WantFirst) {
+				t.Errorf("RootsOf = %v, %s, want %v, %s", roots, first, want, git(t, dir, "rev-parse", test.WantFirst))
+			}
+		})
+	}
+}
+
+func TestRootsOfRefusesAShallowClone(t *testing.T) {
+	origin := newRepo(t)
+	commit(t, origin, "a.txt")
+	commit(t, origin, "b.txt")
+
+	clone := filepath.Join(t.TempDir(), "shallow")
+	git(t, filepath.Dir(clone), "clone", "--depth", "1", "file://"+origin, "shallow")
+
+	_, _, err := (&Deriver{}).RootsOf(clone, git(t, clone, "rev-parse", "HEAD"))
+	if !errors.Is(err, ErrShallow) {
+		t.Fatalf("error = %v, want ErrShallow", err)
 	}
 }

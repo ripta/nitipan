@@ -181,7 +181,7 @@ func (f *Fence) touchOf(u Update, facts *repoFacts) (RefTouch, bool, error) {
 		return RefTouch{}, false, nil
 	}
 
-	commits, err := f.commits(u, cur)
+	commits, err := f.commits(u, cur, localBaseline(u.Ref))
 	if err != nil {
 		return RefTouch{}, false, err
 	}
@@ -257,12 +257,27 @@ func (f *Fence) resolve(ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// baseline is the revision arguments that follow --not: what a rule may trust. added is for the
+// commits a ref gains, and removed is for the commits it loses, which leave out the ref itself.
+type baseline struct {
+	added   []string
+	removed []string
+}
+
+// localBaseline trusts every branch of every worktree and every remote-tracking ref.
+func localBaseline(ref string) baseline {
+	return baseline{
+		added:   []string{"--branches", "--remotes"},
+		removed: []string{"--exclude=" + strings.TrimPrefix(ref, "refs/heads/"), "--branches", "--remotes"},
+	}
+}
+
 // commits lists the added and removed commits of one update.
-func (f *Fence) commits(u Update, cur string) ([]string, error) {
+func (f *Fence) commits(u Update, cur string, base baseline) ([]string, error) {
 	var all []string
 
 	if u.New != "" {
-		added, err := f.revList(u, cur, u.New, "--not", "--branches", "--remotes")
+		added, err := f.revList(u, cur, append([]string{u.New, "--not"}, base.added...)...)
 		if err != nil {
 			return nil, err
 		}
@@ -279,14 +294,87 @@ func (f *Fence) commits(u Update, cur string) ([]string, error) {
 		args = append(args, u.New)
 	}
 
-	args = append(args, "--exclude="+strings.TrimPrefix(u.Ref, "refs/heads/"), "--branches", "--remotes")
-
-	removed, err := f.revList(u, cur, args...)
+	removed, err := f.revList(u, cur, append(args, base.removed...)...)
 	if err != nil {
 		return nil, err
 	}
 
 	return append(all, removed...), nil
+}
+
+// RemoteTouched returns the repo-relative paths that pushing newSHA over oldSHA touches in ref, the
+// way the remote will see it. Either value is empty for a creation or a deletion.
+//
+// A remote has no worktrees, so only the commit rule applies. The baseline is the branches the remote
+// advertised for this push, never refs/remotes, since an unpruned remote-tracking ref would make
+// unpushed commits look pushed. An advertised commit this clone does not hold is left out of the
+// baseline, which only widens the touched set. A missing old or new value fails closed.
+func (f *Fence) RemoteTouched(ref, oldSHA, newSHA string, heads map[string]string) ([]string, error) {
+	var held []string
+
+	if len(heads) > 0 {
+		have, err := f.present(heads)
+		if err != nil {
+			return nil, err
+		}
+
+		held = have
+	}
+
+	base := baseline{added: held}
+
+	for name, sha := range heads {
+		if name != ref && slices.Contains(held, sha) {
+			base.removed = append(base.removed, sha)
+		}
+	}
+
+	slices.Sort(base.removed)
+
+	base.removed = slices.Compact(base.removed)
+
+	commits, err := f.commits(Update{Ref: ref, New: newSHA}, oldSHA, base)
+	if err != nil {
+		return nil, err
+	}
+
+	paths, err := f.diffCommits(commits)
+	if err != nil {
+		return nil, err
+	}
+
+	slices.Sort(paths)
+
+	return slices.Compact(paths), nil
+}
+
+// present returns the distinct advertised commits this clone holds.
+func (f *Fence) present(heads map[string]string) ([]string, error) {
+	var ids []string
+
+	for _, sha := range heads {
+		ids = append(ids, sha)
+	}
+
+	slices.Sort(ids)
+
+	ids = slices.Compact(ids)
+
+	out, err := f.Git("", []byte(strings.Join(ids, "\n")+"\n"), "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	if err != nil {
+		return nil, fmt.Errorf("checking the advertised commits: %w", err)
+	}
+
+	var held []string
+
+	for _, line := range lines(out) {
+		id, kind, _ := strings.Cut(line, " ")
+		if kind == "commit" {
+			held = append(held, id)
+		}
+	}
+
+	return held, nil
 }
 
 // revList runs rev-list, and turns a failure into a missing-object error when a commit it needs is

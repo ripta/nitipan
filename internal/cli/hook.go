@@ -58,6 +58,7 @@ func (a *app) hookCmd() *cobra.Command {
 		a.hookSub("presence", a.runPresence),
 		a.hookSub("execution", a.runExecution),
 		a.hookRefTransaction(),
+		a.hookPrePush(),
 	)
 
 	cmd.AddCommand(a.hookMailCmds()...)

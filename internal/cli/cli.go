@@ -255,6 +255,8 @@ func newRoot(a *app) *cobra.Command {
 		a.nodeCmd(),
 		a.brokerCmd(),
 		a.whoCmd(),
+		a.pushCmd(),
+		a.fenceCmd(),
 	)
 
 	return root

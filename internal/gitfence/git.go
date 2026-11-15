@@ -29,14 +29,37 @@ const (
 
 // Exec runs git with the caller's environment. A reference-transaction hook uses it.
 func Exec(dir string, stdin []byte, args ...string) ([]byte, error) {
-	return run(hookTimeout, os.Environ(), dir, stdin, args)
+	return runGit(hookTimeout, os.Environ(), dir, stdin, args)
 }
 
 // ExecClean runs git without the variables that point it at another repository. Setup and the
 // acquire gate use it, since they ask about a directory and not about the transaction in flight.
 func ExecClean(dir string, stdin []byte, args ...string) ([]byte, error) {
-	return run(cleanTimeout, cleanEnv(os.Environ()), dir, stdin, args)
+	return runGit(cleanTimeout, cleanEnv(os.Environ()), dir, stdin, args)
 }
+
+// ExecWith returns a runner that adds environment entries to the process's own. A later entry wins
+// over an earlier one of the same name. With clean set, the variables that point git at another
+// repository are dropped first, as ExecClean does.
+//
+// The timeout is the hook's in both modes. Callers run network and history-walking commands through
+// it, such as ls-remote, fetch, and rev-list over a long first push. Cleaning the environment says
+// where git looks and has no bearing on how long a command may take. A command with a tighter bound
+// uses ExecClean.
+func ExecWith(clean bool, extra ...string) Runner {
+	return func(dir string, stdin []byte, args ...string) ([]byte, error) {
+		env := os.Environ()
+
+		if clean {
+			env = cleanEnv(env)
+		}
+
+		return runGit(hookTimeout, append(slices.Clone(env), extra...), dir, stdin, args)
+	}
+}
+
+// runGit is the seam a test replaces to see which timeout a runner passes.
+var runGit = run
 
 // repoVars are the variables that locate a repository, an index, or a worktree. A command that
 // runs in another worktree must not inherit them.

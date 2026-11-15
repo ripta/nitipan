@@ -136,7 +136,7 @@ func TestInstallAndUninstallRoundTripAnExistingHook(t *testing.T) {
 	writeScript(t, hook, original)
 
 	done := install(t, repo, exe)
-	if len(done) != 1 || done[0].Action != "wrote" || !strings.Contains(done[0].Note, "kept the existing hook") {
+	if len(done) != 2 || done[0].Action != "wrote" || !strings.Contains(done[0].Note, "kept the existing hook") || done[1].Action != "wrote" {
 		t.Fatalf("installed = %+v", done)
 	}
 
@@ -165,7 +165,7 @@ func TestInstallAndUninstallRoundTripAnExistingHook(t *testing.T) {
 		t.Fatalf("UninstallGit: %v", err)
 	}
 
-	if len(removed) != 2 || removed[1].Action != "restored" {
+	if len(removed) != 3 || removed[1].Action != "restored" || removed[2].Action != "removed" {
 		t.Errorf("uninstalled = %+v", removed)
 	}
 
@@ -429,8 +429,8 @@ func TestSubmodulesGetTheirOwnHook(t *testing.T) {
 	git(t, repo, "commit", "-qm", "sub")
 
 	done := install(t, repo, exe)
-	if len(done) != 2 {
-		t.Fatalf("installed = %+v, want the checkout and its submodule", done)
+	if len(done) != 4 {
+		t.Fatalf("installed = %+v, want both hooks in the checkout and its submodule", done)
 	}
 
 	sub := filepath.Join(repo, "vendor", "lib")
@@ -718,5 +718,133 @@ func TestATildeHooksPathIsExpandedTheWayGitExpandsIt(t *testing.T) {
 				t.Errorf("uninstall did not restore the raw core.hooksPath:\n%s", got)
 			}
 		})
+	}
+}
+
+func TestAnExistingPrePushHookIsKeptChainedAndPutBack(t *testing.T) {
+	repo := newRepo(t)
+	exe, _ := fakeNitipan(t, "0")
+	hook := filepath.Join(repo, ".git", "hooks", prePush)
+	ran := filepath.Join(repo, "pre-push-ran")
+
+	original := "#!/bin/sh\necho \"$1 $2\" >> '" + ran + "'\ncat >> '" + ran + "'\n"
+	writeScript(t, hook, original)
+
+	install(t, repo, exe)
+
+	if _, err := os.Stat(hook + chainedSuffix); err != nil {
+		t.Fatalf("the original pre-push hook was not kept: %v", err)
+	}
+
+	cmd := exec.Command(hook, "origin", "url")
+	cmd.Stdin = strings.NewReader("refs/tags/t aaa refs/tags/t 000\n")
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("running the installed hook: %v\n%s", err, out)
+	}
+
+	if got := read(t, ran); !strings.Contains(got, "origin url") || !strings.Contains(got, "refs/tags/t") {
+		t.Errorf("the kept hook saw %q", got)
+	}
+
+	if _, err := UninstallGit(gitfence.ExecClean, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := read(t, hook); got != original {
+		t.Errorf("the original pre-push hook came back as %q", got)
+	}
+}
+
+func TestACheckoutWithOnlyTheReferenceTransactionHookIsNotInForce(t *testing.T) {
+	repo := newRepo(t)
+	exe, _ := fakeNitipan(t, "0")
+
+	install(t, repo, exe)
+
+	if err := os.Remove(filepath.Join(repo, ".git", "hooks", prePush)); err != nil {
+		t.Fatal(err)
+	}
+
+	st := status(t, repo)
+	if st.InForce || !strings.Contains(st.Why, "there is no pre-push hook") {
+		t.Errorf("status = %+v, want the missing pre-push hook named", st)
+	}
+}
+
+type prePushScriptTest struct {
+	Name  string
+	Input string
+}
+
+// Every input starts nitipan. git lists no ref that a pruning push deletes, so an empty input or a
+// push of tags alone says nothing about whether the push is harmless.
+var prePushScriptTests = []prePushScriptTest{
+	{Name: "a branch update", Input: "refs/heads/main aaa refs/heads/main 000\n"},
+	{Name: "a fence ref update", Input: "aaa aaa refs/nitipan/fence/r/x 000\n"},
+	{Name: "a tag alone", Input: "refs/tags/t aaa refs/tags/t 000\n"},
+	{Name: "nothing", Input: ""},
+}
+
+func TestThePrePushScriptAlwaysStartsNitipan(t *testing.T) {
+	for _, test := range prePushScriptTests {
+		t.Run(test.Name, func(t *testing.T) {
+			repo := newRepo(t)
+			exe, log := fakeNitipan(t, "0")
+			install(t, repo, exe)
+
+			cmd := exec.Command(filepath.Join(repo, ".git", "hooks", prePush), "origin", "url")
+			cmd.Stdin = strings.NewReader(test.Input)
+
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("hook: %v\n%s", err, out)
+			}
+
+			if !strings.Contains(readIfAny(log), "hook pre-push origin url") {
+				t.Errorf("nitipan was not asked about the push: %q", readIfAny(log))
+			}
+		})
+	}
+}
+
+func readIfAny(path string) string {
+	data, _ := os.ReadFile(path)
+
+	return string(data)
+}
+
+func TestThePrePushScriptReportsATooOldBinaryAndAMissingOne(t *testing.T) {
+	repo := newRepo(t)
+	old, _ := fakeNitipan(t, "2")
+	install(t, repo, old)
+
+	hook := filepath.Join(repo, ".git", "hooks", prePush)
+	input := "refs/heads/main aaa refs/heads/main 000\n"
+
+	cmd := exec.Command(hook, "origin", "url")
+	cmd.Stdin = strings.NewReader(input)
+
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "too old for the hook installed in this clone") {
+		t.Errorf("a binary that exits 2: err %v\n%s", err, out)
+	}
+
+	if err := os.Remove(old); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", t.TempDir())
+
+	cmd = exec.Command("/bin/sh", hook, "origin", "url")
+	cmd.Stdin = strings.NewReader(input)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+
+	out, err = cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "the nitipan binary that checks leases is missing") {
+		t.Errorf("a missing binary: err %v\n%s", err, out)
+	}
+
+	if strings.Contains(string(out), "core.hooksPath=/dev/null") {
+		t.Errorf("the message names the escape hatch:\n%s", out)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/space-armada/nitipan/internal/gitfence"
@@ -16,8 +17,15 @@ import (
 // acquire check tell nitipan's hooks from anyone else's by it.
 const hookMarker = "# nitipan-managed hook"
 
-// refTransaction is the one hook nitipan's checks run in.
+// refTransaction is the hook that judges ref updates against the leases of one machine.
 const refTransaction = "reference-transaction"
+
+// prePush is the hook that refuses a push of a fenced branch that lacks its fence refs, and any push
+// while the clone's fence refs differ from the remote's.
+const prePush = "pre-push"
+
+// hookNames are the hooks nitipan's checks run in.
+var hookNames = []string{refTransaction, prePush}
 
 // chainedSuffix names where an existing hook goes when nitipan's takes its place.
 const chainedSuffix = ".nitipan-orig"
@@ -51,9 +59,9 @@ type HooksStatus struct {
 	Why string
 }
 
-// HooksInForce reports whether git runs nitipan's reference-transaction hook for the checkout that
-// holds path. In force means the directory git uses for hooks, which honors a local core.hooksPath,
-// holds nitipan's executable script. A path outside any checkout is reported with an empty Checkout.
+// HooksInForce reports whether git runs both of nitipan's hooks, reference-transaction and pre-push,
+// for the checkout that holds path. In force means the directory git uses for hooks, which honors a
+// local core.hooksPath, holds nitipan's executable script for each. Why joins what is missing. A path outside any checkout is reported with an empty Checkout.
 // Only "not a git repository" and a missing git binary count as outside. Any other failure to ask
 // git, such as a timeout or an unsafe directory, is an error.
 func HooksInForce(run gitfence.Runner, path string) (HooksStatus, error) {
@@ -75,24 +83,38 @@ func HooksInForce(run gitfence.Runner, path string) (HooksStatus, error) {
 		return st, nil
 	}
 
-	file := filepath.Join(dir, refTransaction)
+	var why []string
+
+	for _, name := range hookNames {
+		if reason := hookProblem(dir, name); reason != "" {
+			why = append(why, reason)
+		}
+	}
+
+	st.Why = strings.Join(why, "; ")
+	st.InForce = len(why) == 0
+
+	return st, nil
+}
+
+// hookProblem says what is wrong with one of nitipan's hooks in a directory, or returns "".
+func hookProblem(dir, name string) string {
+	file := filepath.Join(dir, name)
 
 	info, err := os.Stat(file)
 
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		st.Why = fmt.Sprintf("there is no %s hook in %s", refTransaction, dir)
+		return fmt.Sprintf("there is no %s hook in %s", name, dir)
 	case err != nil:
-		st.Why = fmt.Sprintf("cannot read %s: %v", file, err)
+		return fmt.Sprintf("cannot read %s: %v", file, err)
 	case info.Mode()&0o111 == 0:
-		st.Why = fmt.Sprintf("%s is not executable, so git skips it", file)
+		return fmt.Sprintf("%s is not executable, so git skips it", file)
 	case !ownsHook(file):
-		st.Why = fmt.Sprintf("the %s hook in %s is not nitipan's", refTransaction, dir)
-	default:
-		st.InForce = true
+		return fmt.Sprintf("the %s hook in %s is not nitipan's", name, dir)
 	}
 
-	return st, nil
+	return ""
 }
 
 // ExistingDir returns the nearest ancestor of path that is a directory, since a scope may name a
@@ -267,12 +289,32 @@ func installCheckout(run gitfence.Runner, top, executable string) ([]Installed, 
 		return installTracked(run, top, own, configuredHooksPath(run, top, own, dir), executable)
 	}
 
-	script, err := hookScript(executable, `"$here/`+refTransaction+chainedSuffix+`"`)
-	if err != nil {
-		return nil, err
+	var done []Installed
+
+	for _, name := range hookNames {
+		script, err := renderHook(name, executable, `"$here/`+name+chainedSuffix+`"`)
+		if err != nil {
+			return done, err
+		}
+
+		wrote, err := writeHook(dir, name, script)
+		if err != nil {
+			return done, err
+		}
+
+		done = append(done, wrote...)
 	}
 
-	return writeHook(dir, refTransaction, script)
+	return done, nil
+}
+
+// renderHook renders one of nitipan's hooks.
+func renderHook(name, executable, chained string) ([]byte, error) {
+	if name == prePush {
+		return prePushScript(executable, chained)
+	}
+
+	return hookScript(executable, chained)
 }
 
 // priorTracked finds the hooks directory an earlier install chained to. The prior-hooks-path file
@@ -368,20 +410,22 @@ func installTracked(run gitfence.Runner, top, own, tracked, executable string) (
 		}
 	}
 
-	script, err := hookScript(executable, shellQuote(filepath.ToSlash(tracked)+"/"+refTransaction))
-	if err != nil {
-		return nil, err
-	}
+	for _, name := range hookNames {
+		script, err := renderHook(name, executable, shellQuote(filepath.ToSlash(tracked)+"/"+name))
+		if err != nil {
+			return nil, err
+		}
 
-	wrote, err := writeHook(own, refTransaction, script)
-	if err != nil {
-		return nil, err
-	}
+		wrote, err := writeHook(own, name, script)
+		if err != nil {
+			return nil, err
+		}
 
-	done = append(done, wrote...)
+		done = append(done, wrote...)
+	}
 
 	for _, name := range gitHookNames {
-		if name == refTransaction {
+		if slices.Contains(hookNames, name) {
 			continue
 		}
 
@@ -433,7 +477,18 @@ func uninstallCheckout(run gitfence.Runner, top string) ([]Installed, error) {
 		return nil, err
 	}
 
-	return removeHook(dir, refTransaction)
+	var done []Installed
+
+	for _, name := range hookNames {
+		removed, err := removeHook(dir, name)
+		if err != nil {
+			return done, err
+		}
+
+		done = append(done, removed...)
+	}
+
+	return done, nil
 }
 
 func uninstallTracked(run gitfence.Runner, top, own, prior string) ([]Installed, error) {
@@ -508,13 +563,13 @@ func writeHook(dir, name string, script []byte) ([]Installed, error) {
 }
 
 // keepAndWrite moves a hook that is not nitipan's aside and puts nitipan's script in its place. The
-// script chains to the kept hook, but only the reference-transaction script does, so any other
-// name is refused here.
+// script chains to the kept hook, but only the scripts of hookNames do, so any other name is
+// refused here.
 func keepAndWrite(dir, name string, script []byte) ([]Installed, error) {
 	dest := filepath.Join(dir, name)
 	aside := dest + chainedSuffix
 
-	if name != refTransaction {
+	if !slices.Contains(hookNames, name) {
 		return nil, fmt.Errorf("%s exists and is not nitipan's; nitipan does not replace it", dest)
 	}
 
@@ -574,14 +629,19 @@ func chainScript(target string) []byte {
 
 // GitText is what `nitipan setup git` prints when it is given neither flag.
 func GitText() string {
-	return `nitipan's git hook refuses a branch or HEAD update that touches paths another session holds, or
-paths a broken lease used to cover. It runs in the reference-transaction hook, so rebase, reset,
-update-ref, and branch -f are covered along with commit. --no-verify does not skip it. A caller that
-is no agent, such as your own terminal, is never refused.
+	return `nitipan's git hooks guard two things. The reference-transaction hook refuses a branch or HEAD update
+that touches paths another session holds, or paths a broken lease used to cover. It covers rebase,
+reset, update-ref, and branch -f along with commit, and --no-verify does not skip it.
 
-  nitipan setup git --install <checkout>     install the hook in the checkout and its submodules
-  nitipan setup git --uninstall <checkout>   remove it, and put back what it chained
+The pre-push hook refuses a push of a fenced branch that lacks the fence refs that nitipan push writes.
+It also refuses any update of a fence ref that is not a creation or a fast-forward, which stops a
+mirror push from deleting them. --no-verify skips it.
 
-A path claim inside a git checkout is refused until the hook is in force there.
+A caller that is no agent, such as your own terminal, is never refused.
+
+  nitipan setup git --install <checkout>     install both hooks in the checkout and its submodules
+  nitipan setup git --uninstall <checkout>   remove them, and put back what they chained
+
+A path claim inside a git checkout is refused until both hooks are in force there.
 `
 }

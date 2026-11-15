@@ -25,6 +25,8 @@ const (
 	Unusable       = 9
 	WaitTimeout    = 10
 	Delegated      = 11
+	CouldNotVerify = 12
+	Contention     = 13
 )
 
 // Entry documents one exit status.
@@ -48,6 +50,8 @@ var Table = []Entry{
 	{Unusable, "unusable record", "a record this nitipan cannot use blocks the request"},
 	{WaitTimeout, "wait timeout", "acquire --wait ran out of time before the lease could be granted"},
 	{Delegated, "delegated", "the caller already holds exactly these keys, and part of them is delegated to a sub-lessee. The output lists the delegations"},
+	{CouldNotVerify, "could not verify", "a push needed the broker's answer and could not get it, so it is neither allowed nor a lost lease. Try again once the broker answers"},
+	{Contention, "contention", "a push kept losing the compare-and-swap on the fence refs to other pushes and gave up. Try again"},
 }
 
 // Results that map to a status of their own. Commands wrap these with detail for the message.
@@ -60,6 +64,8 @@ var (
 	ErrNoSuchLease    = errors.New("no such lease")
 	ErrWaitTimeout    = errors.New("timed out waiting for a lease")
 	ErrDelegated      = errors.New("part of the lease is delegated")
+	ErrCouldNotVerify = errors.New("could not verify")
+	ErrContention     = errors.New("fence contention")
 )
 
 // For maps an error to its exit status.
@@ -87,6 +93,10 @@ func For(err error) int {
 		return WaitTimeout
 	case errors.Is(err, ErrDelegated):
 		return Delegated
+	case errors.Is(err, ErrCouldNotVerify):
+		return CouldNotVerify
+	case errors.Is(err, ErrContention):
+		return Contention
 	default:
 		return Error
 	}

@@ -96,18 +96,9 @@ func (a *app) runWhoHolds(cmd *cobra.Command, subject string) error {
 		return err
 	}
 
-	if err := a.nodeFor(handoff.KindWhoHolds); err != nil {
-		return err
-	}
-
-	rep, err := a.roundTrip(stateDir, handoff.KindWhoHolds, state.NewID(), "", q)
+	ans, err := a.askWhoHolds(stateDir, q)
 	if err != nil {
 		return err
-	}
-
-	var ans wire.WhoHoldsAnswer
-	if err := json.Unmarshal(rep.Body, &ans); err != nil {
-		return fmt.Errorf("decoding the who holds answer: %w", err)
 	}
 
 	out := whoOutput{
@@ -115,6 +106,25 @@ func (a *app) runWhoHolds(cmd *cobra.Command, subject string) error {
 	}
 
 	return a.printWho(cmd, out)
+}
+
+// askWhoHolds sends a who-holds query and returns the broker's answer.
+func (a *app) askWhoHolds(stateDir string, q wire.WhoHolds) (wire.WhoHoldsAnswer, error) {
+	if err := a.nodeFor(handoff.KindWhoHolds); err != nil {
+		return wire.WhoHoldsAnswer{}, err
+	}
+
+	rep, err := a.roundTrip(stateDir, handoff.KindWhoHolds, state.NewID(), "", q)
+	if err != nil {
+		return wire.WhoHoldsAnswer{}, err
+	}
+
+	var ans wire.WhoHoldsAnswer
+	if err := json.Unmarshal(rep.Body, &ans); err != nil {
+		return wire.WhoHoldsAnswer{}, fmt.Errorf("decoding the who holds answer: %w", err)
+	}
+
+	return ans, nil
 }
 
 func (a *app) runWhoIs(cmd *cobra.Command, name string) error {

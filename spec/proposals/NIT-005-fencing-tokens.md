@@ -1,8 +1,8 @@
 # NIT-005: Fencing Tokens
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-10-25
+**Updated:** 2026-11-08
 
 ## Dependencies
 
@@ -12,7 +12,7 @@
 
 - NIT-001 — "Breaking a live lease". Tombstones are a broken holder's only signal until fencing exists. This proposal
   is that fencing. "The fence mark" narrows its "a tombstone never blocks a claim" for one holder, so that section
-  takes a "Superseded in part by NIT-005" marker when this proposal ships
+  took a "Superseded in part by NIT-005" marker when M1 landed. Amended 2026-11-08; see Decision Log
 - NIT-003 — "Fencing" there fixes the outcomes this proposal's "Token scope" and "Local fencing for NIT-001" must keep
   for sub-leases. A single high-water mark per name or per repo cannot keep them. Its revisit hook was audited and
   closed on 2026-10-24, when this proposal was accepted
@@ -468,10 +468,12 @@ fails closed until they are in force. Codex `acquire` already fails closed the s
 - `setup git --uninstall <checkout>` removes them and restores what they chained to
 - The hooks bake the stable PATH location of `nitipan`, not the symlink-resolved path. A Homebrew upgrade deletes the
   versioned Cellar path. The script falls back to `command -v nitipan`
-- With no `nitipan` found, the hook fails closed for `refs/heads/*` and HEAD updates and passes every other ref, such as
-  fetches, tags, and salvage pins. The script tells them apart without the binary. The error names reinstalling and
-  `setup git --uninstall`. It never names `git -c core.hooksPath=/dev/null`, since an agent follows the command its
-  error names. That escape stays in the documentation only
+- With no `nitipan` found, the reference-transaction hook fails closed for `refs/heads/*` and HEAD updates and passes
+  every other ref, such as fetches, tags, and salvage pins. The script tells them apart without the binary. The
+  pre-push hook fails closed for every push. git lists no ref that a pruning push such as `--mirror` deletes, so no
+  input shows that a push is harmless, and the script starts the binary for every push. Each error names reinstalling
+  and `setup git --uninstall`. It never names `git -c core.hooksPath=/dev/null`, since an agent follows the command its
+  error names. That escape stays in the documentation only. Amended 2026-11-08; see Decision Log
 - `acquire` of a path inside a git checkout refuses when the hooks are not in force there, and names the install
   command. A checkout that a tool rewires later is caught at the next `acquire`. Resource claims and paths outside a git
   checkout are unaffected
@@ -538,20 +540,31 @@ fenced push, so the user, agents with no covering broker lease, and a `git push 
 fence refs each needed a rule. The candidates were treating a tokenless pusher as token 0, sending every tokenless
 pusher through push rule 6, mirroring the local rule, and the same with automatic pruning of old fence refs.
 
-Decision (autonomous): mirror the local rule, and guard the fence namespace structurally.
+Decision (autonomous): mirror the local rule, and guard the fence namespace structurally. Amended 2026-11-08; see
+Decision Log
 
 - A caller with no adapter and no agent variables passes the pre-push hook with no fence update, as it passes the local
   hook. The user holds no lease, so there is no staleness to fence. Refusing the user would also teach `--no-verify`,
   which turns off every other guard on that push. At `shared` reach a second human counts the same way, under the
   accepted risk "Hooks are bypassable"
-- A caller with agent variables but no matching ancestor fails closed, as NIT-001 does locally
+- A caller with agent variables but no matching ancestor is refused when the push updates a branch or carries a fence
+  ref. A push of tags alone passes, as NIT-001's local hook passes every ref but branch and HEAD updates
 - An agent with no broker lease covering the touched paths goes through push rule 6, a lease check. Rule 6 fires only on
   paths with a fence ref at or above them, so a lease-less agent can push into a live broker lease's keys unchecked
   until that key's first fenced push. That extends the settled "A stale push that lands before the new holder's first
   push" to non-holders
 - An update to a ref under the fence namespace must create it or fast-forward it, whoever makes it. That is exactly
   what `nitipan push` does, since each fence commit's parent is the previous value. A deletion, a rewind, and a
-  force-update to a diverged fence commit are refused, which covers `--mirror`
+  force-update to a diverged fence commit are refused, which covers `--mirror` only in part. git does not list the
+  refs a pruning push deletes, and a flag can be abbreviated or hidden in an alias, so the hook cannot detect a
+  pruning push. It refuses every push to a remote that holds a fence ref this clone's fence namespace lacks, or holds
+  at another value, as of before the hook's own fetch. The hook then fetches the namespace, so pushing again passes.
+  The rule applies to every caller and does not depend on detecting pruning. A window stays, and is accepted: another
+  machine can create a fence ref on the remote after the hook's `ls-remote` and before this clone's pruning push
+  lands, and the push then deletes it. Only a server-side hook closes it
+- An agent's push may carry only the fence refs its own leases call for, with the tokens the plan sets. Any other
+  fence ref in an agent's push is refused, so an agent cannot lock out the other holders with a ref of a chosen
+  token. The user's own terminal holds no lease and is not held to the plan
 - A refused `--mirror` names the fetch to run first,
   `git fetch <remote> '+refs/nitipan/fence/*:refs/nitipan/fence/*'`. The mirror then sends equal values, which git does
   not send
@@ -589,12 +602,13 @@ None.
 
 ## Risks
 
-- **The user's remote hosts may not support atomic push** — likelihood: high, impact: medium.
-  The fence needs `git push --atomic`. Azure DevOps does not advertise it, and github.com's current behavior is
-  unconfirmed. The likelihood is rated high because the evidence does not settle it. Where atomic push is missing, a
-  push gets only the fail-closed lease check, whose window is bounded by one 5-minute term after a synchronous renewal.
-  A host that refuses refs under the fence namespace fails the push outright. Mitigation: the lease check bounds the
-  impact, and M3 records which of the user's hosts support atomic push and fence refs before the fence ships.
+- **The user's remote hosts may not support atomic push** — likelihood: low, impact: medium.
+  The fence needs `git push --atomic`. Azure DevOps does not advertise it. M3's probe found that github.com,
+  gitlab.com, git.sr.ht, and a tangled knot all take atomic push and fence refs. huggingface.co was not probed. Where
+  atomic push is missing, a push gets only the fail-closed lease check, whose window is bounded by one 5-minute term
+  after a synchronous renewal. A host that refuses refs under the fence namespace fails the push outright. Mitigation:
+  the lease check bounds the impact, and `make live-fence-hosts` probes a new host. Amended 2026-11-08; see Decision
+  Log.
 - **Hooks are bypassable** — likelihood: medium, impact: medium.
   `git push --no-verify`, a local `core.hooksPath` set after `acquire`, a clone with no hooks, and a binary from before
   this proposal each skip the fence. `--no-verify` does not skip `reference-transaction`. Accepted: the environment is
@@ -703,7 +717,7 @@ Fences `machine` leases on one machine. Needs no broker.
 
 ### M3: Remote fencing
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `nitipan push` runs one atomic push with the branch refs and the fence refs, each fence pushed by SHA with
   `--force-with-lease`
@@ -713,6 +727,38 @@ Fences `machine` leases on one machine. Needs no broker.
 - Fence objects follow the versioned format, and a test runs older and newer readers and writers against one remote
 - Hosts without atomic push get the labeled lease check, and the As built block records which of the user's hosts
   support atomic push and fence refs
+
+**As built:**
+
+- `nitipan push` and the pre-push hook run one plan, so they compute the same required fence set. The plan is a
+  pure function of the fetched fence refs, the pusher's broker keys, and the touched paths. Tables cover the nested,
+  sibling, orphan-branch, deletion, force-push, and rule 6 cases. The remote touched set is the commit rule against the
+  advertised branches, and the root lookup now works from any commit. Decision Log entries of 2026-11-08 record each
+  guess.
+- git's pre-push hook never sees the refs that `--mirror` and `--prune` delete, and a flag can be abbreviated or
+  aliased. The settled refusal of a fence deletion therefore could not cover `--mirror` by itself. The hook now refuses
+  any push while the clone's fence refs differ from the remote's, and its own fetch lets the retry through. Tests run
+  `--mir`, an alias, and `remote.<name>.mirror`. The reason is in the Decision Log.
+- A lost compare-and-swap is recognized by asking the remote whether a fence it meant to update moved, since hosts word
+  the loss differently. A test forces the race from a chained hook that moves the fence between nitipan's check and the
+  push, and the retry lands.
+- The partition test merges the two-machine broker fixture with a bare git remote. The holder is partitioned, its lease
+  lapses, another session is granted it and pushes, and the stale push is refused with the higher token and no
+  command that could delete the fence. The skew test plants fence objects of versions 1.1 and 2.0 beside this binary's
+  1.0 on one remote. It shows the newer-minor ancestor refreshed with its tree and unknown field intact, and the newer
+  major refusing with the upgrade message.
+- A host without atomic push is simulated with `receive.advertiseAtomic=false`. Git's refusal of `--atomic` is the
+  detection, and the clone records it. The lease check renews the covering leases and then pushes the branches, and a
+  renewal the broker answers as lost refuses.
+- `make live-fence-hosts` probes the remotes of a clone with the push shape of `nitipan push`. It was tested here only
+  against local bare remotes, one of them without atomic push.
+- Hosts probed on 2026-11-08 over SSH, from a throwaway clone of the user's scratch repo: github.com, gitlab.com,
+  git.sr.ht, and a tangled knot each advertise atomic push. Each took a fence ref created in one atomic push with a
+  branch, a fast-forward of it under `--force-with-lease`, and its deletion. The probe left no refs behind.
+  huggingface.co, the user's one other host, was not probed, since the scratch repo has no remote there.
+- Left undone, as the settled text says: a plain `git push --no-verify` and a clone with no hooks land unfenced, and a
+  stale push that lands before the new holder's first push is not caught. A shallow clone cannot push as an agent once a
+  repo has fence refs or the agent holds a broker lease, because its root commits are unknown.
 
 ## Decision Log
 
@@ -745,9 +791,9 @@ Fences `machine` leases on one machine. Needs no broker.
   fence, with disclosure flagged as the user's to decide. Answer: a refusal asks the broker for the holder, so naming
   survives whenever the broker answers. Converged in one pass on the critic's hardened option.
 - 2026-10-24: ADR candidate (hard to reverse): the fence ref namespace, its name encoding, and the fence object format.
-  It is stored data on remotes the user may not control, and every binary reads it. Waits on the proposal loop's
-  check of the encoding and counter durability, and on NIT-004 reaching `accepted`, since the key mapping relies on its
-  name syntax.
+  It is stored data on remotes the user may not control, and every binary reads it. Undecided on 2026-11-08: its waits
+  are spent, since NIT-004 is `implemented` and the encoding and counter durability shipped. It still names a format,
+  so it needs lifting to the invariant it serves before it is weighed.
 - 2026-10-24 (autonomous): The whole-proposal review reopened the touched-path rule from "Local fencing for NIT-001"
   and "Token scope". A finished rebase, `reset`, a detached-HEAD commit landed by `update-ref`, and a salvage pin each
   passed the hook. A force-push rewind or a deletion carried no fence update. Added the open questions "Touched set for
@@ -966,6 +1012,124 @@ Fences `machine` leases on one machine. Needs no broker.
   restored or reinstalled broker never issues below a token already on a remote. The invariant is the floor and the
   bounded raise, not the margin value. M3 only reads tokens, so nothing the invariant rests on is still in design.
   Undecided. Found in NIT-005 M2.
+- 2026-11-08 (run best guess): The fence ref name encoding, which "Carrying the token" freezes without stating. One
+  component. A byte outside `[a-z0-9._-]` becomes `%XX` with uppercase hex, uppercase letters included, so two names
+  never differ only in case on a filesystem that folds it. A dot git would reject is escaped too: a leading or
+  trailing dot, the first dot of `..`, and the dot of a `.lock` suffix. The repo root is `%00`, which no path can
+  contain. A name that does not round-trip through decode and encode does not decode. A path whose encoding passes 255
+  bytes is refused, since a loose ref component cannot be longer. If the encoding is wrong, only the encoder changes
+  before a remote holds a ref.
+- 2026-11-08 (run best guess): Fence commits use the fixed identity `nitipan <nitipan@invalid>` and the clone's clock
+  for their time. "Carrying the token" says the fence names no holder, machine, or user. The identity is set in the
+  environment of `commit-tree`, so a user's git configuration never reaches a remote.
+- 2026-11-08 (run best guess): A push that loses a compare-and-swap is tried at most 5 times, then reports contention
+  with its own exit status. "Token scope" says "a bounded number of times". A loss is recognized by asking the remote
+  whether a fence moved, not by git's wording, which differs between hosts and versions. If 5 is wrong, one constant
+  changes.
+- 2026-11-08 (run best guess): The pre-push hook may write handoff request files and fetch the fence refs into the
+  clone's `refs/nitipan/fence/` namespace. "Local fencing for NIT-001" makes only the reference-transaction hook
+  read-only. Rule 6 and the lease check ask the broker through the node, and the fetch gives the hook the fence objects
+  to read. A fetch prunes local fence refs the remote lost, so a later `--mirror` cannot bring back a deleted fence. The
+  namespace is shared by every remote of the clone. The hook and the wrapper read the objects by the SHA the remote
+  advertised, so a fetch from another remote does not change what they decide.
+- 2026-11-08 (run best guess): A remote that cannot take an atomic push is recorded in the clone's local git config as
+  `nitipan.<remote>.atomic = false`. "What enforces the token" names a pre-push lease check and does not say how the
+  hook knows the host lacks atomic push. Git's own refusal of `--atomic` is the detection, and the key is the remote's
+  name. A remote named by URL cannot be recorded, so the push says to add it as a remote. A hand-set flag falls under
+  the accepted risk "Hooks are bypassable". The hook accepts a fence-less push only to a marked remote, after its own
+  synchronous renewal of the pusher's leases that cover the touched paths.
+- 2026-11-08 (run best guess): An advertised commit that the clone does not hold is left out of the remote baseline, which
+  only widens the touched set. "Touched set for a ref update" fails closed only for a missing old or new value, and the
+  error says to fetch. A stale holder must therefore fetch before its push is judged. A shallow clone cannot derive
+  root commits, so an agent in one is refused once fence refs or its broker leases make the roots matter.
+- 2026-11-08 (run best guess): "Could not verify" is exit status 12 and contention is 13. Refusals keep status 3, as the
+  local hook does. An unknown or stale answer in rule 6, an `outcome unknown`, and an unreachable broker are all "could
+  not verify", per "Counter durability" and rule 6. Rule 6 counts a live broker grant and a mirrored machine lease of
+  another holder as live, and skips the pusher's own by holder key.
+- 2026-11-08 (run best guess): The pusher's token for a touched path is the highest token among its leases that cover the
+  path, and the token written to a fence ref is the highest among its keys that the ref lies at or below. "Token scope"
+  says "the pusher's token" and a holder can hold several leases. A lease that covers the path and has no token refuses.
+  Equal tokens do not refuse, so a holder's second push goes through. A fence of a newer major in the check set refuses
+  a pusher with no lease too, since it cannot be read.
+- 2026-11-08 (run best guess): `nitipan push` takes branch names, `<src>:<dst>`, `:<dst>` to delete, and a leading `+` on a
+  branch. It takes no pattern and no other git flag, and it defaults to the current branch. A destination without
+  `refs/` is a branch. Tags and other refs go through unfenced. "Carrying the token" forbids `+` and `-f` on fence
+  refs only.
+- 2026-11-08 (run best guess): `nitipan fence delete` takes a fence ref name, `<root>/<encoded-path>`, or a repo name. It
+  reaches the pre-push hook as the user's deletion through the environment variable `NITIPAN_FENCE_DELETE`, which names
+  the one ref. The hook allows a deletion only for a caller with no agent variables, and only of that ref. The
+  settled text says the hook refuses a fence deletion "whoever makes it" and that `fence delete` is the one way to
+  delete, and does not say how the hook tells the two apart. A user who sets the variable by hand can delete a fence
+  with `git push`, which is the user's own terminal and the accepted risk.
+- 2026-11-08: Amended "Tokenless pushers and fence cleanup", after review of the first amendment. The settled text said
+  a deletion of a fence ref is refused, "which covers `--mirror`". git does not hand the refs a `--mirror` or
+  `--prune` push deletes to the pre-push hook. A probe of git 2.50.1 showed only the refs the push updates. The first
+  amendment had the hook look for `--mirror` and `--prune` in the process tree. Review showed that git accepts
+  `--mir`, and that an alias or `-c remote.<name>.mirror=true` hides the flag, so process matching cannot be
+  exhaustive. The text now says the hook refuses any push to a remote whose fence refs the clone lacks or holds at
+  another value, whoever pushes. Its own fetch then fills the namespace, so the retry passes. A user's first plain push
+  to a remote with fence refs is therefore refused once. `nitipan push` records the fence refs it writes in the local
+  namespace, and `fence delete` syncs first, so neither trips the guard. The script no longer has a fast path for
+  pushes of tags or of nothing: it starts nitipan on every push, since no input shows that a push deletes nothing.
+  A missing binary now fails closed for every push, which the plan's fast path did not. One window stays and is
+  accepted. Another machine can create a fence ref after the hook's `ls-remote` and before the pruning push lands, and
+  the push deletes it. The hook reads the remote once, and only a server-side hook closes the gap.
+- 2026-11-08: Amended "Installing the git hooks". Its bullet on a missing `nitipan` said "the hook fails closed for
+  `refs/heads/*` and HEAD updates and passes every other ref, such as fetches, tags, and salvage pins. The script tells
+  them apart without the binary." That holds for the reference-transaction hook and still does. The pre-push hook can
+  no longer tell a harmless push apart without the binary, because git does not list the refs a pruning push deletes
+  and the hook's sync guard needs the remote's fence refs. Its script starts nitipan for every push, and with no
+  binary it fails every push closed. The bullet now states both hooks. M1's check on a missing binary describes the
+  reference-transaction hook and is unchanged. The risk "The hook runs on every branch and HEAD update" is about that
+  hook too, and is unchanged.
+- 2026-11-08: Amended "Tokenless pushers and fence cleanup" with the rule that an agent's push carries only the fence
+  refs the plan calls for. The text let a caller create or fast-forward any well-formed fence ref, and the hook only
+  checked that the planned writes were present. An agent could push `<root>/%00` with a huge token and lock out every
+  other holder until the user deletes it. The hook now refuses a carried fence ref that is not in the plan, and one
+  whose token differs from the plan's. It runs even when the push has no branch update. The user's own terminal passes
+  with no fence update, as the settled text has it, so it may still create a well-formed ref by hand.
+- 2026-11-08 (run best guess): A fence is never written at a lower token than the one it replaces. The plan wrote a ref at
+  the token of the pusher's key that the ref lies at or below, while the check used the highest token over the touched
+  path. A holder of `/repo` at 5 and `/repo/src` at 20, with a stored `/repo` fence at 15, passed the check and then
+  lowered the fence to 5. A ref whose stored token is higher is refreshed and keeps it. The engine table has the case.
+- 2026-11-08 (run best guess): A key with no valid fence ref name, such as an encoded path over 255 bytes, refuses the push
+  with its own message. The plan had dropped the error, so the holder pushed unfenced.
+- 2026-11-08 (run best guess): Key containment in the plan uses ADR-03's one rule, `keys.Contains`, with the entry's
+  FoldCase and Normalize, which the sidecar entry carries and the plan key now copies. A fence ref records no
+  volume rules, so a fence key is compared with the pusher's own rules, folded when any of the pusher's keys under the
+  same repo folds. The more insensitive reading only adds names to the check set, as ADR-03 says of keys on different
+  volumes. Two pushers on different volumes can therefore disagree on a case-variant path, and the fence errs toward
+  refusing.
+- 2026-11-08 (run best guess): `fence delete` maps the root of a `repo:` name to the first-parent root of the clone's HEAD
+  when the typed root is one of HEAD's roots, since fence refs are named by the first-parent root. When the ref is not
+  found, the error lists the fence refs of the same path under other roots.
+- 2026-11-08: Amended Impacts for NIT-001. It said the "Superseded in part by NIT-005" marker is added "when this
+  proposal ships". The marker landed with M1, per the 2026-10-25 entry on it.
+- 2026-11-08 (run best guess): The host probe is `scripts/live-checks/fence-hosts.py`, run by `make live-fence-hosts`. It
+  is never part of `ci`. It sends the push shape of `nitipan push`, a probe branch and a fence ref in one `--atomic`
+  push with `--force-with-lease`. It then fast-forwards the fence and deletes both. On a host with no atomic push it
+  still tries the fence ref without `--atomic`, to learn whether the host's ref policy accepts the namespace. The
+  coordinator runs it against the user's remotes with their credentials, since this run tested it only against
+  local bare remotes.
+- 2026-11-08: ADR candidate (hard to reverse), update: the fence format shipped as the Decision Log of 2026-10-24
+  described it, with the encoding in the 2026-11-08 entry above. A test round-trips and case-folds the encoding, and
+  another runs versions 1.0, 1.1, and 2.0 against one remote. The candidate stays undecided until the end of the run.
+  Found in NIT-005 M3.
+- 2026-11-08: Amended the risk "The user's remote hosts may not support atomic push". It was rated likelihood high
+  because github.com's behavior was unconfirmed. `make live-fence-hosts` ran over SSH against the user's scratch repo
+  on github.com, gitlab.com, git.sr.ht, and a tangled knot. Each advertised atomic push, and each took a fence ref's
+  create, fast-forward, and delete. The likelihood is now low. huggingface.co was not probed, and Azure DevOps still
+  lacks atomic push, so the risk stays.
+- 2026-11-08: Amended "Tokenless pushers and fence cleanup" on the agent with no matching ancestor. The text said such a
+  caller "fails closed, as NIT-001 does locally". NIT-001's local hook fails closed for branch and HEAD updates only.
+  The pre-push hook returns before the refusal when a push has no branch update and carries no fence ref, so a tag-only
+  push by an agent that cannot be identified passes. The text now says so. The decision carries one marker, which
+  covers this amendment and the three before it.
+- 2026-11-08 (run best guess): `nitipan push` and `fence delete` run git with the hook's 2 minute bound, not the 10
+  seconds of the cleaned gate. Cleaning the environment changed the bound too, so `ls-remote`, the fence `fetch`, and
+  the touched-set `rev-list` and `diff-tree` failed as "could not verify" on a slow SSH round trip or a long first push,
+  where the hook passed. No document fixes the value. The hook's bound keeps the wrapper and the hook agreeing on what
+  a slow remote is. `ExecClean` keeps 10 seconds for setup and the acquire gate. The push itself has no bound.
 
 ## References
 
