@@ -6,6 +6,11 @@ push shape of `nitipan push`: one `git push --atomic` with a probe branch and on
 refs/nitipan/fence/, the fence pushed by SHA with `--force-with-lease`. It then fast-forwards the fence
 ref, as a second push under the same root does, and deletes both refs. Each step is reported per remote.
 
+The pushes run with `--porcelain`, as the fenced push of `nitipan push` does. When a host refuses a push,
+the probe prints the porcelain lines of that push under the remote. `nitipan push` falls back to a lease
+check only when the fence ref's own line says `[remote rejected]` with a reason of its own. The lines show
+how a new host words that reason before it matters.
+
 The probe pushes to real remotes. It creates only a branch named nitipan-probe-<timestamp> and a fence
 ref of the same name, and deletes both before it moves on. Run it from a throwaway clone, with the
 credentials of the user who owns the remotes. It is never part of `make ci`.
@@ -38,6 +43,7 @@ class Result:
     url: str = ""
     steps: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    porcelain: dict[str, list[str]] = field(default_factory=dict)
 
     def ok(self) -> bool:
         return all(self.steps.get(s) == "yes" for s in STEPS)
@@ -54,6 +60,19 @@ def git(clone: str, *args: str, env: dict | None = None, stdin: str | None = Non
     if check and proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)}: {proc.stderr.strip() or proc.stdout.strip()}")
     return proc
+
+
+def porcelain_lines(proc: subprocess.CompletedProcess) -> list[str]:
+    """The per-ref lines of `git push --porcelain`: a flag, from:to, and a summary, split by tabs."""
+    return [line for line in proc.stdout.splitlines() if line.count("\t") >= 2]
+
+
+def record_refusal(res: Result, step: str, proc: subprocess.CompletedProcess) -> None:
+    lines = porcelain_lines(proc)
+    if lines:
+        res.porcelain[step] = lines
+    else:
+        res.notes.append(f"{step}: no porcelain lines. stderr: " + proc.stderr.strip().replace("\n", " | ")[-300:])
 
 
 def make_fence(clone: str, token: int, parent: str | None) -> str:
@@ -93,27 +112,28 @@ def probe_remote(clone: str, remote: str, root: str, stamp: str) -> Result:
         atomic = ["--atomic"] if res.steps["atomic"] == "yes" else []
 
         first = make_fence(clone, 1, None)
-        push = git(clone, "push", "--no-verify", *atomic, f"--force-with-lease={fence_ref}:", remote,
+        push = git(clone, "push", "--porcelain", "--no-verify", *atomic, f"--force-with-lease={fence_ref}:", remote,
                    f"HEAD:{branch_ref}", f"{first}:{fence_ref}", check=False)
         created = push.returncode == 0
         res.steps["create"] = "yes" if created else "no"
         if not created:
-            res.notes.append("create: " + push.stderr.strip().replace("\n", " | ")[-300:])
+            record_refusal(res, "create", push)
             return res
 
         second = make_fence(clone, 2, first)
-        push = git(clone, "push", "--no-verify", *atomic, f"--force-with-lease={fence_ref}:{first}", remote,
+        push = git(clone, "push", "--porcelain", "--no-verify", *atomic, f"--force-with-lease={fence_ref}:{first}", remote,
                    f"HEAD:{branch_ref}", f"{second}:{fence_ref}", check=False)
         res.steps["fast-forward"] = "yes" if push.returncode == 0 else "no"
         if push.returncode != 0:
-            res.notes.append("fast-forward: " + push.stderr.strip().replace("\n", " | ")[-300:])
+            record_refusal(res, "fast-forward", push)
     except (RuntimeError, subprocess.TimeoutExpired) as err:
         res.notes.append(f"error: {err}")
     finally:
         if created:
-            gone = git(clone, "push", "--no-verify", remote, f":{fence_ref}", f":{branch_ref}", check=False)
+            gone = git(clone, "push", "--porcelain", "--no-verify", remote, f":{fence_ref}", f":{branch_ref}", check=False)
             res.steps["delete"] = "yes" if gone.returncode == 0 else "no"
             if gone.returncode != 0:
+                record_refusal(res, "delete", gone)
                 res.notes.append(f"CLEAN UP BY HAND: {fence_ref} and {branch_ref} on {remote}: "
                                  + gone.stderr.strip().replace("\n", " | ")[-200:])
     return res
@@ -125,9 +145,9 @@ def dry_run(clone: str, remotes: list[str], root: str, stamp: str) -> None:
         fence_ref = f"{FENCE_NS}/{root}/{branch}"
         print(f"{remote}:")
         print(f"  git push --dry-run {remote} HEAD:refs/heads/{branch}   (reads the advertisement for atomic)")
-        print(f"  git push --atomic --force-with-lease={fence_ref}: {remote} HEAD:refs/heads/{branch} <fence1>:{fence_ref}")
-        print(f"  git push --atomic --force-with-lease={fence_ref}:<fence1> {remote} HEAD:refs/heads/{branch} <fence2>:{fence_ref}")
-        print(f"  git push {remote} :{fence_ref} :refs/heads/{branch}")
+        print(f"  git push --porcelain --atomic --force-with-lease={fence_ref}: {remote} HEAD:refs/heads/{branch} <fence1>:{fence_ref}")
+        print(f"  git push --porcelain --atomic --force-with-lease={fence_ref}:<fence1> {remote} HEAD:refs/heads/{branch} <fence2>:{fence_ref}")
+        print(f"  git push --porcelain {remote} :{fence_ref} :refs/heads/{branch}")
 
 
 def table(results: list[Result]) -> str:
@@ -137,6 +157,9 @@ def table(results: list[Result]) -> str:
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     lines = ["  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip() for row in rows]
     for r in results:
+        for step, refs in r.porcelain.items():
+            lines.append(f"{r.remote}: {step} porcelain:")
+            lines.extend(f"    {ref}" for ref in refs)
         for note in r.notes:
             lines.append(f"{r.remote}: {note}")
     return "\n".join(lines)

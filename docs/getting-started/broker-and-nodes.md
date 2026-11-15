@@ -227,7 +227,7 @@ higher token for one of your keys. That means another session was granted the le
 
 A plain `git push` of a fenced branch from an agent is refused by the `pre-push` hook, and the message names
 `nitipan push`. Run from your own terminal, with no agent above it, `nitipan push` is a plain git push. See
-[Pushing](../reference/pushing.md) for remotes that cannot take an atomic push.
+[Pushing](../reference/pushing.md) for remotes that refuse the fence or cannot take an atomic push.
 
 ## 8. Send mail between sessions
 

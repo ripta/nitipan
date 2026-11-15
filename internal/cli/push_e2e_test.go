@@ -303,23 +303,25 @@ func TestAHostWithoutAtomicPushGetsALabeledLeaseCheckNotFencing(t *testing.T) {
 		t.Fatalf("status %d, want %d (no node can renew the lease)\n%s", res.Status, exitcode.CouldNotVerify, res.Stderr)
 	}
 
-	for _, want := range []string{"cannot take an atomic push", "lease check and not fencing", "not a lost lease"} {
+	for _, want := range []string{"origin does not support atomic push", "lease check and not fencing", "not a lost lease"} {
 		if !strings.Contains(res.Stderr, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, res.Stderr)
 		}
 	}
 
-	if got := strings.TrimSpace(r.must(r.user(`cd "$REPO"; git config nitipan.origin.atomic`)).Stdout); got != "false" {
-		t.Errorf("nitipan.origin.atomic = %q", got)
+	if reason, label := strings.Index(res.Stderr, "origin does not support atomic push"), strings.Index(res.Stderr, "could not verify"); reason < 0 || label < reason {
+		t.Errorf("the error must lead with the host's reason:\n%s", res.Stderr)
 	}
 
 	if got := r.fenceRefs(); got != "" {
 		t.Errorf("a fence landed on a host without atomic push: %q", got)
 	}
 
+	r.must(r.user(`cd "$REPO"; git config nitipan.origin.fence false`))
+
 	plain := alpha.run(`git push origin main`)
-	if plain.Status == 0 || !strings.Contains(plain.Stderr, "lease check") {
-		t.Errorf("a plain push to a marked remote: status %d\n%s", plain.Status, plain.Stderr)
+	if plain.Status == 0 || !strings.Contains(plain.Stderr, "lease check") || !strings.Contains(plain.Stderr, "nitipan.origin.fence is false") {
+		t.Errorf("a plain push to a remote with fence=false: status %d\n%s", plain.Status, plain.Stderr)
 	}
 
 	r.must(r.user(`cd "$REPO"; git push -q origin main`))

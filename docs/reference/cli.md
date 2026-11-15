@@ -164,8 +164,9 @@ Three more arguments do other jobs:
 
 ### `nitipan push <remote> [[+]<src>[:<dst>] ...]`
 
-Pushes branches in one atomic git push that also updates the fence refs of the broker leases you hold. With no
-refspec, it pushes the current branch. Patterns are not supported. It takes no flags. See [Pushing under a broker
+Pushes branches in one atomic git push that also updates the fence refs of the broker leases you hold. A host that
+refuses the fence gets a lease check, unless `nitipan.<remote>.fence` says otherwise. With no refspec, it pushes the
+current branch. Patterns are not supported. It takes no flags. See [Pushing under a broker
 lease](pushing.md).
 
 ### `nitipan fence delete <remote> <key>`

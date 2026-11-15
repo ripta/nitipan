@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -25,7 +26,7 @@ const pushAttempts = 5
 
 var (
 	errLostCAS  = errors.New("a fence ref changed during the push")
-	errNoAtomic = errors.New("the remote cannot take an atomic push")
+	errNoAtomic = errors.New("the remote does not support atomic push")
 )
 
 func (a *app) pushCmd() *cobra.Command {
@@ -39,8 +40,15 @@ stored is refused, and so is a push of a path that another session's lease cover
 With no refspec, push the current branch. A refspec is a branch name, <src>:<dst>, or :<dst> to delete a
 branch, and a leading + forces the branch. Patterns are not supported.
 
-A remote that cannot take an atomic push gets a lease check instead: your leases are renewed with the broker
-first. That checks the lease. It is not fencing.
+A lease check renews your leases with the broker before the push. That checks the lease. It is not fencing.
+You choose when a remote gets one with git config nitipan.<remote>.fence:
+
+  unset  try the fence. When the host refuses --atomic or the fence ref, this one push gets a lease check
+         and a warning. The next push tries the fence again, and nitipan records nothing
+  true   always fence. A host refusal is an error
+  false  never try the fence. Every push gets a lease check, because the key is false
+
+The old key nitipan.<remote>.atomic=false acts as fence=false while fence is unset.
 
 Run as your own terminal, with no agent above it, this is a plain git push.`,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -89,10 +97,19 @@ func (a *app) runPush(args []string) error {
 		return err
 	}
 
+	setting, err := readFenceSetting(g, remote)
+	if err != nil {
+		return err
+	}
+
+	if setting.LegacyOrigin != "" {
+		fmt.Fprintln(a.deps.Stderr, setting.legacyNotice())
+	}
+
 	url := pushURL(g, remote)
 
-	if g.atomicOff(remote) {
-		return a.pushWithoutFence(g, h, remote, url, specs)
+	if setting.Mode == fenceFalse {
+		return a.pushWithoutFence(g, h, remote, url, specs, leaseWhy{Cause: setting.offCause()})
 	}
 
 	for range pushAttempts {
@@ -101,15 +118,18 @@ func (a *app) runPush(args []string) error {
 			continue
 		}
 
-		if errors.Is(err, errNoAtomic) {
-			if err := recordNoAtomic(g, remote); err != nil {
-				return err
+		if refusal, ok := hostRefusalOf(err, remote); ok {
+			if setting.Mode == fenceTrue {
+				return fmt.Errorf("%s, and %s is true, so the push is an error and not a lease check. "+
+					"Set %s to false to skip the fence, or unset it to fall back to a lease check", refusal, fenceKey(remote), fenceKey(remote))
 			}
 
-			fmt.Fprintf(a.deps.Stderr, "nitipan: %s cannot take an atomic push, so this push gets a lease check and not fencing. "+
-				"Recorded in nitipan.%s.atomic\n", remote, remote)
-
-			return a.pushWithoutFence(g, h, remote, url, specs)
+			return a.pushWithoutFence(g, h, remote, url, specs, leaseWhy{
+				Cause:    refusal,
+				Fallback: true,
+				Warning: fmt.Sprintf("nitipan: %s. This push gets a lease check and not fencing. Set %s to false to skip the fenced attempt, "+
+					"or to true to make this refusal an error", refusal, fenceKey(remote)),
+			})
 		}
 
 		return err
@@ -304,7 +324,7 @@ func (a *app) failClosedPush(err error) error {
 
 type fencedPush struct {
 	git      []string
-	classify func(stderr string) error
+	classify func(stdout, stderr string) error
 
 	// carried maps each fence ref the push writes to its new commit.
 	carried map[string]string
@@ -314,7 +334,7 @@ type fencedPush struct {
 func (a *app) fencedArgs(g *pushGit, view remoteView, specs []pushSpec, plan fenceplan.Plan) (fencedPush, error) {
 	remote := view.Name
 
-	args := []string{}
+	args := []string{"--porcelain"}
 
 	if len(plan.Writes) > 0 {
 		args = append(args, "--atomic")
@@ -353,12 +373,14 @@ func (a *app) fencedArgs(g *pushGit, view remoteView, specs []pushSpec, plan fen
 
 	args = append(args, carried...)
 
-	classify := func(stderr string) error {
-		if len(plan.Writes) > 0 && fencesMoved(g, view, plan) {
-			return errLostCAS
+	classify := func(stdout, stderr string) error {
+		failure := pushFailure{Remote: remote, Stdout: stdout, Stderr: stderr}
+
+		if len(plan.Writes) > 0 {
+			failure.Moved = func() (bool, error) { return fencesMoved(g, view, plan) }
 		}
 
-		return classifyPushFailure(stderr, remote, len(plan.Writes) > 0)
+		return classifyPushFailure(failure)
 	}
 
 	return fencedPush{git: args, classify: classify, carried: landed}, nil
@@ -366,39 +388,58 @@ func (a *app) fencedArgs(g *pushGit, view remoteView, specs []pushSpec, plan fen
 
 // fencesMoved reports whether a fence ref this push meant to update holds a value other than the one
 // the push expected. Hosts word a lost compare-and-swap in their own ways, so the remote is asked.
-func fencesMoved(g *pushGit, view remoteView, plan fenceplan.Plan) bool {
+func fencesMoved(g *pushGit, view remoteView, plan fenceplan.Plan) (bool, error) {
 	now, err := g.lsRemote(view.Name, view.URL)
 	if err != nil {
-		return false
+		return false, err
 	}
 
 	for _, w := range plan.Writes {
 		if now.Fences[w.Name] != view.Fences[w.Name] {
-			return true
+			return true, nil
 		}
 	}
 
-	return false
+	return false, nil
 }
 
-// classifyPushFailure turns what git said into the kind of failure it was.
-func classifyPushFailure(stderr, remote string, fenced bool) error {
+// leaseWhy says why a push goes without fence refs, and what the push owes the user.
+type leaseWhy struct {
+	// Cause finishes "the push gets a lease check because ..." in every message about the lease check.
+	Cause string
+
+	// Warning is printed once the lease check passes, just before the push.
+	Warning string
+
+	// Fallback marks the push that follows a host refusal. It carries the variable that tells the hook so,
+	// and a failure of it reports the host's refusal as well.
+	Fallback bool
+}
+
+// hostRefusalOf says whether err is a host refusal of atomic push or of the fence ref, and words it as
+// the cause of a lease check.
+func hostRefusalOf(err error, remote string) (string, bool) {
+	var refused *fenceRefusedError
+
 	switch {
-	case strings.Contains(stderr, "stale info"):
-		return errLostCAS
-	case strings.Contains(stderr, "does not support --atomic"):
-		return errNoAtomic
-	case fenced && strings.Contains(stderr, fenceref.Namespace) && strings.Contains(stderr, "rejected"):
-		return fmt.Errorf("%s refused the fence ref. This is the host's ref policy about refs under %s and not a lost lease. "+
-			"Report this to the user", remote, fenceref.Namespace)
+	case errors.Is(err, errNoAtomic):
+		return fmt.Sprintf("%s does not support atomic push", remote), true
+	case errors.As(err, &refused):
+		return fmt.Sprintf("%s refused the fence ref %s: %s", remote, refused.Ref, refused.Reason), true
 	}
 
-	return nil
+	return "", false
 }
 
-// pushWithoutFence is the push to a remote that cannot hold fence refs. The leases are renewed first,
-// and the hook renews them again.
-func (a *app) pushWithoutFence(g *pushGit, h adapter.Holder, remote, url string, specs []pushSpec) error {
+// hookTooOldHint is what a push without fence refs adds to its refusal when the pre-push hook still
+// demands fence refs. A hook installed by an older nitipan does not read the fence key and does not
+// know the fallback push.
+const hookTooOldHint = "The pre-push hook in this clone refuses a push with no fence refs. It may be older than this nitipan. " +
+	"Run nitipan setup git --install, then push again"
+
+// pushWithoutFence is the push without fence refs, as a lease check. The leases are renewed first, and
+// the hook renews them again.
+func (a *app) pushWithoutFence(g *pushGit, h adapter.Holder, remote, url string, specs []pushSpec, why leaseWhy) error {
 	view, err := g.lsRemote(remote, url)
 	if err != nil {
 		return err
@@ -411,8 +452,12 @@ func (a *app) pushWithoutFence(g *pushGit, h adapter.Holder, remote, url string,
 		return a.failClosedPush(err)
 	}
 
-	if err := a.leaseCheck(h, an); err != nil {
+	if err := a.leaseCheck(h, an, why.Cause); err != nil {
 		return err
+	}
+
+	if why.Warning != "" {
+		fmt.Fprintln(a.deps.Stderr, why.Warning)
 	}
 
 	args := []string{remote}
@@ -420,32 +465,54 @@ func (a *app) pushWithoutFence(g *pushGit, h adapter.Holder, remote, url string,
 		args = append(args, s.Text)
 	}
 
-	return a.gitPush(g.dir, args, nil)
-}
-
-func recordNoAtomic(g *pushGit, remote string) error {
-	if _, err := g.run("", nil, "config", "--get", "remote."+remote+".url"); err != nil {
-		return fmt.Errorf("%s cannot take an atomic push, and it is not a configured remote, so nitipan cannot record that. "+
-			"Add it with git remote add, then push again", remote)
+	var env []string
+	if why.Fallback {
+		env = append(env, fenceFallbackEnv+"="+remote)
 	}
 
-	if _, err := g.run("", nil, "config", "--local", "nitipan."+remote+".atomic", "false"); err != nil {
-		return fmt.Errorf("recording that %s cannot take an atomic push: %w", remote, err)
+	err = a.gitPush(g.dir, args, hookDemandsFences, env...)
+	if err != nil && why.Fallback {
+		return fmt.Errorf("%s, and the lease-check push that followed failed too: %w", why.Cause, err)
+	}
+
+	return err
+}
+
+// hookDemandsFences recognizes the refusal of a hook that wants fence refs on a push that has none.
+func hookDemandsFences(_, stderr string) error {
+	if strings.Contains(stderr, missingFencesPhrase) {
+		return &refusedError{text: "git did not push. The reason is above. " + hookTooOldHint}
 	}
 
 	return nil
 }
 
+// withoutFenceMarks drops the caller's own copies of the fallback and notice variables. A push that
+// nitipan runs sets them itself, so an inherited one must never reach git or the hook.
+func withoutFenceMarks(env []string) []string {
+	return slices.DeleteFunc(env, func(kv string) bool {
+		return strings.HasPrefix(kv, fenceFallbackEnv+"=") || strings.HasPrefix(kv, fenceNoticeEnv+"=")
+	})
+}
+
 // gitPush runs git push in dir and shows its output. classify, when set, reads what git said on a
-// failure.
-func (a *app) gitPush(dir string, args []string, classify func(string) error) error {
+// failure. Stdout is copied as stderr is, because a porcelain push reports each ref there.
+//
+// The caller's own copies of the fallback and notice variables are dropped. Only the push that nitipan
+// sanctions as a fallback carries the first, and it passes it in env. Every push here carries the second.
+func (a *app) gitPush(dir string, args []string, classify func(stdout, stderr string) error, env ...string) error {
 	cmd := exec.Command("git", append([]string{"push"}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(keys.CleanGitEnv(os.Environ()), "LC_ALL=C", "LANGUAGE=C")
-	cmd.Stdout = a.deps.Stdout
+	cmd.Env = withoutFenceMarks(keys.CleanGitEnv(os.Environ()))
+	cmd.Env = append(cmd.Env, "LC_ALL=C", "LANGUAGE=C", fenceNoticeEnv+"=1")
+	cmd.Env = append(cmd.Env, env...)
 
-	var seen bytes.Buffer
+	var (
+		seen    bytes.Buffer
+		seenOut bytes.Buffer
+	)
 
+	cmd.Stdout = io.MultiWriter(a.deps.Stdout, &seenOut)
 	cmd.Stderr = io.MultiWriter(a.deps.Stderr, &seen)
 
 	err := cmd.Run()
@@ -454,7 +521,7 @@ func (a *app) gitPush(dir string, args []string, classify func(string) error) er
 	}
 
 	if classify != nil {
-		if kind := classify(seen.String()); kind != nil {
+		if kind := classify(seenOut.String(), seen.String()); kind != nil {
 			return kind
 		}
 	}

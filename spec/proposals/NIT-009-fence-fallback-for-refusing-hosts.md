@@ -1,6 +1,6 @@
 # NIT-009: Fence Fallback for Hosts That Refuse Fence Refs
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-11-14
 **Updated:** 2026-11-14
 
@@ -122,6 +122,12 @@ and says it can be renamed to `fence=false` or unset after `nitipan setup git --
 to pick. An older hook binary reads only the old key, which is why the reinstall comes first. The line also prints
 when `fence` is set beside a leftover `atomic`, because an older hook still obeys the old key.
 
+Both `nitipan push` and the hook print the line, since a clone may have no hook and a plain agent `git push` has no
+pusher. `nitipan push` sets `NITIPAN_FENCE_NOTICE` on its own git calls, and the hook stays quiet when it sees the
+variable, so each push prints one line. `nitipan push` strips an inherited copy, as it does for
+`NITIPAN_FENCE_FALLBACK`. An older hook prints nothing, which loses only the line. An older pusher sets no variable, so
+a newer hook prints once. Amended 2026-11-14; see Decision Log.
+
 nitipan does not clear a record it wrote earlier. The clone stays on the lease check until the user changes it. The
 legacy read also stays, and removing it later needs its own skew analysis.
 
@@ -207,6 +213,8 @@ The units are two nitipan binaries that serve one clone. The hook script runs th
   the new hook honors it. On a host that refuses fence refs it fails, as shipped. Under a user's `fence=false`, the old
   pusher's fenced push meets a new hook that refuses fence refs, and fails closed
 - Old binary after new: the new binary writes nothing, so the old binary sees the config as it left it
+- Notice: an older hook prints no notice, and an older pusher sets no `NITIPAN_FENCE_NOTICE`, so a newer hook prints it
+  once. No mix prints it twice. Amended 2026-11-14; see Decision Log.
 
 No direction lets a fence-less push land without a lease check.
 
@@ -246,7 +254,7 @@ None.
 
 ### M1: Porcelain classifier
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - The fenced push runs with `--porcelain`, and its failure is judged by the four rules in "What can cause a fallback",
   in order
@@ -265,9 +273,27 @@ None.
 - A fence ref that fails at transaction commit, such as on a directory/file conflict, gets rule 4, and the user sees
   the remote's `error:` line
 
+**As built:**
+
+The classifier returns typed outcomes and leaves mode handling as it was. A lost compare-and-swap still
+retries. A refusal of `--atomic` still records `atomic=false` and takes the lease check. A fence-ref refusal is still an
+error, now carrying the host's reason. M2 wires the outcomes to the `fence` key. M2 then replaced the recording of
+`atomic=false`, so nothing is recorded and the refusal takes the labeled lease check described under M2.
+
+- Rule 1 no longer matches `stale info` on stderr. It asks the remote, and a remote that cannot be asked fails the push
+  as rule 4 with an error that says so.
+- `--porcelain` is on the fenced push, including one that carries no fence refs. The output format is the same either
+  way. The lease-check push and the passthrough push for a user's own terminal do not use it.
+- Git leaves a branch it rejects locally out of the pre-push hook's input. A non-fast-forward branch therefore ends at
+  the hook, which refuses the lone fence ref before the remote is asked. Rule 4 holds, and the user sees the hook's
+  refusal and git's `error:` line. The client's own `[rejected] (atomic push failed)` wording is pinned by a test that
+  runs plain git. It is never `[remote rejected]`, so it cannot match rule 3.
+- The `receive.advertiseAtomic=false` case is owned by the existing lease-check test. The classifier table covers its
+  stderr line.
+
 ### M2: Fence modes and the sanctioned fallback
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `nitipan push` and the pre-push hook read `nitipan.<remote>.fence` with the three states in the table, and nitipan
   never writes the key
@@ -280,6 +306,8 @@ None.
 - With `fence` unset, an `atomic=false` in any scope is read as `fence=false` by both the pusher and the hook, and is
   never rewritten or unset. Its notice names its file and says to run `nitipan setup git --install` before renaming
   or unsetting it
+- The notice prints once per push. A plain agent `git push` gets it from the hook. `nitipan push` prints it and marks
+  its git calls with `NITIPAN_FENCE_NOTICE`, so the hook stays quiet there. Amended 2026-11-14; see Decision Log.
 - With `fence` set beside a leftover `atomic`, `fence` wins and the notice still fires
 - The hook accepts a fence-less push into fenced paths only under the three conditions in "The hook accepts a sanctioned
   fallback", and runs its own lease check on it
@@ -296,9 +324,39 @@ None.
 - When a user's `fence=false` meets an old hook that refuses the fence-less push, the pusher's error names
   `nitipan setup git --install`
 
+**As built:**
+
+The pusher and the hook read the mode through one reader. It asks git for `fence` with its origin, and for the old
+`atomic` only when `fence` is unset. A `fence` set beside a leftover `atomic=false` still reports the old key's file, so
+the notice fires and `fence` wins. Git answers the lookup for every remote name, slashes and `@` included. Only an empty
+name or one with a newline has no mode.
+
+- Git does not name the file when it rejects a non-boolean. The reader asks again without the boolean conversion to
+  find it. The error names the key, the value, and the file, and exits 1 in both the pusher and the hook. The hook reads
+  the mode only for an agent. The user's own push is never held to it, so a bad value does not stop that push.
+- The legacy notice prints once per push. The hook prints it for an agent's plain push. `nitipan push` prints it and
+  marks its git calls with `NITIPAN_FENCE_NOTICE`, which keeps the hook quiet. The user's own push prints nothing.
+- The warning prints after the lease check passes and before the fallback push. A lease check that cannot run, or that
+  finds a lost lease, carries the host's reason in its error instead. The warning's key advice is therefore missing
+  from those two errors.
+- The fallback variable and the notice variable are dropped from the environment of every other git call in push,
+  including the runner that asks the remote. The `fence delete` push is its own git call. It drops both variables with
+  the same helper as the other pushes, and it sets neither. An inherited value reached it before this change, though the leak was inert.
+- The legacy notice branches on whether the old key set the mode. With any explicit `fence` beside a leftover
+  `atomic=false`, including `fence=false`, it says `fence` wins and does not advise a rename.
+- The reinstall hint keys on the phrase the hook's `requireFences` refusal uses, defined once as a constant that both
+  sides read. The phrase is specific enough that the hook's mirror-push refusal does not match. The hint fires for the
+  fallback and for a push under `false`.
+- The old-hook tests run the real hook binary as a process of its own, under the wide fixture's agent identity, with
+  `NITIPAN_FENCE_FALLBACK` stripped. For the user's `false`, the old hook also cannot see the user's global
+  configuration, as an older hook would not read `fence`. The shell rig cannot carry these, since the pusher needs a
+  broker before it reaches the hook. The rig covers the hook's refusals for a plain push.
+- The fenced-push table now expects a host refusal of the fence to fall back and then stop at the missing broker, with
+  exit 12.
+
 ### M3: Docs, probe, and NIT-005 markers
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `docs/reference/pushing.md` describes the three states in place of "Hosts without atomic push"
 - `docs/operations/troubleshooting.md` replaces "The host refuses fence refs" and "The remote is marked as unable to
@@ -311,6 +369,21 @@ None.
 - `make live-fence-hosts` pushes with `--porcelain` and reports each host's porcelain lines for a refused fence ref
 - NIT-005's "What enforces the token", "Token scope", and its atomic-push risk carry "Superseded in part by NIT-009; see
   Decision Log" markers, and its Decision Log records the supersession of the `atomic` key
+
+**As built:**
+
+Every message the docs quote is copied from the code. The fallback warning, the `true` error, the invalid-value error, the
+legacy notice, and the reinstall hint match the text in `push.go` and `fencemode.go`.
+
+- The docs also correct the other places that described the removed `atomic=false` write. These are `broker.md`,
+  `broker-and-nodes.md`, and `cli.md`. The three named files were not the only ones. See Decision Log.
+- `docs/architecture.md` carries the two principles in sections of their own, ahead of "Components". The hooks-and-pushes
+  section names the fallback and `NITIPAN_FENCE_FALLBACK`. The coordination section links ADR-09.
+- The probe reports the porcelain lines of a refused step under the remote's row, and a step with no porcelain lines
+  reports git's stderr instead. A failed clean-up push reports its porcelain lines too. It ran against a local bare
+  remote whose update hook refuses `refs/nitipan/fence/*`. It printed the branch line with `atomic push failure` and the
+  fence line with `hook declined`. That is the shape rule 3 judges.
+- NIT-005 carries the three markers and one Decision Log entry for the supersession. Its `**Updated:**` date moved.
 
 ## Decision Log
 
@@ -394,6 +467,19 @@ None.
   honoring a user's configuration is the default for every app, not something particular to nitipan.
 - 2026-11-14: The user accepted the proposal. ADR-09 stays proposed, since the user accepted only the proposal.
 - 2026-11-14: Scheduled as M1-M3 in queue.md.
+- 2026-11-14 (run best guess): The legacy notice prints once per push from whichever of `nitipan push` and the hook
+  sees the push first. The text said "every push that the old key affects" but named no printer, and the first
+  implementation had only `nitipan push` print it, so a plain agent `git push` stayed silent. Now the hook prints it for
+  an agent's push, and `nitipan push` marks its git calls with `NITIPAN_FENCE_NOTICE` to keep the hook quiet. The
+  pusher still prints for itself since a clone may have no hook. An inherited copy of the variable is stripped, as for
+  `NITIPAN_FENCE_FALLBACK`. Skew was checked: an older hook prints nothing, and a newer hook with an older pusher
+  prints once. Amended "Replacing `nitipan.<remote>.atomic`", "Version skew", and the M2 checks. Before this, none of the three
+  said who prints the notice or how often. "Replacing" said only that every affected push prints it. "Version skew" had
+  no notice rule. The M2 checks had no check about the notice's printer or count.
+- 2026-11-14 (run best guess): M3 also corrected `broker.md`, `broker-and-nodes.md`, and `cli.md`. The milestone named
+  `pushing.md`, `troubleshooting.md`, and `architecture.md`. These three other pages describe the removed `atomic=false`
+  write or the fail-the-push behavior, and a doc that describes a removed behavior is wrong. The change is wording only
+  and adds no mechanism.
 
 ## References
 

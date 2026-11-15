@@ -10,4 +10,4 @@
 | [NIT-006](NIT-006-broker-auth.md) | Self-hosted user auth for the broker: label bindings, delegations, and cross-user mail grants | implemented |
 | [NIT-007](NIT-007-session-mailbox.md) | Per-session mailboxes on the broker for cross-machine messaging | implemented |
 | [NIT-008](NIT-008-sub-lease-recall.md) | Recall a sub-lease with a deadline every reader enforces | implemented |
-| [NIT-009](NIT-009-fence-fallback-for-refusing-hosts.md) | Lease-check fallback for hosts that refuse fence refs, with a three-state fence mode per remote | accepted |
+| [NIT-009](NIT-009-fence-fallback-for-refusing-hosts.md) | Lease-check fallback for hosts that refuse fence refs, with a three-state fence mode per remote | implemented |

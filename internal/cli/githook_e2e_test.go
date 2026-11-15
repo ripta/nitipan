@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/space-armada/nitipan/internal/proc"
+	"github.com/space-armada/nitipan/internal/proc/proctest"
+	"github.com/space-armada/nitipan/internal/record"
 )
 
 // These tests install the real hook into real repositories and drive real git. The test binary acts
@@ -26,6 +28,13 @@ const (
 	asNitipanEnv = "NITIPAN_TEST_AS_NITIPAN"
 	asStateEnv   = "NITIPAN_TEST_AS_STATE"
 	asHomeEnv    = "NITIPAN_TEST_AS_HOME"
+
+	// asAgentPIDEnv makes the test binary see the process table of the wide fixture: an agent at this PID,
+	// its shell above the binary, and the fixture's node. asMachineEnv names the machine the fixture gave
+	// that agent. The wide fixture's agents are not real processes, so a hook that runs as a real process
+	// needs this table to be told apart from the user.
+	asAgentPIDEnv = "NITIPAN_TEST_AS_AGENT_PID"
+	asMachineEnv  = "NITIPAN_TEST_AS_MACHINE"
 
 	shellPrelude = "nit() { \"$NITIPAN\" \"$@\"; }\n"
 	shellTimeout = 2 * time.Minute
@@ -41,6 +50,21 @@ func runAsNitipan() int {
 		Procs:    proc.System(),
 		StateDir: func() (string, error) { return os.Getenv(asStateEnv), nil },
 		LookPath: func(string) (string, error) { return "", exec.ErrNotFound },
+	}
+
+	if pid, err := strconv.Atoi(os.Getenv(asAgentPIDEnv)); err == nil {
+		id := os.Getenv(asMachineEnv)
+		self := os.Getpid()
+
+		table := proctest.New(record.PlatformDarwin, self)
+		table.Add(pid, proctest.Process{Start: startOf(pid), PPID: 1, Name: "claude"})
+		table.Add(pid+1, proctest.Process{Start: startOf(pid + 1), PPID: pid, Name: "zsh"})
+		table.Add(self, proctest.Process{Start: startOf(self), PPID: pid + 1})
+		table.Add(nodePID, proctest.Process{Start: startOf(nodePID)})
+
+		deps.Procs = table
+		deps.User = func() (string, error) { return tester, nil }
+		deps.Machine = func() (record.Machine, error) { return record.Machine{Host: "host-" + id, ID: id}, nil }
 	}
 
 	if home := os.Getenv(asHomeEnv); home != "" {

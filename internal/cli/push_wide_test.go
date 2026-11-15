@@ -153,11 +153,7 @@ func TestAHostWithoutAtomicPushGetsALeaseCheckThatRenewsThenRefusesALostLease(t 
 
 	res := pw.m1.w.run(pw.c1, "push", "origin", "main")
 	wantStatus(t, res, exitcode.OK)
-	wantContains(t, "stderr", res.Stderr, "cannot take an atomic push", "lease check and not fencing")
-
-	if got := gitIn(t, pw.repo1, "config", "nitipan.origin.atomic"); got != "false" {
-		t.Errorf("nitipan.origin.atomic = %q", got)
-	}
+	wantContains(t, "stderr", res.Stderr, "origin does not support atomic push", "lease check and not fencing")
 
 	if got := pw.remoteFences(); got != "" {
 		t.Errorf("a fence landed on a host without atomic push: %q", got)

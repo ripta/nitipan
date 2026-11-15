@@ -41,7 +41,8 @@ existed.
 ## `nitipan push`
 
 `nitipan push <remote> [<branch> ...]` does one `git push --atomic` with the branch refs and the fence refs together. A
-fence ref is `refs/nitipan/fence/<root-sha>/<encoded-path>`, and it holds the highest token pushed for that key.
+host that refuses it gets a lease check instead. See [Fence modes](#fence-modes). A fence ref is
+`refs/nitipan/fence/<root-sha>/<encoded-path>`, and it holds the highest token pushed for that key.
 
 The push fetches the fence refs, refuses when one holds a token higher than the holder's own, and otherwise writes its
 token to the refs under its keys. The fence refs go by SHA with `--force-with-lease`, so git's compare-and-swap makes
@@ -55,7 +56,8 @@ accepted. Run as your own terminal, with no agent above it, `nitipan push` is a 
 ## The pre-push hook
 
 The `pre-push` hook is the authority. `nitipan setup git --install <checkout>` installs it. It recomputes the fence
-refs the push needs and refuses a plain `git push` that lacks them, and the message names `nitipan push`.
+refs the push needs and refuses a plain `git push` that lacks them, and the message names `nitipan push`. It accepts the
+fence-less push that `nitipan push` sanctions after a host refuses the fence, and runs its own lease check on it.
 `--no-verify` skips the hook, which is the accepted risk that hooks can be bypassed.
 
 A caller with no agent variables, such as the user's own terminal, passes with no fence. A caller with agent variables
@@ -86,18 +88,75 @@ key is `<root-sha>/<encoded-path>` or a repo name, `repo:<root-sha>#<path>`. The
 the value the command read. It refuses any caller with agent variables, and no error an agent reads names it, because
 deleting a live fence lets a stale push land.
 
-## Hosts without atomic push
+## Fence modes
 
-A host that cannot take an atomic push cannot hold the fence and the branch in one transaction. For such a remote,
-`nitipan push` records `nitipan.<remote>.atomic = false` in the clone's config. The push then renews the holder's
-covering leases with the broker and pushes the branches without fence refs. That is a lease check, and every message
-says so. It is not fencing. An unreachable broker is "could not verify" and can be retried. A host that refuses refs
-under `refs/nitipan/fence/` fails the whole push, and the message says it is the host's ref policy.
+A remote's fence mode is the git config key `nitipan.<remote>.fence`. It is read in every scope git reads. It has three
+states:
 
-The pre-push hook trusts the flag whoever set it. An agent that runs `git config nitipan.origin.atomic false` in its
-clone gets only the lease check on that remote, not the fence. This falls under the accepted risk that hooks are
-bypassable, as `--no-verify` does. nitipan never clears the flag. A host that later gains atomic push stays on the lease
-check until you run `git config --unset nitipan.<remote>.atomic`.
+| State | Fenced attempt | The host refuses `--atomic` or the fence ref |
+|-------|----------------|----------------------------------------------|
+| unset | yes | this one push gets a lease check, with a warning |
+| `true` | yes | an error that names the key |
+| `false` | no | not applicable, every push gets a lease check |
+
+Unset is the default. nitipan never writes the key. Only you set `true` or `false`. An unset remote tries the fence on
+every push. A one-off refusal costs one push. A host that gains atomic push, or starts accepting fence refs, is fenced
+again on its next push with nothing to clear.
+
+A lease check renews the holder's covering leases with the broker and pushes the branches without fence refs. It is not
+fencing, and every message says so. An unreachable broker is "could not verify" and can be retried. A lost lease is a
+refusal.
+
+`nitipan push` decides a fallback from the output of `git push --porcelain`. Only a host's refusal of `--atomic` or of a
+fence ref causes one. A lost lease, contention, a rejected branch, and a network or auth failure never do. They fail the
+push as they did before. A host that refuses every ref with its own reason, such as a pre-receive hook, counts as
+refusing the fence. A reason that git gives only because another ref failed, such as `atomic push failure`, does not.
+
+An unset remote that falls back prints one line on stderr before the push, wrapped here:
+
+    nitipan: origin refused the fence ref refs/nitipan/fence/<root-sha>/<encoded-path>: <reason>. This push gets a lease
+    check and not fencing. Set nitipan.origin.fence to false to skip the fenced attempt, or to true to make this refusal
+    an error
+
+For a host without atomic push, the first sentence reads `origin does not support atomic push`. The warning is one
+line. The reason is the host's own text from the porcelain output.
+
+With `true`, the same refusal is an error that names the key. With `false`, the push gets a lease check because the
+key is `false`. A successful push under `false` prints nothing. A value in `~/.gitconfig` applies to every clone with a
+remote of that name, as you set it.
+
+A value that is not a boolean, such as `fence = maybe`, is an error that names the key, the value, and the file. It
+exits 1 in `nitipan push` and in the hook. nitipan does not guess what you meant.
+
+A fallback push can leave the fence unraised. A lease-check push does not write the new holder's token to the fence
+refs. The fence catches up on the next fenced push. A host that fast-forwards existing fence refs but refuses new ones
+keeps the window open. Set `fence` to `true` when you want a refusal to stop the push. Fencing is coordination, and a
+lease check in its place is graceful degradation. See [Architecture](../architecture.md#coordination-not-correctness).
+
+### The old `atomic` key
+
+Older nitipan wrote `nitipan.<remote>.atomic = false` when a host refused `--atomic`. nitipan no longer writes it. While
+`fence` is unset, an `atomic` of `false` in any scope acts as `fence = false`, in `nitipan push` and in the hook.
+nitipan never rewrites or unsets it. An `atomic` of `true` means nothing.
+
+Each push that the old key affects prints one stderr line. It says the old key acts as `fence=false`, names its file,
+and says it can be renamed to `fence=false` or unset after `nitipan setup git --install`. An older hook reads only the
+old key, so install the new hook first. The line also prints when `fence` is set beside a leftover `atomic = false`,
+because an older hook still obeys the old key. `nitipan push` prints it once, and the hook stays quiet on that push.
+
+### Agents and the fence mode
+
+The pre-push hook trusts the mode whoever set it. An agent that runs `git config nitipan.origin.fence false` in its
+clone gets only the lease check on that remote. This falls under the accepted risk that hooks are bypassable, as
+`--no-verify` does. The hook still runs its own lease check on such a push.
+
+An agent can also set `NITIPAN_FENCE_FALLBACK=origin` on a plain `git push`. That asks the hook to accept a push
+with no fence refs on that remote. The agent gets a lease check in place of fencing. This is the same accepted risk.
+The hook's own lease check still runs on that push.
+
+## Probing a host
 
 `make live-fence-hosts LIVE_FENCE_ARGS="<clone>"` probes each remote of a throwaway clone for atomic push and fence
-refs. It pushes and then deletes a probe branch and a probe fence ref, and is never part of `make ci`.
+refs. It pushes with `--porcelain`, then deletes a probe branch and a probe fence ref, and is never part of `make ci`.
+It reports each host's porcelain lines for a refused fence ref, so a new host's wording is visible before it matters.
+Add `--dry-run` to print the commands without running them.
