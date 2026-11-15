@@ -46,6 +46,36 @@ func TestNodeRefusesPlainHTTPWhenCrossUserEnabled(t *testing.T) {
 	}
 }
 
+// TestPlainHTTPRefusalOffersNoRekeyRoute proves the refusal does not send the operator to 'node
+// rekey' or 'broker forget'. Neither clears the record, so the route never ends the refusal. It
+// cannot prove that no other command clears the record.
+func TestPlainHTTPRefusalOffersNoRekeyRoute(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := RecordCrossUserEnabled(dir); err != nil {
+		t.Fatalf("RecordCrossUserEnabled failed: %v", err)
+	}
+
+	if err := Rekey(dir); err != nil {
+		t.Fatalf("Rekey failed: %v", err)
+	}
+
+	err := refusePlain(dir)
+	if err == nil {
+		t.Fatal("expected the refusal to survive a rekey, got nil")
+	}
+
+	for _, offer := range []string{"node rekey", "broker forget"} {
+		if contains(err.Error(), offer) {
+			t.Errorf("refusal offers %q, which does not clear the record: %v", offer, err)
+		}
+	}
+
+	if !contains(err.Error(), "Use https") {
+		t.Errorf("refusal should say to use https, got: %v", err)
+	}
+}
+
 // TestNodeAllowsPlainHTTPWhenCrossUserNotEnabled proves a node still talks plain HTTP to a broker that
 // never turned cross-user features on. It catches a refusal that breaks single-user brokers on loopback.
 func TestNodeAllowsPlainHTTPWhenCrossUserNotEnabled(t *testing.T) {

@@ -169,8 +169,7 @@ func refusePlain(stateDir string) error {
 	}
 
 	return errors.New("refusing plain HTTP to the broker: cross-user features were enabled on the broker, and this node " +
-		"recorded that. The node will not send its key over plain HTTP. Use https, or forget this label on the broker host " +
-		"with 'nitipan broker forget', then run 'nitipan node rekey' and approve the new key")
+		"recorded that. The node will not send its key over plain HTTP again. Use https")
 }
 
 // Pair sends the hash of a pairing code to the broker under the node's key, through the same address
