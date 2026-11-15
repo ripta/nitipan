@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -41,6 +42,11 @@ type Engine struct {
 	Now   func() time.Time
 	NewID func() string
 
+	// Sleep and Jitter drive the wait between attempts of AcquireWait. Jitter returns a number in
+	// [0, 1). Tests replace them so a wait runs without real sleeping.
+	Sleep  func(time.Duration)
+	Jitter func() float64
+
 	// HandleOf derives a holder's handle. Nil means the standard derivation. Tests force collisions
 	// through it.
 	HandleOf func(adapter.Holder) string
@@ -65,6 +71,8 @@ func NewEngine(dir *state.Dir, checker *liveness.Checker, machine record.Machine
 		Machine: machine,
 		Now:     time.Now,
 		NewID:   state.NewID,
+		Sleep:   time.Sleep,
+		Jitter:  rand.Float64,
 	}
 }
 
@@ -92,16 +100,30 @@ func (en *entry) file() string {
 	return en.Path
 }
 
-// keysOf returns the canonical keys of a record whose body this binary understands.
+// keysOf returns the canonical keys of a path record whose body this binary understands.
 func (en *entry) keysOf() ([]keys.Key, bool) {
-	if en.Rec == nil || !en.Rec.BodyKnown {
+	if en.Rec == nil || !en.Rec.BodyKnown || en.Rec.Domain.Kind != record.KindPath {
 		return nil, false
 	}
 
 	return en.Rec.Domain.Keys, true
 }
 
-func (en *entry) pathList() string {
+// resource returns the name of a resource record whose body this binary understands.
+func (en *entry) resource() (string, bool) {
+	if en.Rec == nil || !en.Rec.BodyKnown || en.Rec.Domain.Kind != record.KindResource {
+		return "", false
+	}
+
+	return en.Rec.Domain.Name, true
+}
+
+// domainList names what a lease holds: its paths, or its resource name.
+func (en *entry) domainList() string {
+	if name, ok := en.resource(); ok {
+		return name
+	}
+
 	ks, ok := en.keysOf()
 	if !ok {
 		return "an unreadable domain"
@@ -166,6 +188,9 @@ type call struct {
 	others      []*entry
 	sameProcess map[*entry]bool
 
+	// slots is the slot config as read under the lock. It is nil for a call that never reads it.
+	slots *SlotConfig
+
 	// delivered holds the tombstones this call reported to the caller and removed.
 	delivered []*record.Tombstone
 
@@ -184,7 +209,13 @@ func (c *call) close() {
 // writes, because every caller changes something. With a holder, the records are split into the
 // caller's and everyone else's, and the tombstones addressed to it are delivered.
 func (e *Engine) begin(h *adapter.Holder) (*call, error) {
-	l, err := e.Dir.Lock()
+	return e.beginWith(h, e.Dir.Lock)
+}
+
+// beginWith is begin with the way the lock is taken left to the caller. A wait attempt passes a lock
+// whose retry budget is cut to the time left.
+func (e *Engine) beginWith(h *adapter.Holder, lock func() (*state.Locked, error)) (*call, error) {
+	l, err := lock()
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +226,11 @@ func (e *Engine) begin(h *adapter.Holder) (*call, error) {
 		c.close()
 
 		return nil, err
+	}
+
+	c.slots = LoadSlotConfig(e.Dir.Path())
+	if warning := c.slots.Warning(); warning != "" {
+		e.Notify.warn(errors.New(warning))
 	}
 
 	if err := c.load(); err != nil {
@@ -330,7 +366,7 @@ func (c *call) leaseList() string {
 
 	parts := make([]string, len(c.mine))
 	for i, en := range c.mine {
-		parts[i] = fmt.Sprintf("%s (%s)", en.ID, en.pathList())
+		parts[i] = fmt.Sprintf("%s (%s)", en.ID, en.domainList())
 	}
 
 	return "your leases are " + strings.Join(parts, "; ")

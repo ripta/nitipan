@@ -4,15 +4,19 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/space-armada/nitipan/internal/record"
 )
 
 // WriteText prints the leases for a person. The handle and the agent name are labeled apart: the
 // handle is assigned by nitipan, and the agent name is whatever the session reported.
 func WriteText(w io.Writer, out Output) error {
 	if len(out.Leases) == 0 {
-		_, err := fmt.Fprintln(w, "no leases")
+		if _, err := fmt.Fprintln(w, "no leases"); err != nil {
+			return fmt.Errorf("writing the lease list: %w", err)
+		}
 
-		return err
+		return writeSlotConfigPath(w, out)
 	}
 
 	for i, l := range out.Leases {
@@ -25,6 +29,18 @@ func WriteText(w io.Writer, out Output) error {
 		if _, err := io.WriteString(w, leaseText(l)); err != nil {
 			return fmt.Errorf("writing the lease list: %w", err)
 		}
+	}
+
+	return writeSlotConfigPath(w, out)
+}
+
+func writeSlotConfigPath(w io.Writer, out Output) error {
+	if out.SlotConfigPath == "" {
+		return nil
+	}
+
+	if _, err := fmt.Fprintf(w, "\nslot counts are configured in %s\n", out.SlotConfigPath); err != nil {
+		return fmt.Errorf("writing the lease list: %w", err)
 	}
 
 	return nil
@@ -56,6 +72,10 @@ func leaseText(l Lease) string {
 		fmt.Fprintf(&b, "  kind: %s, a record this nitipan reads by its footprint only\n", l.Kind)
 	}
 
+	if l.EffectiveSlots != nil {
+		fmt.Fprintf(&b, "  slots: %d of %d in use%s\n", len(l.SlotHolders), *l.EffectiveSlots, slotHoldersText(l))
+	}
+
 	if h := l.Holder; h != nil {
 		fmt.Fprintf(&b, "  handle: %s\n", orNone(h.Handle))
 		fmt.Fprintf(&b, "  agent name: %s%s\n", orNone(h.Name), sharedText(l))
@@ -79,13 +99,36 @@ func leaseText(l Lease) string {
 	return b.String()
 }
 
+func slotHoldersText(l Lease) string {
+	if len(l.SlotHolders) == 0 {
+		return ""
+	}
+
+	return ", held by " + strings.Join(l.SlotHolders, ", ")
+}
+
 func domainText(l Lease) string {
 	d := l.Domain
+
+	if d.Kind == record.KindResource {
+		return resourceText(l)
+	}
+
 	if len(d.Scopes) == 0 {
 		return d.Checkout
 	}
 
 	return fmt.Sprintf("%s, scopes %s", d.Checkout, strings.Join(d.Scopes, ", "))
+}
+
+func resourceText(l Lease) string {
+	text := "resource " + l.Domain.Name
+
+	if l.Remote && l.Machine != nil {
+		text += fmt.Sprintf(" (remote, on machine %s)", orNone(l.Machine.Host))
+	}
+
+	return text
 }
 
 func sharedText(l Lease) string {

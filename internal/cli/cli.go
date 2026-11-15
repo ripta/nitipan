@@ -56,6 +56,10 @@ type Deps struct {
 	// Now returns the current time. Default: time.Now.
 	Now func() time.Time
 
+	// Sleep pauses between the attempts of `acquire --wait`. Default: time.Sleep. A test that injects
+	// Now and Sleep together runs a wait on a fake clock.
+	Sleep func(time.Duration)
+
 	// Finder finds checkout boundaries. Default: asks git.
 	Finder keys.BoundaryFinder
 
@@ -105,6 +109,10 @@ func (d Deps) withDefaults() Deps {
 
 	if d.Now == nil {
 		d.Now = time.Now
+	}
+
+	if d.Sleep == nil {
+		d.Sleep = time.Sleep
 	}
 
 	if d.Finder == nil {

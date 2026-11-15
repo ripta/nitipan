@@ -23,6 +23,7 @@ const (
 	Broken         = 7
 	NoSuchLease    = 8
 	Unusable       = 9
+	WaitTimeout    = 10
 )
 
 // Entry documents one exit status.
@@ -37,13 +38,14 @@ var Table = []Entry{
 	{OK, "ok", "the command did what was asked"},
 	{Error, "error", "any failure with no status of its own"},
 	{Usage, "usage", "the command line was wrong"},
-	{Refused, "refused", "an overlapping lease blocks the claim: another holder's live, unknown, or unclearable lease, or one of the caller's own that the claim would change"},
+	{Refused, "refused", "an overlapping lease blocks the claim: another holder's live, unknown, or unclearable lease, or one of the caller's own that the claim would change. Also a full resource slot, a --slots value that differs from the count that applies, and --replace on a resource lease"},
 	{LockBusy, "lock busy", "the state lock stayed busy past the retry budget"},
 	{AlreadyCovered, "already covered", "the claim is already covered by the caller's own leases, and nothing changed"},
 	{NotYours, "not yours", "the lease belongs to another holder"},
 	{Broken, "broken", "the lease was broken, and the tombstone says by whom"},
 	{NoSuchLease, "no such lease", "no lease has that ID"},
 	{Unusable, "unusable record", "a record this nitipan cannot use blocks the request"},
+	{WaitTimeout, "wait timeout", "acquire --wait ran out of time before the lease could be granted"},
 }
 
 // Results that map to a status of their own. Commands wrap these with detail for the message.
@@ -54,6 +56,7 @@ var (
 	ErrNotYours       = errors.New("lease is held by another holder")
 	ErrBroken         = errors.New("lease was broken")
 	ErrNoSuchLease    = errors.New("no such lease")
+	ErrWaitTimeout    = errors.New("timed out waiting for a lease")
 )
 
 // For maps an error to its exit status.
@@ -77,6 +80,8 @@ func For(err error) int {
 		return NoSuchLease
 	case errors.Is(err, record.ErrUnusable):
 		return Unusable
+	case errors.Is(err, ErrWaitTimeout):
+		return WaitTimeout
 	default:
 		return Error
 	}

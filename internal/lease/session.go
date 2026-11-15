@@ -86,7 +86,7 @@ func (c *call) reportMoves(h adapter.Holder, w *writes) {
 
 	for _, en := range c.mine {
 		if res := w.result(en); res.Holder.PID != en.Rec.Holder.PID || !res.Holder.Start.Equal(en.Rec.Holder.Start) {
-			moved = append(moved, fmt.Sprintf("%s on %s", en.ID, en.pathList()))
+			moved = append(moved, fmt.Sprintf("%s on %s", en.ID, en.domainList()))
 
 			if from < 0 {
 				from = en.Rec.Holder.PID
@@ -122,7 +122,7 @@ func (e *Engine) newNotice(h adapter.Holder, kind, detail string, at time.Time) 
 
 	return &record.Tombstone{
 		Envelope: record.Envelope{
-			Version:       record.Current,
+			Version:       record.TombstoneVersion,
 			ID:            e.NewID(),
 			Footprint:     record.NoneFootprint(),
 			ClearWhenDead: true,
@@ -181,7 +181,7 @@ func (e *Engine) writeRevived(l *state.Locked, in session.RegisterInput, res *se
 		}
 
 		if en.Rec.AcquiredAt.After(res.EndedSince) {
-			meanwhile = append(meanwhile, fmt.Sprintf("%s on %s, held by %s", en.ID, en.pathList(),
+			meanwhile = append(meanwhile, fmt.Sprintf("%s on %s, held by %s", en.ID, en.domainList(),
 				describeHolder(en.Rec.Holder)))
 		}
 	}

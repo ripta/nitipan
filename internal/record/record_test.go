@@ -18,7 +18,7 @@ func sampleRecord() *Record {
 
 	return &Record{
 		Envelope: Envelope{
-			Version:       Current,
+			Version:       PathVersion,
 			ID:            testID,
 			Footprint:     PathFootprint([]keys.Key{key}),
 			ClearWhenDead: true,
@@ -236,7 +236,7 @@ func TestHigherMinorIsReadWithUnknownFieldsIgnored(t *testing.T) {
 }
 
 func TestHigherMinorIsNeverRewritten(t *testing.T) {
-	rec, err := Decode(mutate(t, func(m map[string]any) { m["version"] = "1.1" }))
+	rec, err := Decode(mutate(t, func(m map[string]any) { m["version"] = "1.2" }))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestUnknownDomainKindIsJudgedByItsEnvelope(t *testing.T) {
 func TestUnknownDomainKindKeepsFootprint(t *testing.T) {
 	data := mutate(t, func(m map[string]any) {
 		m["version"] = "1.2"
-		m["domain"] = map[string]any{"kind": "resource", "name": "cpu:heavy"}
+		m["domain"] = map[string]any{"kind": "future", "name": "cpu:heavy"}
 		m["footprint"] = []any{map[string]any{"type": "name", "name": "cpu:heavy"}}
 		m["clear_when_dead"] = false
 	})
@@ -286,7 +286,7 @@ func TestUnknownDomainKindKeepsFootprint(t *testing.T) {
 		t.Fatalf("Decode: %v", err)
 	}
 
-	if rec.BodyKnown || rec.Domain.Kind != "resource" {
+	if rec.BodyKnown || rec.Domain.Kind != "future" {
 		t.Errorf("domain = %+v, body known = %v", rec.Domain, rec.BodyKnown)
 	}
 
@@ -345,7 +345,7 @@ func TestFootprintDecodeFailsSafe(t *testing.T) {
 
 func TestAbsentFootprintCountsAsAll(t *testing.T) {
 	data := mutate(t, func(m map[string]any) {
-		m["domain"] = map[string]any{"kind": "resource"}
+		m["domain"] = map[string]any{"kind": "future"}
 		delete(m, "footprint")
 	})
 
@@ -528,7 +528,7 @@ func TestProcessStartEqualIsExact(t *testing.T) {
 func TestTombstoneRoundTripAndRules(t *testing.T) {
 	tomb := &Tombstone{
 		Envelope: Envelope{
-			Version:       Current,
+			Version:       TombstoneVersion,
 			ID:            testID,
 			Footprint:     NoneFootprint(),
 			ClearWhenDead: true,
@@ -586,5 +586,110 @@ func TestTombstoneRoundTripAndRules(t *testing.T) {
 
 	if _, err := got.Encode(); !errors.Is(err, ErrNewerRecord) {
 		t.Errorf("Encode of a higher minor tombstone = %v, want ErrNewerRecord", err)
+	}
+}
+
+func sampleResource() *Record {
+	return &Record{
+		Envelope: Envelope{
+			Version:       ResourceVersion,
+			ID:            testID,
+			Footprint:     ResourceFootprint("cpu:heavy"),
+			ClearWhenDead: true,
+			Liveness:      LivenessProcess,
+			Machine:       Machine{Host: "laptop", ID: "machine-1"},
+			Holder:        Holder{Agent: "claude", PID: 4242, Start: ProcessStart{Platform: PlatformDarwin, Sec: 7}},
+		},
+		Reach:      ReachMachine,
+		Domain:     Domain{Kind: KindResource, Name: "cpu:heavy", Slots: 1},
+		ActingFor:  "ripta",
+		AcquiredAt: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+		BodyKnown:  true,
+	}
+}
+
+func TestResourceRecordRoundTrips(t *testing.T) {
+	want := sampleResource()
+
+	got, err := Decode(mustEncode(t, want))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	if !got.BodyKnown || got.Domain.Kind != KindResource || got.Domain.Name != "cpu:heavy" || got.Domain.Slots != 1 {
+		t.Errorf("record = %+v", got)
+	}
+
+	if !bytes.Equal(mustEncode(t, got), mustEncode(t, want)) {
+		t.Errorf("round trip changed the record:\n got %s\nwant %s", mustEncode(t, got), mustEncode(t, want))
+	}
+
+	if err := got.Rewritable(); err != nil {
+		t.Errorf("a resource record of this binary's own minor must be rewritable: %v", err)
+	}
+}
+
+func TestWritersStampTheLowestMinorTheirFieldsUse(t *testing.T) {
+	if got := PathVersion.String(); got != "1.0" {
+		t.Errorf("PathVersion = %s, want 1.0", got)
+	}
+
+	if got := TombstoneVersion.String(); got != "1.0" {
+		t.Errorf("TombstoneVersion = %s, want 1.0", got)
+	}
+
+	if got := SessionVersion.String(); got != "1.0" {
+		t.Errorf("SessionVersion = %s, want 1.0", got)
+	}
+
+	if got := ResourceVersion.String(); got != "1.1" {
+		t.Errorf("ResourceVersion = %s, want 1.1", got)
+	}
+
+	if ResourceVersion.Newer() {
+		t.Error("this binary must be able to rewrite the records it writes")
+	}
+}
+
+type resourceFootprintTest struct {
+	Name      string
+	Footprint any
+	Want      Reason
+}
+
+var resourceFootprintTests = []resourceFootprintTest{
+	{Name: "one name entry equal to the name", Footprint: []any{map[string]any{"type": "name", "name": "cpu:heavy"}}},
+	{Name: "a different name", Footprint: []any{map[string]any{"type": "name", "name": "cpu:light"}}, Want: ReasonFootprintMismatch},
+	{Name: "a path entry", Footprint: []any{map[string]any{"type": "path", "path": "/a"}}, Want: ReasonFootprintMismatch},
+	{Name: "an extra entry", Footprint: []any{
+		map[string]any{"type": "name", "name": "cpu:heavy"}, map[string]any{"type": "name", "name": "gpu:main"},
+	}, Want: ReasonFootprintMismatch},
+	{Name: "none", Footprint: "none", Want: ReasonFootprintMismatch},
+	{Name: "all", Footprint: "all", Want: ReasonFootprintMismatch},
+}
+
+func TestResourceFootprintMustEqualTheName(t *testing.T) {
+	for _, test := range resourceFootprintTests {
+		t.Run(test.Name, func(t *testing.T) {
+			data := mutate(t, func(m map[string]any) {
+				m["version"] = "1.1"
+				m["domain"] = map[string]any{"kind": "resource", "name": "cpu:heavy"}
+				m["footprint"] = test.Footprint
+			})
+
+			_, err := Decode(data)
+			if test.Want == "" {
+				if err != nil {
+					t.Fatalf("Decode: %v", err)
+				}
+
+				return
+			}
+
+			var unusable *UnusableError
+			if !errors.As(err, &unusable) || unusable.Reason != test.Want {
+				t.Errorf("err = %v, want unusable for %s", err, test.Want)
+			}
+		})
 	}
 }

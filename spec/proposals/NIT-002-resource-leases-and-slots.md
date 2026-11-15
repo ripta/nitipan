@@ -1,8 +1,8 @@
 # NIT-002: Resource Leases and Counted Slots
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-10-18
-**Updated:** 2026-10-20
+**Updated:** 2026-10-23
 
 ## Dependencies
 
@@ -106,7 +106,8 @@ record.
 
 ### Record and output versions
 
-Resource records and the slot count arrive in a minor version of NIT-001's major.
+Resource records and the slot count arrive in a minor version of NIT-001's major. Resource records are version 1.1, and
+`list --json` is schema 1.1. Amended 2026-10-23; see Decision Log.
 
 - The body of kind `resource` holds `name` and `slots`, the N the holder was admitted under. The footprint is exactly
   one `name` entry equal to `name`. A mismatch makes the record unusable, per NIT-001's footprint check
@@ -127,17 +128,20 @@ NIT-001's `acquire` refuses at once. The candidates were no wait, a bounded poll
 bounded wait with a FIFO queue of waiter records.
 
 Decision (autonomous): `acquire --wait <duration>` waits for a lease. The duration is required. It applies to path and
-resource claims alike. Amended 2026-10-18; see Decision Log.
+resource claims alike. Amended 2026-10-23; see Decision Log.
 
-- It polls with backoff. It takes NIT-001's lock only for each attempt and releases it between attempts
+- It polls with backoff. The delay starts at 100ms, doubles to a 2s cap, and is jittered. No sleep passes the
+  deadline, and one last attempt runs at the deadline. It takes NIT-001's lock only for each attempt and releases it
+  between attempts
 - Only three refusals are waited on: a live holder overlaps, the slot is full, or the lock is busy. A lock-busy attempt
   counts as a failed attempt, not as the lock-busy exit
 - Every other refusal exits at once with its own status and message. That covers an unusable record, a dead holder's
   record with `clear_when_dead` false, a self-overlap that needs `--replace`, a mismatched `--slots`, the `format`
   marker, and a sandbox write error
-- When the duration passes, `acquire` exits with its own wait-timeout status. The message names the holders it waited
-  on. When the lock was busy at the deadline, it names the lock holder too
-- Nothing persists while waiting. A waiter killed by its shell tool leaves nothing behind
+- When the duration passes, `acquire` exits with its own wait-timeout status, exit code 10. The message names the
+  holders it waited on. When the lock was busy at the deadline, it names the lock holder too
+- No file is created while waiting. Each attempt rewrites the holder note inside the existing lock file. A waiter killed
+  by its shell tool leaves nothing behind
 - A retry after a kill is safe. If the lease was published before the kill, the retry is a re-acquire and succeeds.
   The help text and README tell callers to retry, or run `list`, after a killed `acquire`
 - There is no queue. A waiter can lose a freed slot to a claim that arrived later
@@ -161,10 +165,10 @@ under a strict grammar with an explicit flag, free text compared byte for byte, 
 a path by its shape.
 
 Decision (autonomous): a resource name is `<namespace>:<name>` under a strict grammar. The record's `domain.kind` is
-`resource`. On the CLI, a resource is given with `--resource <name>`. Amended 2026-10-18; see Decision Log.
+`resource`. On the CLI, a resource is given with `--resource <name>`. Amended 2026-10-23; see Decision Log.
 
 - Each part holds lowercase ASCII letters, digits, `-`, `_`, and `.`. There is exactly one colon, both parts are
-  non-empty, and the whole name has a length limit
+  non-empty, and the whole name is at most 64 bytes
 - A name outside the grammar is refused, never folded, so the stored name is the only spelling. When a name is refused
   for case, the error suggests the lowercase spelling without applying it
 - The namespace `repo` is refused at `machine` reach. NIT-004 drafts `repo:` names for wider reach, and a machine
@@ -191,7 +195,7 @@ with a stated N the claim expects. A fifth arose in review: the config file and 
 more holders than any live holder was admitted under.
 
 Decision (autonomous): N comes from a per-machine config file in the state directory, and admission never exceeds the N
-any live holder was admitted under. Amended 2026-10-18; see Decision Log.
+any live holder was admitted under. Amended 2026-10-23; see Decision Log.
 
 - The file is `slots.json` in the state directory NIT-001 resolves. That is the only directory nitipan resolves, and
   `~/.config` is unreadable from inside the Claude Code sandbox. It holds a `version` and a map from names to N, and
@@ -209,8 +213,10 @@ any live holder was admitted under. Amended 2026-10-18; see Decision Log.
   `--slots` on a re-acquire is compared with the record's N, not the config's, and a different value is refused
 - N must be an integer of at least 1. Each name must pass the grammar and must not use `repo`. Any invalid entry or an
   unknown `version` makes the whole file unparseable, and every error in it is reported together
-- An unparseable config treats every name as N = 1. Every call warns with the config's absolute path and its errors,
-  and says to ask the user to fix the file. Path claims are unaffected
+- An unparseable config treats every name as N = 1. Every command that takes the lock or lists warns with the
+  config's absolute path and its errors, and says to ask the user to fix the file. `hook` and `setup` never read
+  leases and do not warn. `list` reads the config without the lock when the lock is busy, the way it reads leases. Path
+  claims are unaffected
 - A refusal for a full slot names the holders and says to ask the user to raise N for that name. It names neither the
   config's path nor an edit to it, the same way NIT-001's errors name no bypass. `list` shows the config's path
 
@@ -235,12 +241,12 @@ None.
   coöperating sessions only. The README says so.
 - **A V1 binary compares a `name` entry with a `path` entry wrongly** — likelihood: low, impact: high.
   Every V1 binary applies the envelope forever. One that treats a mixed pair as overlapping would refuse every path
-  claim while a resource is held. Mitigation: NIT-001 and ADR-02 state that a path entry and a name entry never
+  claim while a resource is held. Mitigation: NIT-001 and ADR-04 state that a path entry and a name entry never
   overlap, while an unknown type still counts as `all`. NIT-001's milestone 1 and this proposal's milestone 1 both test
   that a resource lease never overlaps a path lease. Amended 2026-10-18; see Decision Log.
 - **NIT-002 rests on NIT-001's envelope** — likelihood: low, impact: medium.
   A change to the envelope, the minor-version rule, or the re-acquire rule would change this design. NIT-001 is
-  accepted, and ADR-02 records the envelope, so such a change now needs a superseding ADR. Mitigation: NIT-002's queue
+  accepted, and ADR-04 records the envelope, so such a change now needs a superseding ADR. Mitigation: NIT-002's queue
   rows depend on NIT-001, so none is built first. NIT-002 is amended if NIT-001 changes those sections.
 - **The name grammar, the resource body, and the config syntax are one-way doors** — likelihood: medium, impact:
   medium. Names end up in shared agent instructions and stored records. Mitigation: the grammar starts strict, and
@@ -263,7 +269,7 @@ None.
 
 ### M1: Resource leases
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `acquire --resource` claims a resource name, and a second live claim on it is refused with the holder named
 - A resource lease never overlaps a path lease
@@ -280,9 +286,29 @@ None.
   clear it during a path claim, needs `--force` to `break` it, and never rewrites it
 - `list --json` keeps every resource lease as a top-level entry, and gives no effective count on a remote one
 
+**As built:**
+
+- A NIT-001-only binary was checked against a record the new binary wrote. The binary came from the run's base commit,
+  built from a `git archive` copy, and its own test harness drove it over a temporary state directory. With the holder
+  alive and with it dead, a path claim by another session and by the holder itself succeeded and left the record
+  byte-identical. `break` without `--force` was refused in both states, and `break --force` removed it. `advertise` by
+  the holder was refused as a newer minor and left the record unchanged. `list --json` showed it as kind `resource`
+  with its footprint and no domain. That binary reads a dead holder's record as unclearable, as the envelope rules
+  require. The check script was not kept.
+- The `remote` flag is set on resource leases only, since path leases from another machine keep counting as alive.
+- A claim skips another machine's record only when its kind is `resource`. A remote record of an unknown kind with a
+  footprint of `all` still blocks, as the envelope requires.
+- The resource body carries `slots`, the count the config gave when the claim was admitted. A re-acquire is judged
+  against the record's own count.
+- A resource name given to `release` and `list` passes the same grammar, so a typo gets the lowercase suggestion there
+  too.
+- An empty `--resource ""` reads back from the flag library as no value, which would have claimed the working
+  directory. It is refused as a usage error.
+- A broken resource lease puts its name in the tombstone's `paths`, so the notice reads "lease ID on cpu:heavy".
+
 ### M2: Counted slots
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - N live holders can hold one slot name, and the N+1th claim is refused
 - A dead holder's slot is freed for the next claim
@@ -302,9 +328,27 @@ None.
 - A full-slot refusal names the holders and says to ask the user to raise N, without printing the config's path
 - `list` and `list --json` show each slot name's effective count and live holders, and `list` shows the config's path
 
+**As built:**
+
+- `list --json` stays at schema 1.1. M1 introduced 1.1 in this same unreleased row, so the effective count and the live
+  holders are part of that minor. The computed fields are `effective_slots` and `slot_holders`. `slot_holders` holds
+  lease IDs, since every lease stays a top-level entry and a consumer joins on the ID.
+- `slots.json` is `{"version": 1, "slots": {"<name>": N}}`. A missing `slots` map means no entries. The loader reports
+  every error it finds, and a file that is not one JSON object reports that one error, since nothing past it can be read.
+- The config warning prints on every call that takes the lock, which covers acquire of any kind, release, break, and
+  advertise, and on `list` whether or not it got the lock. `hook` and `setup` do not warn. The warning goes to stderr,
+  like acquire's other notices.
+- Admission counts the live local records of the name, where unknown liveness counts as alive. A dead record that
+  asks only a newer nitipan to clear it still blocks the claim, as it does for a path. A record of the name whose body
+  this binary cannot read is not a slot holder. It blocks as exclusive.
+- Text `list` always prints the config's path, even with no leases. The JSON document leaves the path out.
+- The raise and lower checks, the retry with the same `--slots` after a config change, the over-count refresh, and the
+  remote exclusion are tests. The race test now also runs 8 children against a slot of 2, and expects exactly 2 winners
+  and 2 records in every round.
+
 ### M3: Waiting
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `acquire --wait <duration>` requires a duration, and is granted once the blocking holder releases or dies
 - The lock is held only for each attempt, in a test where another call succeeds while a waiter polls
@@ -314,6 +358,25 @@ None.
 - A waiter killed mid-wait leaves no file in the state directory
 - A retry after a kill that followed publication succeeds as a re-acquire
 - The help text says to retry, or run `list`, after a killed `acquire`
+
+**As built:**
+
+- The wait loop lives in the lease package, above the single-attempt `Acquire`, which is unchanged. The sleeper and the
+  jitter source are fields on the engine. The command layer takes the sleeper through its dependencies, next to the
+  clock.
+- Waitable refusals carry a marker error that only a live overlap and a full slot wrap. They still exit as refused, so
+  no existing status changed. A mixed refusal that includes a dead holder whose record asks to be kept is not
+  waitable, since that holder never frees itself.
+- The timeout exit is code 10. The message repeats the last refusal that named holders. It adds the lock holder when the
+  last attempt found the lock busy. A wait that only ever met a busy lock names no holders.
+- The jitter puts each sleep in the upper half of its delay. The last sleep is cut to the time left, so the clock
+  reaches the deadline exactly and the final attempt runs there.
+- Each attempt's lock wait is cut to the time left until the deadline, with a floor of one try. A wedged lock cannot
+  stretch a wait past its duration. A plain `acquire` keeps the full lock budget.
+- The kill test runs the waiter as a child process and compares the state directory's contents before and after. The
+  retry after a kill that followed publication is covered by a re-acquire test, since the refresh path is the same one.
+- The sandbox write error is not in the table of refusals that exit at once. It is an error with no waitable marker,
+  so it takes the same path as the others, but no test plants it.
 
 ## Decision Log
 
@@ -386,10 +449,41 @@ None.
   "still in design". The hooks on the three ADR candidates above have fired, since NIT-001 is accepted with the
   cross-type rule. Their outcomes are left for the user to choose.
 - 2026-10-20: Scheduled as NIT-002 M1-M3 in queue.md.
+- 2026-10-23 (run best guess): Amended "Record and output versions" and "Name syntax". The text said only "a minor" and
+  "a length limit". It now says resource records are version 1.1, `list --json` is schema 1.1, and a name is at most 64
+  bytes. Nothing stored changes if a later run picks other numbers, since each is one constant. Loosening the length
+  limit later breaks no stored name. The same run settled exit statuses without changing the text. A bad name, a second
+  `--resource`, `--resource` with path flags, and `--slots` on a path claim exit as usage. `--replace` on a resource
+  claim or lease, and a `--slots` that differs from the count that applies, exit as refused.
+- 2026-10-23 (run best guess): M2 kept `list --json` at schema 1.1 instead of raising it to 1.2. M1 introduced 1.1 in
+  the same unreleased row, so no consumer has seen a 1.1 without the effective count. "Record and output versions" is
+  unchanged, since it already lists the effective count as a field of the minor. A later release that ships M1 without
+  M2 would need this revisited.
+- 2026-10-23 (run best guess): Amended "Who sets N". The text said an unparseable config warns on "every call". It now
+  says every command that takes the lock or lists warns, that `hook` and `setup` do not since they never read leases,
+  and that `list` reads the config without the lock when the lock is busy. The earlier wording over-promised for
+  commands that never touch leases.
+- 2026-10-23 (run best guess): Amended "Waiting". The text said only that the wait polls with backoff and that the
+  timeout has its own status. It now says the delay starts at 100ms, doubles to a 2s cap with jitter, never sleeps past
+  the deadline, and makes one last attempt there, that each attempt's lock wait is cut to the time left, and that the
+  timeout is exit code 10. Nothing stored changes if a later run picks other numbers, since they are constants. Exit
+  status 10 is a published value once released. A dead holder whose record asks to be kept is also named as not waited
+  on, which the earlier list already implied.
+- 2026-10-23: ADR candidate (departs from the past): another machine's `resource` record never overlaps a claim or
+  counts toward a slot, although ADR-04 reads every other-machine record as alive. Later proposals that add kinds must
+  say whether they follow it. Undecided. Found in NIT-002 M1.
+- 2026-10-23: ADR candidate (cuts across the system): a writer stamps the lowest minor whose fields a record uses, so
+  path records, tombstones, and session files stay 1.0 while the binary reads 1.1. Every later minor must follow it.
+  Undecided. Found in NIT-002 M1.
+- 2026-10-23: ADR candidate (hard to reverse): exit status 10 means a `--wait` timed out. Scripts and agents test exit
+  statuses, and a released value never changes. Undecided. Found in NIT-002 M3.
+- 2026-10-23: ADR candidate (cuts across the system): waiting is bounded polling with no queue, the lock is held only
+  per attempt, and nothing persists while waiting. A broker would have to keep these semantics for callers. Waits on
+  NIT-004 reaching `accepted`, since a broker may queue waiters instead.
 
 ## References
 
 - `spec/reports/2026-10-18-lease-broker-research.md`: "Roadmap" and "Reach"
 - NIT-001: the claim, liveness, and break rules this proposal reuses
-- ADR-02: the record envelope and evolution rules resource records follow
+- ADR-04: the record envelope and evolution rules resource records follow
 - ADR-03: the key and overlap rule, which a resource name never meets

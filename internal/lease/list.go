@@ -14,10 +14,14 @@ import (
 	"github.com/space-armada/nitipan/internal/state"
 )
 
-// ListRequest filters the output. A nil Domain lists every lease. Otherwise it lists the leases that
-// overlap the domain, by nitipan's own canonicalization and overlap rule.
+// ListRequest filters the output. With no Domain or Resource it lists every lease. Otherwise it lists
+// the leases that overlap the domain, by nitipan's own canonicalization and overlap rule, or the ones
+// that hold the resource name.
 type ListRequest struct {
 	Domain *Domain
+
+	// Resource lists the leases whose footprint overlaps the resource name. It excludes Domain.
+	Resource string
 
 	// Caller is who runs the command: the holder when an agent matched, an anonymous process
 	// otherwise. Tombstones are delivered to it. A caller with no adapter holds nothing, so it has
@@ -47,19 +51,28 @@ type ListResult struct {
 func (e *Engine) List(req ListRequest) (*ListResult, error) {
 	res := &ListResult{}
 
-	if req.Domain != nil {
+	switch {
+	case req.Domain != nil && req.Resource != "":
+		return nil, usagef("list takes a domain or a resource, not both")
+	case req.Domain != nil:
 		d, err := e.Canon.Domain(req.Domain.Checkout, req.Domain.Scopes)
 		if err != nil {
 			return nil, usagef("%v", err)
 		}
 
-		return e.list(req, res, &d)
+		return e.list(req, res, record.PathFootprint(d.Keys), true)
+	case req.Resource != "":
+		if err := keys.ValidateResource(req.Resource); err != nil {
+			return nil, usagef("%v", err)
+		}
+
+		return e.list(req, res, record.ResourceFootprint(req.Resource), true)
 	}
 
-	return e.list(req, res, nil)
+	return e.list(req, res, record.Footprint{}, false)
 }
 
-func (e *Engine) list(req ListRequest, res *ListResult, filter *keys.Domain) (*ListResult, error) {
+func (e *Engine) list(req ListRequest, res *ListResult, filter record.Footprint, filtered bool) (*ListResult, error) {
 	l, err := e.Dir.Lock()
 
 	var c *call
@@ -98,7 +111,12 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter *keys.Domain) (*L
 		return nil, errors.New("listing needs an Emit function to write its output")
 	}
 
-	out := c.output(filter)
+	cfg := LoadSlotConfig(e.Dir.Path())
+	if warning := cfg.Warning(); warning != "" {
+		res.Warnings = append(res.Warnings, warning)
+	}
+
+	out := c.output(filter, filtered, cfg)
 
 	canWrite := c.l != nil && c.l.FormatErr() == nil
 
@@ -122,10 +140,14 @@ func (e *Engine) list(req ListRequest, res *ListResult, filter *keys.Domain) (*L
 
 // output builds the document. A record this binary cannot use always appears, as an unknown entry,
 // because it may overlap the filter.
-func (c *call) output(filter *keys.Domain) listing.Output {
-	var out listing.Output
+//
+// Each local resource lease carries its name's effective count and live holders, computed over every
+// record, so a filter never changes the count. A remote lease carries neither.
+func (c *call) output(filter record.Footprint, filtered bool, cfg *SlotConfig) listing.Output {
+	out := listing.Output{SlotConfigPath: cfg.Path}
 
 	shared := c.sharedNames()
+	views := c.slotViews(cfg)
 
 	for _, en := range c.entries {
 		if en.Rec == nil {
@@ -134,13 +156,18 @@ func (c *call) output(filter *keys.Domain) listing.Output {
 			continue
 		}
 
-		if filter != nil && !en.Rec.Footprint.Overlaps(record.PathFootprint(filter.Keys), c.e.Finder) {
+		if filtered && !en.Rec.Footprint.Overlaps(filter, c.e.Finder) {
 			continue
 		}
 
 		lease := listing.FromRecord(en.Rec, en.Live)
 		lease.Hint = en.Hint
+		lease.Remote = en.Rec.Domain.Kind == record.KindResource && !liveness.SameMachine(c.e.Machine, en.Rec.Machine)
 		lease.NameShared = shared[en.Rec.Holder.Name] && en.Rec.Holder.Name != ""
+
+		if name, ok := en.resource(); ok && !lease.Remote {
+			lease.EffectiveSlots, lease.SlotHolders = slotFields(views[name])
+		}
 
 		out.Leases = append(out.Leases, lease)
 	}
@@ -178,4 +205,20 @@ func (c *call) sharedNames() map[string]bool {
 	}
 
 	return shared
+}
+
+// slotFields turns a name's view into the computed fields of a lease.
+func slotFields(view *slotView) (limit *int, holders []string) {
+	if view == nil {
+		return nil, nil
+	}
+
+	count := view.Limit
+
+	holders = make([]string, len(view.Holders))
+	for i, en := range view.Holders {
+		holders[i] = en.ID
+	}
+
+	return &count, holders
 }

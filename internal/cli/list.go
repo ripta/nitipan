@@ -14,7 +14,10 @@ func (a *app) listCmd() *cobra.Command {
 		Use:   "list",
 		Short: "Print every lease with its holder's liveness",
 		Long: `Print every lease with its holder's liveness. With the domain flags, print only the leases that
-overlap that domain, by nitipan's own canonicalization and overlap rule.
+overlap that domain, by nitipan's own canonicalization and overlap rule. With --resource, print the
+leases on that resource name. A resource lease written on another machine is marked remote. A local
+resource lease shows how many holders its name admits and which leases hold it. The text output also
+prints where the counts are configured.
 
 --json is the supported interface for scripts and guardians. Its schema is versioned apart from the
 lease files, which are nitipan's own format. A liveness of "unknown" means treat the holder as alive.`,
@@ -25,6 +28,7 @@ lease files, which are nitipan's own format. A liveness of "unknown" means treat
 	}
 
 	addDomainFlags(cmd, "to filter by")
+	addResourceFlag(cmd, "resource name to filter by")
 	cmd.Flags().Bool("json", false, "print the versioned JSON document")
 
 	return cmd
@@ -41,6 +45,13 @@ func (a *app) runList(cmd *cobra.Command) error {
 			a.deps.OnCaller(caller)
 		}
 	}
+
+	resource, err := resourceName(cmd)
+	if err != nil {
+		return err
+	}
+
+	req.Resource = resource
 
 	if domainGiven(cmd) {
 		d, err := a.domain(cmd)

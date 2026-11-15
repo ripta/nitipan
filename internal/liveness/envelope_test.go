@@ -16,7 +16,7 @@ const newerRecord = `{
   "liveness": "process",
   "machine": {"host": "laptop", "id": "machine-1"},
   "holder": {"agent": "claude", "pid": 77, "start": {"platform": "darwin", "sec": 1000, "usec": 5}},
-  "domain": {"kind": "resource", "name": "cpu:heavy"}
+  "domain": {"kind": "future", "name": "cpu:heavy"}
 }`
 
 type newerRecordTest struct {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/space-armada/nitipan/internal/liveness"
@@ -33,7 +34,7 @@ const unknownKindRecord = `{
   "liveness": "process",
   "machine": {"host": "laptop", "id": "m1"},
   "holder": {"agent": "claude", "pid": 77, "start": {"platform": "darwin", "sec": 10}},
-  "domain": {"kind": "resource", "name": "cpu:heavy", "slots": 3},
+  "domain": {"kind": "future", "name": "cpu:heavy", "slots": 3},
   "slot_count": 3
 }`
 
@@ -85,7 +86,7 @@ func TestListJSONEmitsALeaseOfAnUnknownKindWithItsLivenessAndFootprint(t *testin
 
 		lease := firstLease(t, doc)
 
-		if lease["kind"] != "resource" || lease["usable"] != true || lease["version"] != "1.3" {
+		if lease["kind"] != "future" || lease["usable"] != true || lease["version"] != "1.3" {
 			t.Errorf("lease = %v", lease)
 		}
 
@@ -196,5 +197,68 @@ func TestListJSONWithNoLeasesIsAnEmptyList(t *testing.T) {
 	leases, ok := doc["leases"].([]any)
 	if !ok || len(leases) != 0 {
 		t.Errorf("leases = %v, want an empty list", doc["leases"])
+	}
+}
+
+func resourceRecord() *record.Record {
+	return &record.Record{
+		Envelope: record.Envelope{
+			Version:       record.ResourceVersion,
+			ID:            "01JAAAAAAAAAAAAAAAAAAAAAAA",
+			Footprint:     record.ResourceFootprint("cpu:heavy"),
+			ClearWhenDead: true,
+			Liveness:      record.LivenessProcess,
+			Machine:       machine,
+			Holder:        record.Holder{Agent: "claude", PID: 77, Start: started},
+		},
+		Reach:     record.ReachMachine,
+		Domain:    record.Domain{Kind: record.KindResource, Name: "cpu:heavy", Slots: 1},
+		BodyKnown: true,
+	}
+}
+
+func TestListJSONShowsAResourceRecordWithItsName(t *testing.T) {
+	lease := firstLease(t, decodeOutput(t, Output{Leases: []Lease{
+		FromRecord(resourceRecord(), liveness.Result{Status: liveness.Alive}),
+	}}))
+
+	domain, _ := lease["domain"].(map[string]any)
+	if lease["kind"] != "resource" || lease["version"] != "1.1" || domain["name"] != "cpu:heavy" {
+		t.Errorf("lease = %v", lease)
+	}
+
+	if _, ok := lease["remote"]; ok {
+		t.Error("a local lease carries the remote flag")
+	}
+}
+
+func TestListJSONMarksARemoteResourceLeaseAndGivesItNoCount(t *testing.T) {
+	l := FromRecord(resourceRecord(), liveness.Result{Status: liveness.Unknown})
+	l.Remote = true
+
+	lease := firstLease(t, decodeOutput(t, Output{Leases: []Lease{l}}))
+	if lease["remote"] != true {
+		t.Errorf("lease = %v, want the remote flag", lease)
+	}
+
+	if _, ok := lease["effective_slots"]; ok {
+		t.Errorf("a remote lease carries an effective count: %v", lease)
+	}
+}
+
+func TestListTextMarksARemoteResourceLease(t *testing.T) {
+	rec := resourceRecord()
+	rec.Machine = record.Machine{Host: "workstation", ID: "m2"}
+
+	l := FromRecord(rec, liveness.Result{Status: liveness.Unknown})
+	l.Remote = true
+
+	var buf bytes.Buffer
+	if err := WriteText(&buf, Output{Leases: []Lease{l}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(buf.String(), "domain: resource cpu:heavy (remote, on machine workstation)") {
+		t.Errorf("text = %q", buf.String())
 	}
 }

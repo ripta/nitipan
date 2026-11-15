@@ -55,7 +55,7 @@ func (s *Service) RegisterCodex(l *state.Locked, in RegisterInput) (*RegisterRes
 	}
 
 	reg := &Registration{
-		Version:      record.Current,
+		Version:      record.SessionVersion,
 		Agent:        AgentCodex,
 		Session:      in.Session,
 		Host:         Host{PID: in.Host.PID, Start: in.Host.Start},

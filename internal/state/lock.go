@@ -82,12 +82,21 @@ type Locked struct {
 // Right after it takes the lock, the holder writes its PID, process start, and command into the
 // lock file. The sweep of stale temp files and the format check also happen here, under the lock.
 func (d *Dir) Lock() (*Locked, error) {
+	return d.LockWithin(d.opts.LockBudget)
+}
+
+// LockBudget returns the retry budget a plain Lock uses.
+func (d *Dir) LockBudget() time.Duration { return d.opts.LockBudget }
+
+// LockWithin is Lock with its own retry budget. A budget of zero or less makes one try. A caller that
+// has less time than the default budget, such as a wait nearing its deadline, passes what is left.
+func (d *Dir) LockWithin(budget time.Duration) (*Locked, error) {
 	f, err := os.OpenFile(filepath.Join(d.path, lockName), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("opening the lock file: %w", err)
 	}
 
-	if err := d.acquire(f); err != nil {
+	if err := d.acquire(f, budget); err != nil {
 		// A stale note is read before the descriptor closes.
 		note := readNote(f)
 		_ = f.Close()
@@ -126,7 +135,7 @@ func (d *Dir) Lock() (*Locked, error) {
 	return l, nil
 }
 
-func (d *Dir) acquire(f *os.File) error {
+func (d *Dir) acquire(f *os.File, budget time.Duration) error {
 	var waited time.Duration
 
 	for {
@@ -139,12 +148,14 @@ func (d *Dir) acquire(f *os.File) error {
 			return fmt.Errorf("locking the state directory: %w", err)
 		}
 
-		if waited >= d.opts.LockBudget {
+		if waited >= budget {
 			return &LockBusyError{Waited: waited}
 		}
 
-		d.opts.Sleep(d.opts.LockPoll)
-		waited += d.opts.LockPoll
+		step := min(d.opts.LockPoll, budget-waited)
+
+		d.opts.Sleep(step)
+		waited += step
 	}
 }
 

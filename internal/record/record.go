@@ -16,9 +16,10 @@ const (
 	LivenessSession = "session"
 )
 
-// Domain kinds and reaches that V1 writes.
+// Domain kinds and reaches this binary writes.
 const (
 	KindPath     = "path"
+	KindResource = "resource"
 	ReachMachine = "machine"
 )
 
@@ -55,12 +56,18 @@ type Envelope struct {
 	Holder        Holder    `json:"holder"`
 }
 
-// Domain is what the lease names. V1 writes only kind "path".
+// Domain is what the lease names. Kind "path" uses Checkout, Scopes, and Keys. Kind "resource" uses
+// Name and Slots.
 type Domain struct {
 	Kind     string     `json:"kind"`
 	Checkout string     `json:"checkout,omitempty"`
 	Scopes   []string   `json:"scopes,omitempty"`
 	Keys     []keys.Key `json:"keys,omitempty"`
+
+	// Name is the resource name. Slots is the count the holder was admitted under. An absent count
+	// means exclusive.
+	Name  string `json:"name,omitempty"`
+	Slots int    `json:"slots,omitempty"`
 }
 
 // Record is one lease.
@@ -94,7 +101,7 @@ func Decode(data []byte) (*Record, error) {
 	rec := &Record{Envelope: env}
 
 	kind := domainKind(raw["domain"])
-	if kind != KindPath {
+	if kind != KindPath && kind != KindResource {
 		rec.Domain.Kind = kind
 
 		return rec, nil
@@ -106,16 +113,28 @@ func Decode(data []byte) (*Record, error) {
 
 	rec.BodyKnown = true
 
-	if !rec.Footprint.SamePathKeys(rec.Domain.Keys) {
-		return nil, &UnusableError{
-			Reason:  ReasonFootprintMismatch,
-			Version: env.Version,
-			Raw:     raw,
-			Detail:  errors.New("footprint does not equal the canonical keys in the body"),
-		}
+	if err := rec.checkFootprint(); err != nil {
+		return nil, &UnusableError{Reason: ReasonFootprintMismatch, Version: env.Version, Raw: raw, Detail: err}
 	}
 
 	return rec, nil
+}
+
+// checkFootprint verifies that the footprint equals what the body names. It resolves nothing.
+func (r *Record) checkFootprint() error {
+	if r.Domain.Kind == KindResource {
+		if !r.Footprint.SameName(r.Domain.Name) {
+			return errors.New("footprint is not exactly one name entry equal to the name in the body")
+		}
+
+		return nil
+	}
+
+	if !r.Footprint.SamePathKeys(r.Domain.Keys) {
+		return errors.New("footprint does not equal the canonical keys in the body")
+	}
+
+	return nil
 }
 
 // domainKind reads the kind from a domain of any shape. A domain that is not an object has no kind,

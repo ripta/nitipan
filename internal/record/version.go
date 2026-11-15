@@ -9,11 +9,11 @@ import (
 	"strings"
 )
 
-// The record format this binary writes. A record of a higher minor is readable. A record of a higher
-// major is not.
+// The record format this binary understands. A record of a higher minor is readable. A record of a
+// higher major is not.
 const (
 	CurrentMajor = 1
-	CurrentMinor = 0
+	CurrentMinor = 1
 )
 
 // Version is a record format version, written as "major.minor".
@@ -22,8 +22,21 @@ type Version struct {
 	Minor int
 }
 
-// Current is the version this binary writes.
+// Current is the highest version this binary understands. A record of a higher minor is never
+// rewritten. Writers do not stamp it by hand. They stamp the version of what they write.
 var Current = Version{Major: CurrentMajor, Minor: CurrentMinor}
+
+// The versions writers stamp. A writer stamps the lowest minor whose fields the record uses, so an
+// older binary can still rewrite what it fully understands. Path records, tombstones, and session
+// files use only fields from the first minor.
+var (
+	PathVersion      = Version{Major: CurrentMajor, Minor: 0}
+	TombstoneVersion = Version{Major: CurrentMajor, Minor: 0}
+	SessionVersion   = Version{Major: CurrentMajor, Minor: 0}
+
+	// ResourceVersion is the minor that adds the resource record.
+	ResourceVersion = Version{Major: CurrentMajor, Minor: 1}
+)
 
 // ParseVersion parses "major.minor".
 func ParseVersion(s string) (Version, error) {

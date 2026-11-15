@@ -36,9 +36,87 @@ session instead, through the hooks and plugins that `setup` prints.
 Leases live under `~/.local/state/nitipan/`. That directory must be on a local disk. A sandboxed agent needs a write
 allowance for it.
 
-Later versions add resource leases, such as `cpu:heavy`, and a self-hosted broker that works across machines. Callers
-will not change when the broker arrives. See the
+`acquire --wait <duration>` waits for a lease instead of being refused at once. See "Waiting" below. A later version
+adds a self-hosted broker that works across machines. Callers will not change when the broker arrives. See the
 [broker research](spec/reports/2026-10-18-lease-broker-research.md).
+
+## Resource leases
+
+A resource lease names a machine resource instead of a path. `nitipan acquire --resource cpu:heavy` claims "all cores"
+for a full build or test run. A second live claim on the same name is refused, and the refusal names the holder.
+`release --resource` and `list --resource` take the same name.
+
+A name is `<namespace>:<name>`. Each part holds lowercase letters, digits, `-`, `_`, and `.`. The whole name is at most
+64 bytes. A name outside that grammar is refused and never folded. When the only problem is case, the error suggests
+the lowercase spelling. The `repo` namespace is reserved.
+
+Names are flat. Two names overlap only when they are equal, so `cpu:heavy` and `cpu:light` never see each other. A
+resource never overlaps a path lease. `--replace` does not apply to resource leases. Release the old one and acquire the
+new one.
+
+A resource belongs to its machine. A resource lease from another machine, as on a shared home directory, blocks nothing.
+`list` marks it remote.
+
+### Counted slots
+
+A name admits one holder unless the user gives it a larger count. A count lets that many holders share the name at once.
+The next claim is refused while the slots are full. The refusal names the holders and says to ask the user to raise the
+count. A dead holder's slot is freed for the next claim.
+
+The counts live in `slots.json`, in the state directory beside `leases/`. The user writes it, and every resource claim
+reads it under the lock:
+
+```json
+{"version": 1, "slots": {"gpu:main": 2, "db:pg": 4}}
+```
+
+Each key is a resource name under the grammar above, and each count is an integer of at least 1. Any bad entry, an
+unknown `version`, or an unknown top-level field makes the whole file unusable. Every call then warns with the file's
+path and every error, and treats every name as exclusive. Path claims are unaffected.
+
+Each lease records the count it was admitted under. A new claim is admitted only while the live holders number fewer than
+the smallest of the configured count and every live holder's recorded count. Only this machine's leases count. Lowering
+a count takes effect at once. Raising it takes effect once every holder admitted under a lower count has released.
+
+A holder already on the name can claim it again at any time. That refreshes its lease and keeps its recorded count, even
+when the slot is now over its count. A holder admitted under an old count therefore pins that count until it releases.
+Ask the user to `break --force` it if it must go.
+
+`--slots <N>` states the count you expect for the resource. A new claim is refused when `N` differs from the configured
+count, and the error names the configured one. A repeat claim is compared with the count on the lease you already hold.
+
+`list` shows, for each local resource lease, how many holders the name admits and which leases hold it. It also prints
+the path of `slots.json`. `list --json` carries the same two values as `effective_slots` and `slot_holders` on each
+local resource lease. Every lease stays a top-level entry, and a lease with the `remote` flag carries neither value.
+
+`--wait` applies to resource claims, including a full slot. See "Waiting" below.
+
+Resource leases are advisory. They coordinate cooperating sessions only. A process that never calls nitipan can still
+use every core.
+
+Acquire resources from the parent session only. Subagents share their parent's holder, so two subagents that both claim
+`cpu:heavy` both succeed, and the first to release frees the name while the other still runs.
+
+## Waiting
+
+`nitipan acquire --wait 5m` waits for a lease instead of being refused at once. It applies to path claims and resource
+claims alike. The duration is required, and it is a Go duration such as `30s` or `5m`. A missing, unparseable, or
+non-positive value is a usage error.
+
+A wait polls with backoff, starting at 100ms and growing to a 2s pause. It takes the state lock only for each attempt
+and releases it between attempts, so other commands run while a waiter polls. Only three outcomes are waited on: a live
+holder overlaps the claim, the slot is full, or the lock is busy. A busy lock counts as a failed attempt, not as the
+lock-busy exit. Every other refusal exits at once with its own status, such as an unusable record, a dead holder whose
+record asks to be kept, an overlap with your own lease, or a `--slots` that differs from the count.
+
+When the time runs out, `acquire` exits with status 10. The message names the holders it waited on. When the last
+attempt found the lock busy, it names the process holding the lock too.
+
+No file is created while waiting, so a waiter that is killed leaves nothing behind. A shell tool that kills a long
+`acquire` may do so after the lease was published. Retry the same `acquire`. It reports the lease as already held. Or
+run `list`.
+
+There is no queue. A waiter can lose a freed slot to a claim that arrived later.
 
 ## Codex and opencode
 

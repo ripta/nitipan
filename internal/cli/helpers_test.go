@@ -70,6 +70,12 @@ type world struct {
 	home   func() (string, error)
 	now    time.Time
 
+	// sleep replaces the pause between the attempts of a wait. Nil sleeps for real.
+	sleep func(time.Duration)
+
+	// lockSleep replaces the pause between lock tries. Nil sleeps for real.
+	lockSleep func(time.Duration)
+
 	// stdin is the input the next command reads, as a hook would get it.
 	stdin string
 
@@ -158,8 +164,9 @@ func (w *world) deps(c caller, stdout, stderr *bytes.Buffer) Deps {
 		User:         func() (string, error) { return tester, nil },
 		Cwd:          func() (string, error) { return w.root, nil },
 		Now:          func() time.Time { return w.now },
+		Sleep:        w.sleep,
 		Finder:       w.finder,
-		StateOptions: state.Options{LockBudget: w.budget, LockPoll: 10 * time.Millisecond},
+		StateOptions: state.Options{LockBudget: w.budget, LockPoll: 10 * time.Millisecond, Sleep: w.lockSleep},
 		Hooks:        w.hooks,
 	}
 }
@@ -247,6 +254,10 @@ type plantSpec struct {
 	Paths   []string
 	Version string
 
+	// Resource plants a record of kind resource on this name, with a footprint and body that agree.
+	// Paths stays empty.
+	Resource string
+
 	// KeepAfterDeath is true to write clear_when_dead false.
 	KeepAfterDeath bool
 
@@ -261,6 +272,9 @@ type plantSpec struct {
 
 	// SessionID is the holder's session.
 	SessionID string
+
+	// Slots is the count a resource record was admitted under. Zero means 1.
+	Slots int
 }
 
 // plant writes a record for another holder and returns its ID.
@@ -273,6 +287,10 @@ func (w *world) plant(spec plantSpec) string {
 
 	if spec.Version == "" {
 		spec.Version = "1.0"
+
+		if spec.Resource != "" {
+			spec.Version = "1.1"
+		}
 	}
 
 	if spec.Machine == (record.Machine{}) {
@@ -285,6 +303,10 @@ func (w *world) plant(spec plantSpec) string {
 
 	if spec.Kind == "" {
 		spec.Kind = record.KindPath
+
+		if spec.Resource != "" {
+			spec.Kind = record.KindResource
+		}
 	}
 
 	if spec.Liveness == "" {
@@ -299,6 +321,18 @@ func (w *world) plant(spec plantSpec) string {
 		domainKeys = append(domainKeys, map[string]any{"path": p})
 	}
 
+	domain := map[string]any{"kind": spec.Kind}
+
+	switch {
+	case spec.Resource != "":
+		footprint = append(footprint, map[string]any{"type": "name", "name": spec.Resource})
+		domain["name"] = spec.Resource
+		domain["slots"] = max(spec.Slots, 1)
+	default:
+		domain["checkout"] = spec.Paths[0]
+		domain["keys"] = domainKeys
+	}
+
 	doc := map[string]any{
 		"version":         spec.Version,
 		"id":              spec.ID,
@@ -311,7 +345,7 @@ func (w *world) plant(spec plantSpec) string {
 			"start": map[string]any{"platform": "darwin", "sec": spec.PID},
 		},
 		"reach":       "machine",
-		"domain":      map[string]any{"kind": spec.Kind, "checkout": spec.Paths[0], "keys": domainKeys},
+		"domain":      domain,
 		"acting_for":  "someone",
 		"acquired_at": "2026-10-19T12:00:00Z",
 	}
@@ -353,4 +387,17 @@ func (w *world) listJSON(c caller, args ...string) map[string]any {
 	}
 
 	return doc
+}
+
+// writeSlots writes the slot config, replacing any earlier one.
+func (w *world) writeSlots(doc string) {
+	w.t.Helper()
+
+	if err := os.MkdirAll(w.state, 0o700); err != nil {
+		w.t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(w.state, lease.SlotConfigFile), []byte(doc), 0o600); err != nil {
+		w.t.Fatal(err)
+	}
 }

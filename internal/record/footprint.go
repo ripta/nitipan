@@ -76,6 +76,11 @@ func PathFootprint(ks []keys.Key) Footprint {
 	return Footprint{Kind: FootprintEntries, Entries: entries}
 }
 
+// ResourceFootprint builds the footprint of a resource record from its name.
+func ResourceFootprint(name string) Footprint {
+	return Footprint{Kind: FootprintEntries, Entries: []Entry{NameEntry(name)}}
+}
+
 // NoneFootprint blocks nothing.
 func NoneFootprint() Footprint {
 	return Footprint{Kind: FootprintNone}
@@ -149,6 +154,12 @@ func (f Footprint) SamePathKeys(ks []keys.Key) bool {
 	}
 
 	return true
+}
+
+// SameName reports whether the footprint is exactly one name entry equal to the given name. An empty
+// name never matches.
+func (f Footprint) SameName(name string) bool {
+	return name != "" && f.Kind == FootprintEntries && len(f.Entries) == 1 && f.Entries[0] == NameEntry(name)
 }
 
 func sortEntries(entries []Entry) {

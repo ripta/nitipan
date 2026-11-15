@@ -30,6 +30,14 @@ type AcquireRequest struct {
 	Mode        *string
 	Description *string
 
+	// Resource names a resource to claim in place of a domain. Domain and Replace stay empty, and the
+	// engine refuses a claim that sets either.
+	Resource string
+
+	// Slots is the count the caller expects for the resource, or nil when it stated none. A path
+	// claim refuses it.
+	Slots *int
+
 	// Replace names the caller's leases to rewrite into this claim. The first is rewritten in place
 	// and keeps its ID. The rest are merged into it.
 	Replace []string
@@ -72,13 +80,18 @@ type AcquireResult struct {
 // even when the caller's own leases cover it. Only then does the caller's own state decide between
 // an idempotent re-acquire, a covered claim, a refused scope change, and a new lease.
 func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
+	return e.acquire(req, e.Dir.Lock)
+}
+
+// acquire is Acquire with the way the lock is taken left to the caller.
+func (e *Engine) acquire(req AcquireRequest, lock func() (*state.Locked, error)) (*AcquireResult, error) {
 	h := req.Holder
 
 	if h.MissingSession() {
 		return nil, ErrMissingSession
 	}
 
-	c, err := e.begin(&h)
+	c, err := e.beginWith(&h, lock)
 	if err != nil {
 		return nil, err
 	}
@@ -93,6 +106,14 @@ func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
 
 	if err := e.admit(h); err != nil {
 		return nil, err
+	}
+
+	if req.Resource != "" {
+		return e.acquireResource(c, req)
+	}
+
+	if req.Slots != nil {
+		return nil, usagef("--slots applies to a resource claim, and this claim names a path")
 	}
 
 	domain, err := e.Canon.Domain(req.Domain.Checkout, req.Domain.Scopes)
@@ -110,7 +131,7 @@ func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
 		return nil, err
 	}
 
-	cleared, err := c.checkOthers(domain.Keys)
+	cleared, err := c.checkOthers(record.PathFootprint(domain.Keys), "")
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +139,56 @@ func (e *Engine) Acquire(req AcquireRequest) (*AcquireResult, error) {
 	cl := &claim{call: c, req: req, domain: domain, handle: handle, cleared: cleared}
 
 	return cl.decide()
+}
+
+// acquireResource claims a resource name. Names are flat, so a claim meets a lease only when the
+// names are equal. The caller's own lease on the name is a refresh. Another holder's lease on the
+// name takes a slot instead of blocking, while the slots last.
+func (e *Engine) acquireResource(c *call, req AcquireRequest) (*AcquireResult, error) {
+	h := req.Holder
+	name := req.Resource
+
+	if err := keys.ValidateResource(name); err != nil {
+		return nil, usagef("%v", err)
+	}
+
+	if len(req.Replace) > 0 {
+		return nil, failf(exitcode.ErrRefused, "--replace does not apply to a resource claim. A different resource name "+
+			"is a different lease, so release the old one and acquire the new one")
+	}
+
+	cl := &claim{call: c, req: req, resource: name}
+
+	if err := cl.checkSlots(); err != nil {
+		return nil, err
+	}
+
+	if err := c.firstUnusable(); err != nil {
+		return nil, err
+	}
+
+	cl.handle = e.handleFor(h)
+
+	if err := c.checkHandle(cl.handle); err != nil {
+		return nil, err
+	}
+
+	cleared, err := c.checkOthers(record.ResourceFootprint(name), name)
+	if err != nil {
+		return nil, err
+	}
+
+	cl.cleared = cleared
+
+	if equal := cl.equalResource(); equal != nil {
+		return cl.refresh(equal)
+	}
+
+	if err := cl.admitSlot(); err != nil {
+		return nil, err
+	}
+
+	return cl.create()
 }
 
 // claim is an acquire that has passed the checks against other holders.
@@ -128,6 +199,9 @@ type claim struct {
 	domain  keys.Domain
 	handle  string
 	cleared []*entry
+
+	// resource is the name of a resource claim. It is empty for a path claim, which uses domain.
+	resource string
 }
 
 func (cl *claim) fields() holderFields {
@@ -140,7 +214,47 @@ func (cl *claim) fields() holderFields {
 }
 
 func (cl *claim) footprint() record.Footprint {
+	if cl.resource != "" {
+		return record.ResourceFootprint(cl.resource)
+	}
+
 	return record.PathFootprint(cl.domain.Keys)
+}
+
+// equalResource returns the caller's lease on the claimed name. A record written on another machine
+// is never the caller's, since a resource never leaves its machine.
+func (cl *claim) equalResource() *entry {
+	for _, en := range cl.mine {
+		if name, ok := en.resource(); ok && name == cl.resource && liveness.SameMachine(cl.e.Machine, en.Rec.Machine) {
+			return en
+		}
+	}
+
+	return nil
+}
+
+// checkSlots compares the caller's stated count with the count that applies. A re-acquire is judged
+// against the record's count, and a new claim against the configured one.
+func (cl *claim) checkSlots() error {
+	stated := cl.req.Slots
+	if stated == nil {
+		return nil
+	}
+
+	if *stated < 1 {
+		return usagef("--slots must be an integer of at least 1, got %d", *stated)
+	}
+
+	want := cl.slots.Count(cl.resource)
+	if en := cl.equalResource(); en != nil {
+		want = recordSlots(en.Rec)
+	}
+
+	if *stated != want {
+		return failf(exitcode.ErrRefused, "--slots %d does not match the count %d that applies to %s", *stated, want, cl.resource)
+	}
+
+	return nil
 }
 
 func (cl *claim) decide() (*AcquireResult, error) {
@@ -178,16 +292,22 @@ func (c *call) checkHandle(handle string) error {
 }
 
 // checkOthers refuses the claim when another holder's lease overlaps it. A dead holder's lease that
-// allows clearing does not block, and is returned to be removed once the claim goes through.
-func (c *call) checkOthers(claimed []keys.Key) (cleared []*entry, err error) {
-	fp := record.PathFootprint(claimed)
-
+// allows clearing does not block, and is returned to be removed once the claim goes through. A
+// resource record from another machine is another machine's resource, so it never overlaps.
+//
+// A live local record of the resource a claim names, given as slotted, does not block here. The
+// claim counts it against the slots instead. Every other overlap blocks as before.
+func (c *call) checkOthers(fp record.Footprint, slotted string) (cleared []*entry, err error) {
 	var (
 		blocks []string
 		stuck  bool
 	)
 
 	for _, en := range c.others {
+		if en.Rec.Domain.Kind == record.KindResource && !liveness.SameMachine(c.e.Machine, en.Rec.Machine) {
+			continue
+		}
+
 		if !en.Rec.Footprint.Overlaps(fp, c.e.Finder) {
 			continue
 		}
@@ -198,8 +318,10 @@ func (c *call) checkOthers(claimed []keys.Key) (cleared []*entry, err error) {
 		case en.Live.Status == liveness.Dead:
 			stuck = true
 			blocks = append(blocks, fmt.Sprintf("%s on %s is held by %s, which has died, but its record asks that only a "+
-				"newer nitipan clear it (record version %s, this nitipan writes %s)", en.file(), en.pathList(),
+				"newer nitipan clear it (record version %s, this nitipan writes %s)", en.file(), en.domainList(),
 				describeHolder(en.Rec.Holder), en.Rec.Version, record.Current))
+		case slotted != "" && isResourceNamed(en, slotted):
+			// A live holder of the slotted name takes a slot. The claim counts it after this loop.
 		default:
 			blocks = append(blocks, c.heldBy(en))
 		}
@@ -214,14 +336,52 @@ func (c *call) checkOthers(claimed []keys.Key) (cleared []*entry, err error) {
 		next = "Upgrade nitipan, coordinate with the holder, or ask the user."
 	}
 
-	return nil, failf(exitcode.ErrRefused, "the claim overlaps %s.\n  %s\n%s",
+	// A dead holder whose record only a newer nitipan may clear never frees itself, so a wait cannot
+	// outlast it.
+	refuse := waitablef
+	if stuck {
+		refuse = func(format string, args ...any) error { return failf(exitcode.ErrRefused, format, args...) }
+	}
+
+	return nil, refuse("the claim overlaps %s.\n  %s\n%s",
 		Plural(len(blocks), "a lease", "leases"), strings.Join(blocks, "\n  "), next)
+}
+
+// isResourceNamed reports whether en is a record of the named resource that this binary understands.
+func isResourceNamed(en *entry, name string) bool {
+	got, ok := en.resource()
+
+	return ok && got == name
+}
+
+// admitSlot refuses a new holder of a slot when the live holders already fill it. The limit is the
+// config's count, lowered to the count of every live holder, so raising the config admits no one
+// while a holder admitted under the old count remains.
+func (cl *claim) admitSlot() error {
+	view := cl.slotViews(cl.slots)[cl.resource]
+	if view == nil || len(view.Holders) < view.Limit {
+		return nil
+	}
+
+	lines := make([]string, len(view.Holders))
+	for i, en := range view.Holders {
+		lines[i] = cl.heldBy(en)
+	}
+
+	why := ""
+	if configured := cl.slots.Count(cl.resource); view.Limit < configured {
+		why = fmt.Sprintf(" The configured count is %d, but a holder admitted under a count of %d keeps the limit "+
+			"there until it releases.", configured, view.Limit)
+	}
+
+	return waitablef("%s has %d of %d slots taken.%s\n  %s\nCoordinate with a holder, or ask the user to "+
+		"raise the count for %s.", cl.resource, len(view.Holders), view.Limit, why, strings.Join(lines, "\n  "), cl.resource)
 }
 
 // heldBy describes a live or unknown holder that blocks a claim.
 func (c *call) heldBy(en *entry) string {
 	rec := en.Rec
-	msg := fmt.Sprintf("%s on %s is held by %s", en.file(), en.pathList(), describeHolder(rec.Holder))
+	msg := fmt.Sprintf("%s on %s is held by %s", en.file(), en.domainList(), describeHolder(rec.Holder))
 
 	if c.sameProcess[en] {
 		msg += ", another session in this same process"
@@ -469,9 +629,21 @@ func (cl *claim) newRecord() *record.Record {
 		desc = *cl.req.Description
 	}
 
+	version, domain := record.PathVersion, record.Domain{
+		Kind:     record.KindPath,
+		Checkout: cl.req.Domain.Checkout,
+		Scopes:   cl.req.Domain.Scopes,
+		Keys:     cl.domain.Keys,
+	}
+
+	if cl.resource != "" {
+		version = record.ResourceVersion
+		domain = record.Domain{Kind: record.KindResource, Name: cl.resource, Slots: cl.slots.Count(cl.resource)}
+	}
+
 	return &record.Record{
 		Envelope: record.Envelope{
-			Version:       record.Current,
+			Version:       version,
 			ID:            cl.e.NewID(),
 			Footprint:     cl.footprint(),
 			ClearWhenDead: true,
@@ -479,13 +651,8 @@ func (cl *claim) newRecord() *record.Record {
 			Machine:       cl.e.Machine,
 			Holder:        holder,
 		},
-		Reach: record.ReachMachine,
-		Domain: record.Domain{
-			Kind:     record.KindPath,
-			Checkout: cl.req.Domain.Checkout,
-			Scopes:   cl.req.Domain.Scopes,
-			Keys:     cl.domain.Keys,
-		},
+		Reach:          record.ReachMachine,
+		Domain:         domain,
 		ActingFor:      h.User,
 		PermissionMode: mode,
 		Description:    desc,
@@ -676,6 +843,11 @@ func (cl *claim) replaceTargets() ([]*entry, error) {
 		}
 
 		if en := cl.mineByID(id); en != nil {
+			if name, ok := en.resource(); ok {
+				return nil, failf(exitcode.ErrRefused, "--replace %s: that lease is on the resource %s, and --replace does not "+
+					"apply to resource leases. Release it and claim the path", id, name)
+			}
+
 			if !slices.Contains(targets, en) {
 				targets = append(targets, en)
 			}

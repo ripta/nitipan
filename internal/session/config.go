@@ -212,7 +212,7 @@ func (s *Service) rememberConfig(l *state.Locked, home, executable string, check
 	}
 
 	data, err := encode(ConfigMemory{
-		Version:         record.Current,
+		Version:         record.SessionVersion,
 		CodexHome:       home,
 		UnloadDelaySecs: checks.UnloadDelaySecs,
 		SessionEnd:      checks.SessionEnd,
