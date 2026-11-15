@@ -236,3 +236,22 @@ func TestSetupNodePinsCodexExecutionInputsInThePrintedPlist(t *testing.T) {
 	}
 	wantContains(t, "stdout", out.String(), "<string>--codex-path</string>", "<string>/trusted/bin/codex</string>", "<string>--codex-home</string>", "<string>/trusted/custom &amp; home</string>")
 }
+
+// TestBrokerCrossUserHelpDoesNotPromiseAPreview proves the cross-user help does not claim the command
+// lists unbound labels before it commits. The command turns the features on and then prints the list, so
+// the labels it names are already refused. It catches a reword that promises a preview the command cannot
+// give. It cannot prove the output order, which the broker owns.
+func TestBrokerCrossUserHelpDoesNotPromiseAPreview(t *testing.T) {
+	w := newWorld(t)
+
+	res := w.run(w.terminal(900), "broker", "cross-user", "--help")
+	wantStatus(t, res, exitcode.OK)
+
+	help := strings.Join(strings.Fields(res.Stdout), " ")
+
+	if strings.Contains(help, "first lists") {
+		t.Errorf("cross-user help promises a list before the change lands:\n%s", res.Stdout)
+	}
+
+	wantContains(t, "stdout", help, "nitipan broker pending", "nitipan broker bindings")
+}
