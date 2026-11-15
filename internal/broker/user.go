@@ -454,8 +454,8 @@ func (b *Broker) RevokeUser(userID string) (RevokedUser, error) {
 // loopback nor served with TLS, or any label's current key reported plain HTTP or never reported its
 // scheme. A forgotten label has no current key, so a retired machine never blocks it.
 //
-// Turning them on answers with every label that can reach the broker and is bound to nobody, sorted. Each
-// is refused from then on, so the owner sees the list before it takes effect.
+// Turning them on answers with every label that can reach the broker and is bound to nobody, sorted. The
+// change is already committed when the list returns, so each of those labels is refused from then on.
 //
 // Turning them off makes the broker serve only the owner's labels and unbound labels again. Every other
 // user's binding, leases, delegations, and grants stay, so turning them on again serves those users as before.

@@ -88,8 +88,11 @@ Run this on the broker host. The holder's node writes them a notice that names t
 	crossUser := &cobra.Command{
 		Use:   "cross-user <true|false>",
 		Short: "Turn cross-user features on or off",
-		Long: `Turn cross-user features on or off on the broker host. Turning them on first lists every label nobody
-bound. Each is refused from then on, until it is approved on the broker host or bound on the sign-in page.`,
+		Long: `Turn cross-user features on or off on the broker host. Turning them on takes effect at once. The command
+then prints every label nobody bound. Each is refused from then on, until it is approved on the broker host or bound on
+the sign-in page.
+
+Run 'nitipan broker pending' and 'nitipan broker bindings' first to see which labels that will be.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error { return a.runBrokerCrossUser(cmd, args[0]) },
 	}

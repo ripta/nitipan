@@ -1,6 +1,10 @@
 # `broker cross-user` help says it lists unbound labels first, but it commits first
 
-**Status:** open
+**Status:** fixed 2026-11-15
+
+**Fixed:** 2026-11-15
+
+**Estimate:** small; one design decision, settled by the user: reword, not a dry run
 
 ## Observed
 
@@ -32,3 +36,12 @@ refused from then on. It tells the reader to run `nitipan broker pending` and `n
 
 The fuller fix adds a dry run, such as `broker cross-user true --check`, that runs every precondition and lists the
 unbound labels without committing. That adds a flag, so it is a design choice.
+
+## Fix note
+
+The help in `internal/cli/broker_admin.go` now says the features turn on at once and the command then prints the
+unbound labels. It points at `nitipan broker pending` and `nitipan broker bindings` to run first. The doc comment on
+`Broker.SetCrossUserEnabled` no longer claims the owner sees the list before it takes effect.
+`TestBrokerCrossUserHelpDoesNotPromiseAPreview` pins the help text.
+
+The dry run (`--check`) was not built. It stays a possible later addition.
