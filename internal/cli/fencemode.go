@@ -59,10 +59,16 @@ func (s fenceSetting) offCause() string {
 	return fmt.Sprintf("%s is false", fenceKey(s.Remote))
 }
 
-// legacyNotice is the one line that every push affected by the old key prints. It branches on whether the
-// old key set the mode. Any explicit fence beside a leftover atomic=false decides the mode, whichever way
-// it is set. The notice gives no advice on whether to rename or unset the key. It says to reinstall the hook first, since an older hook binary
-// reads only the old key.
+// legacyNotice is the one line that every push affected by the old key prints.
+//
+// The wording depends on who set the mode. If the old atomic key set it, the notice says the key acts
+// as fence=false and can be renamed or unset. If an explicit fence is set beside a leftover
+// atomic=false, fence wins whichever way it is set, so only unsetting the old key is offered.
+//
+// The notice gives no advice on which value to pick. It only reports what the old key does.
+//
+// It tells the user to reinstall the hook first. An older hook binary reads only the old key. Once
+// that key is renamed or unset, the older hook takes its fenced path and refuses the fence-less push.
 func (s fenceSetting) legacyNotice() string {
 	where := strings.TrimPrefix(s.LegacyOrigin, "file:")
 

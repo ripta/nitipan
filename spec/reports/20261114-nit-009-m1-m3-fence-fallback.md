@@ -9,7 +9,7 @@ remote's fence mode one key, `nitipan.<remote>.fence`, with three states. It cla
 
 ## Run state
 
-- Run: default `next 1`, the row NIT-009 M1-M3. Code and specs share this repository, on `main`. Row finished; final review next.
+- Run: default `next 1`, the row NIT-009 M1-M3. Code and specs share this repository, on `main`. Finished.
 - Run base and row base commit subject: `spec: schedule NIT-009 M1-M3`.
 - Dependencies: none. NIT-005 is implemented. No `live_after` entries. No skipped, held, or blocked rows.
 - Machine-local state tracks commit identifiers outside committed documentation.
@@ -202,3 +202,28 @@ Findings:
 Commit: `spec: mark the fence fallback implemented and move its queue row to history`. NIT-009 is `implemented` in the
 proposal and the index. The row NIT-009 M1-M3 moved from `queue.md` to the end of `history.md`. `proposals.py check`
 is clean.
+
+## Final review
+
+Commit: `nitipan: rewrap the legacy notice's doc comment`, which carries this report. The final review covered the
+run's whole range and served as its ADR review.
+
+Findings:
+
+- The `legacyNotice` doc comment had a 150-column line left by the row-review fixes. Fixed as short paragraphs. The
+  first rewrite misstated why the hook is reinstalled first. The coordinator caught it, and the comment now says an
+  older hook stops seeing the renamed key and refuses the fence-less push. `make fmt` and `make lint` passed.
+- The finish state is consistent: NIT-009 is `implemented` in the proposal and the index, `queue.md` is empty, and
+  `history.md` carries the row. `proposals.py check` and `freeze` are clean.
+- ADR review: the range adds and edits no ADR. ADR-09 stays `proposed`, and the shipped behavior agrees with it. The
+  fenced push never calls the broker. adr-impact found no conflict and no ADR candidate.
+
+## Left for the user
+
+- Run `make live-fence-hosts` against the real hosts, to see each host's porcelain wording for a refused fence ref.
+- ADR-09 is still `proposed`, while `docs/architecture.md` cites it as the principle.
+- Two bugs this run filed, both needing a design call:
+  - `spec/bugs/20261114-nonff-branch-refused-as-extra-fence.md`: a behind branch makes the hook refuse the fence ref
+    with a misleading message.
+  - `spec/bugs/20261114-cli-tests-near-go-timeout.md`: `internal/cli` runs about 552 s against go's 600 s default.
+- No freeze hunk or review finding concerned another session's edit. No stash was made.
