@@ -246,7 +246,7 @@ None.
 
 ### M1: Porcelain classifier
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - The fenced push runs with `--porcelain`, and its failure is judged by the four rules in "What can cause a fallback",
   in order
@@ -264,6 +264,23 @@ None.
   reaches rule 4
 - A fence ref that fails at transaction commit, such as on a directory/file conflict, gets rule 4, and the user sees
   the remote's `error:` line
+
+**As built:**
+
+The classifier returns typed outcomes and leaves mode handling as it was. A lost compare-and-swap still
+retries. A refusal of `--atomic` still records `atomic=false` and takes the lease check. A fence-ref refusal is still an
+error, now carrying the host's reason. M2 wires the outcomes to the `fence` key.
+
+- Rule 1 no longer matches `stale info` on stderr. It asks the remote, and a remote that cannot be asked fails the push
+  as rule 4 with an error that says so.
+- `--porcelain` is on the fenced push, including one that carries no fence refs. The output format is the same either
+  way. The lease-check push and the passthrough push for a user's own terminal do not use it.
+- Git leaves a branch it rejects locally out of the pre-push hook's input. A non-fast-forward branch therefore ends at
+  the hook, which refuses the lone fence ref before the remote is asked. Rule 4 holds, and the user sees the hook's
+  refusal and git's `error:` line. The client's own `[rejected] (atomic push failed)` wording is pinned by a test that
+  runs plain git. It is never `[remote rejected]`, so it cannot match rule 3.
+- The `receive.advertiseAtomic=false` case is owned by the existing lease-check test. The classifier table covers its
+  stderr line.
 
 ### M2: Fence modes and the sanctioned fallback
 

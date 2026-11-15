@@ -304,7 +304,7 @@ func (a *app) failClosedPush(err error) error {
 
 type fencedPush struct {
 	git      []string
-	classify func(stderr string) error
+	classify func(stdout, stderr string) error
 
 	// carried maps each fence ref the push writes to its new commit.
 	carried map[string]string
@@ -314,7 +314,7 @@ type fencedPush struct {
 func (a *app) fencedArgs(g *pushGit, view remoteView, specs []pushSpec, plan fenceplan.Plan) (fencedPush, error) {
 	remote := view.Name
 
-	args := []string{}
+	args := []string{"--porcelain"}
 
 	if len(plan.Writes) > 0 {
 		args = append(args, "--atomic")
@@ -353,12 +353,14 @@ func (a *app) fencedArgs(g *pushGit, view remoteView, specs []pushSpec, plan fen
 
 	args = append(args, carried...)
 
-	classify := func(stderr string) error {
-		if len(plan.Writes) > 0 && fencesMoved(g, view, plan) {
-			return errLostCAS
+	classify := func(stdout, stderr string) error {
+		failure := pushFailure{Remote: remote, Stdout: stdout, Stderr: stderr}
+
+		if len(plan.Writes) > 0 {
+			failure.Moved = func() (bool, error) { return fencesMoved(g, view, plan) }
 		}
 
-		return classifyPushFailure(stderr, remote, len(plan.Writes) > 0)
+		return classifyPushFailure(failure)
 	}
 
 	return fencedPush{git: args, classify: classify, carried: landed}, nil
@@ -366,34 +368,19 @@ func (a *app) fencedArgs(g *pushGit, view remoteView, specs []pushSpec, plan fen
 
 // fencesMoved reports whether a fence ref this push meant to update holds a value other than the one
 // the push expected. Hosts word a lost compare-and-swap in their own ways, so the remote is asked.
-func fencesMoved(g *pushGit, view remoteView, plan fenceplan.Plan) bool {
+func fencesMoved(g *pushGit, view remoteView, plan fenceplan.Plan) (bool, error) {
 	now, err := g.lsRemote(view.Name, view.URL)
 	if err != nil {
-		return false
+		return false, err
 	}
 
 	for _, w := range plan.Writes {
 		if now.Fences[w.Name] != view.Fences[w.Name] {
-			return true
+			return true, nil
 		}
 	}
 
-	return false
-}
-
-// classifyPushFailure turns what git said into the kind of failure it was.
-func classifyPushFailure(stderr, remote string, fenced bool) error {
-	switch {
-	case strings.Contains(stderr, "stale info"):
-		return errLostCAS
-	case strings.Contains(stderr, "does not support --atomic"):
-		return errNoAtomic
-	case fenced && strings.Contains(stderr, fenceref.Namespace) && strings.Contains(stderr, "rejected"):
-		return fmt.Errorf("%s refused the fence ref. This is the host's ref policy about refs under %s and not a lost lease. "+
-			"Report this to the user", remote, fenceref.Namespace)
-	}
-
-	return nil
+	return false, nil
 }
 
 // pushWithoutFence is the push to a remote that cannot hold fence refs. The leases are renewed first,
@@ -437,15 +424,18 @@ func recordNoAtomic(g *pushGit, remote string) error {
 }
 
 // gitPush runs git push in dir and shows its output. classify, when set, reads what git said on a
-// failure.
-func (a *app) gitPush(dir string, args []string, classify func(string) error) error {
+// failure. Stdout is copied as stderr is, because a porcelain push reports each ref there.
+func (a *app) gitPush(dir string, args []string, classify func(stdout, stderr string) error) error {
 	cmd := exec.Command("git", append([]string{"push"}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = append(keys.CleanGitEnv(os.Environ()), "LC_ALL=C", "LANGUAGE=C")
-	cmd.Stdout = a.deps.Stdout
 
-	var seen bytes.Buffer
+	var (
+		seen    bytes.Buffer
+		seenOut bytes.Buffer
+	)
 
+	cmd.Stdout = io.MultiWriter(a.deps.Stdout, &seenOut)
 	cmd.Stderr = io.MultiWriter(a.deps.Stderr, &seen)
 
 	err := cmd.Run()
@@ -454,7 +444,7 @@ func (a *app) gitPush(dir string, args []string, classify func(string) error) er
 	}
 
 	if classify != nil {
-		if kind := classify(seen.String()); kind != nil {
+		if kind := classify(seenOut.String(), seen.String()); kind != nil {
 			return kind
 		}
 	}
