@@ -1,3 +1,3 @@
-module github.com/ripta/nitipan
+module github.com/space-armada/nitipan
 
 go 1.27.1
