@@ -22,6 +22,7 @@ func (n *Node) registerLeaseKinds() {
 	n.forwrd[handoff.KindFence] = n.forwardFence
 	n.forwrd[handoff.KindWhoHolds] = n.forwardWhoHolds
 	n.forwrd[handoff.KindWhoIs] = n.forwardWhoIs
+	n.forwrd[handoff.KindWhoAmI] = n.forwardWhoAmI
 }
 
 func decodeBodyOf(req handoff.Request, into any) error {
@@ -239,6 +240,22 @@ func (n *Node) forwardWhoIs(ctx context.Context, req handoff.Request) (json.RawM
 
 	var out wire.WhoIsAnswer
 	if err := n.cl.call(ctx, wire.PathWhoIs, body, &out); err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(out)
+}
+
+func (n *Node) forwardWhoAmI(ctx context.Context, req handoff.Request) (json.RawMessage, error) {
+	var body wire.WhoAmI
+	if err := decodeBodyOf(req, &body); err != nil {
+		return nil, err
+	}
+
+	body.Version = wire.Current
+
+	var out wire.WhoAmIAnswer
+	if err := n.cl.call(ctx, wire.PathWhoAmI, body, &out); err != nil {
 		return nil, err
 	}
 

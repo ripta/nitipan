@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/space-armada/nitipan/internal/atomicfile"
+	"github.com/space-armada/nitipan/internal/broker"
 	"github.com/space-armada/nitipan/internal/config"
 	"github.com/space-armada/nitipan/internal/exitcode"
 	"github.com/space-armada/nitipan/internal/handoff"
+	"github.com/space-armada/nitipan/internal/oidc"
 	"github.com/space-armada/nitipan/internal/wire"
 )
 
@@ -427,4 +429,64 @@ func TestMachineClaimRecordsItsRepoEntriesOnlyWhereANodeIsConfigured(t *testing.
 			t.Fatalf("derived = %+v", d)
 		}
 	})
+}
+
+// whoAmIMachine starts a machine and, when bound is set, binds its label to a user. It returns the machine
+// and the user label that who am-i should report.
+func whoAmIMachine(t *testing.T, bound bool) (*wideMachine, string) {
+	t.Helper()
+
+	f := newWideFixtureConfig(t, true, nil, func(c *broker.Config) {
+		c.OIDCConfig = &oidc.Config{Issuer: "https://issuer.test", ClientID: "nitipan", RedirectURL: "https://broker.test/callback"}
+	})
+
+	m := f.machine("m")
+	m.start()
+	m.labelOf(t)
+
+	if !bound {
+		return m, ""
+	}
+
+	u, err := f.b.AdmitUser("https://issuer.test", "u-sub", "u@example.com", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.b.SetCrossUserEnabled(true); err != nil {
+		t.Fatalf("turning cross-user features on: %v", err)
+	}
+
+	m.bindByPairing(t, "https://issuer.test", "u-sub")
+
+	return m, u.UserLabel
+}
+
+type whoAmITextTest struct {
+	Name  string
+	Bound bool
+	Want  func(label string) string
+}
+
+var whoAmITextTests = []whoAmITextTest{
+	{Name: "a node bound to a user prints that user's label", Bound: true, Want: func(l string) string { return "User label: " + l + "\n" }},
+	{Name: "a node bound to nobody says so", Bound: false, Want: func(string) string { return "This node is not bound to a user.\n" }},
+}
+
+// TestWhoAmIReachesTheBroker proves `who am-i` gets an answer through the node. It catches a node that does
+// not register the request kind, which makes every call fail with "node too old". It does not prove the JSON
+// form.
+func TestWhoAmIReachesTheBroker(t *testing.T) {
+	for _, test := range whoAmITextTests {
+		t.Run(test.Name, func(t *testing.T) {
+			m, label := whoAmIMachine(t, test.Bound)
+
+			res := m.w.run(m.w.terminal(72), "who", "am-i")
+			wantStatus(t, res, exitcode.OK)
+
+			if want := test.Want(label); res.Stdout != want {
+				t.Errorf("stdout = %q, want %q", res.Stdout, want)
+			}
+		})
+	}
 }
