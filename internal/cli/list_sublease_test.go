@@ -399,6 +399,10 @@ func TestListWithoutTheLockReportsNoNoticesInJSON(t *testing.T) {
 }
 
 func TestListStillPrintsWhenARepairCannotWrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+
 	tr := newTree(t)
 
 	removeLeaseFile(t, tr.w, tr.parentID)
