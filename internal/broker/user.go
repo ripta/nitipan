@@ -32,6 +32,10 @@ var (
 	// ErrUnknownUser means no user with that ID exists.
 	ErrUnknownUser = errors.New("no such user")
 
+	// ErrOwnerUser means a command asked to revoke the broker owner. The owner anchors the store, and no
+	// flow hands ownership to another user.
+	ErrOwnerUser = errors.New("the broker owner cannot be revoked")
+
 	// ErrUserAlreadyAdmitted means the issuer plus sub is already admitted to a user.
 	ErrUserAlreadyAdmitted = errors.New("this issuer plus sub is already admitted to a user")
 
@@ -338,7 +342,7 @@ type RevokedUser struct {
 // for the user, and every one the user's labels hold, the leases they hold for other users under their
 // delegations included. Each holder's node writes a notice.
 //
-// It is one commit, so a failed store write leaves the user whole.
+// It refuses the broker owner. It is one commit, so a failed store write leaves the user whole.
 func (b *Broker) RevokeUser(userID string) (RevokedUser, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -346,6 +350,11 @@ func (b *Broker) RevokeUser(userID string) (RevokedUser, error) {
 	user, ok := b.store.Data().Users[userID]
 	if !ok {
 		return RevokedUser{}, fmt.Errorf("user %q: %w", userID, ErrUnknownUser)
+	}
+
+	if userID == b.store.Data().OwnerID {
+		return RevokedUser{}, fmt.Errorf("user %q: %w. Use broker forget <label> to unpin one of the owner's machines",
+			userID, ErrOwnerUser)
 	}
 
 	out := RevokedUser{Labels: []string{}, Leases: []string{}}

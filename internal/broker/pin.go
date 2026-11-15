@@ -717,7 +717,7 @@ func (b *Broker) adminResult(w http.ResponseWriter, err error) {
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, ErrUnknownLabel):
 		writeErr(w, http.StatusNotFound, wire.CodeBadRequest, err.Error())
-	case errors.Is(err, ErrBadFingerprint), errors.Is(err, ErrAlreadyPinned):
+	case errors.Is(err, ErrBadFingerprint), errors.Is(err, ErrAlreadyPinned), errors.Is(err, ErrOwnerUser):
 		writeErr(w, http.StatusBadRequest, wire.CodeBadRequest, err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, wire.CodeUnavailable, err.Error())
