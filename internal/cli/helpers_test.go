@@ -86,6 +86,12 @@ type world struct {
 	// git replaces the git runner of the acquire check and setup. Nil runs the real git.
 	git gitfence.Runner
 
+	// handoffWait overrides how long a command waits for the node. Zero keeps the default.
+	handoffWait time.Duration
+
+	// machine names this world's machine. The zero value is testMachine.
+	machine record.Machine
+
 	// db answers opencode's time_suspended. Nil makes every read fail.
 	db session.OpencodeDB
 }
@@ -164,7 +170,7 @@ func (w *world) deps(c caller, stdout, stderr *bytes.Buffer) Deps {
 		Getenv:       func(k string) string { return c.env[k] },
 		Procs:        w.table,
 		StateDir:     stateDir,
-		Machine:      func() (record.Machine, error) { return testMachine, nil },
+		Machine:      func() (record.Machine, error) { return w.machineOrDefault(), nil },
 		User:         func() (string, error) { return tester, nil },
 		Cwd:          func() (string, error) { return w.root, nil },
 		Now:          func() time.Time { return w.now },
@@ -173,7 +179,16 @@ func (w *world) deps(c caller, stdout, stderr *bytes.Buffer) Deps {
 		Git:          w.git,
 		StateOptions: state.Options{LockBudget: w.budget, LockPoll: 10 * time.Millisecond, Sleep: w.lockSleep},
 		Hooks:        w.hooks,
+		HandoffWait:  w.handoffWait,
 	}
+}
+
+func (w *world) machineOrDefault() record.Machine {
+	if w.machine.ID != "" {
+		return w.machine
+	}
+
+	return testMachine
 }
 
 func (w *world) run(c caller, args ...string) result {

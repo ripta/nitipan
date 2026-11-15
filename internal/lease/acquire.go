@@ -655,7 +655,12 @@ func (cl *claim) coveredErr(covering []*entry) error {
 		msg += ". Use advertise to change the name, permission mode, or description"
 	}
 
-	return failf(exitcode.ErrAlreadyCovered, "%s", msg)
+	leases := make([]*record.Record, len(covering))
+	for i, en := range covering {
+		leases[i] = en.Rec
+	}
+
+	return &CoveredError{Leases: leases, msg: msg}
 }
 
 // overlappedMine returns the caller's leases that overlap the claim without being equal to it.

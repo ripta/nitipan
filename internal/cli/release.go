@@ -8,6 +8,7 @@ import (
 
 	"github.com/space-armada/nitipan/internal/adapter"
 	"github.com/space-armada/nitipan/internal/exitcode"
+	"github.com/space-armada/nitipan/internal/handoff"
 	"github.com/space-armada/nitipan/internal/lease"
 )
 
@@ -55,10 +56,58 @@ func (a *app) runRelease(cmd *cobra.Command, ids []string) error {
 
 	req.Holder = h
 
+	stateDir, err := a.deps.StateDir()
+	if err != nil {
+		return fmt.Errorf("resolving the state directory: %w", err)
+	}
+
 	e, err := a.engine()
 	if err != nil {
 		return err
 	}
+
+	machine, err := a.deps.Machine()
+	if err != nil {
+		return fmt.Errorf("identifying this machine: %w", err)
+	}
+
+	env := holderEnv(h, machine)
+
+	local, remote, names, err := a.brokerTargets(stateDir, env, ids)
+	if err != nil {
+		return err
+	}
+
+	if req.All {
+		mine, err := a.mySidecars(stateDir, handoff.HolderKey(env.Holder, env.Liveness))
+		if err != nil {
+			return err
+		}
+
+		for _, sc := range mine {
+			remote = append(remote, sc.ID)
+		}
+	}
+
+	var brokerErr error
+
+	if len(remote)+len(names) > 0 {
+		var removed []handoff.Sidecar
+
+		removed, brokerErr = a.releaseBroker(stateDir, env, remote, names)
+
+		if !req.All {
+			a.releaseAnchors(e, h, stateDir, removed)
+		}
+	}
+
+	if len(remote)+len(names) > 0 && len(local) == 0 && !req.All && req.Domain == nil && req.Resource == "" {
+		a.reportRisk(h)
+
+		return brokerErr
+	}
+
+	req.IDs = local
 
 	res, err := e.Release(req)
 	if res != nil {
@@ -70,12 +119,14 @@ func (a *app) runRelease(cmd *cobra.Command, ids []string) error {
 			fmt.Fprintln(a.deps.Stdout, line)
 		}
 
-		if err == nil && len(res.Released) == 0 {
+		if err == nil && len(res.Released) == 0 && brokerErr == nil {
 			fmt.Fprintln(a.deps.Stdout, "no leases to release")
 		}
 	}
 
-	return err
+	a.reportRisk(h)
+
+	return errors.Join(brokerErr, err)
 }
 
 func (a *app) releaseRequest(cmd *cobra.Command, ids []string) (lease.ReleaseRequest, error) {

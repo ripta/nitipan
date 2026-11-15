@@ -167,7 +167,12 @@ var repoLocatingVars = []string{
 	"GIT_NAMESPACE",
 	"GIT_PREFIX",
 	"GIT_CEILING_DIRECTORIES",
+	"GIT_GRAFT_FILE",
+	"GIT_REPLACE_REF_BASE",
 }
+
+// CleanGitEnv is cleanGitEnv for packages that run git themselves.
+func CleanGitEnv(env []string) []string { return cleanGitEnv(env) }
 
 // cleanGitEnv returns the environment without the repo-locating variables.
 func cleanGitEnv(env []string) []string {

@@ -31,6 +31,9 @@ type app struct {
 	// in all, so it waits for the lock at most 2.
 	lockBudget time.Duration
 
+	// noticed holds the targets of the notices this command delivered.
+	noticed []string
+
 	// hooksSeen keeps what the git hook check found for a directory during this command.
 	hooksSeen map[string]lease.GitHooks
 }
@@ -165,6 +168,7 @@ func (a *app) deliverNotice(t *record.Tombstone) {
 // deliverRecordNotice tells a holder what happened to a request or sub-lease of theirs. It goes to
 // stderr next to the tombstones, with the same prefix.
 func (a *app) deliverRecordNotice(n *record.Notice) {
+	a.noteNoticed(n.Target)
 	a.printRecordNotice(n.Detail)
 }
 

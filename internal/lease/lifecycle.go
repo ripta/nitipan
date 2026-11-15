@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/space-armada/nitipan/internal/handoff"
 	"github.com/space-armada/nitipan/internal/keys"
 	"github.com/space-armada/nitipan/internal/liveness"
 	"github.com/space-armada/nitipan/internal/record"
@@ -15,8 +16,9 @@ import (
 
 // runRepairs is the one sequence of repairs that every locked call runs before it delivers
 // anything. Requests come first, since a request in the granting state is finished before any other
-// reaping. Children follow, then the fence marks. The reaping of dead holders' notices comes last.
-// Marks and notices are judged against the leases as the earlier repairs leave them.
+// reaping. Children follow, then the fence marks. The reaping of dead requesters' broker requests
+// and of dead holders' notices comes last. Marks and notices are judged against the leases as the
+// earlier repairs leave them.
 func (c *call) runRepairs() error {
 	if err := c.repairRequests(); err != nil {
 		return err
@@ -30,9 +32,18 @@ func (c *call) runRepairs() error {
 		return err
 	}
 
+	c.reapHandoff()
 	c.reapNotices()
 
 	return nil
+}
+
+// reapHandoff removes the broker requests and replies whose requester is dead. A failure is a
+// warning, since nothing else in the call depends on it.
+func (c *call) reapHandoff() {
+	if err := handoff.Reap(c.l, c.e.Checker); err != nil {
+		c.e.Notify.warn(err)
+	}
 }
 
 // repairChildren finishes what a parent's death, or an older binary's removal of a parent, left

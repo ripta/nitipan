@@ -19,8 +19,8 @@ import (
 // remote flag, and the effective count and live holders of a local resource lease. Minor 2 adds
 // sub-leases: the parent link, the computed delegated list, the owner and grantor_of marks of a
 // filtered query, and the top-level requests and notices arrays. Minor 3 adds the top-level marks
-// array of fence marks.
-const SchemaVersion = "1.3"
+// array of fence marks. Minor 4 adds the top-level broker_leases array of user and shared leases.
+const SchemaVersion = "1.4"
 
 // Output is the whole `list --json` document.
 type Output struct {
@@ -47,6 +47,10 @@ type Output struct {
 	// query lists the marks whose keys overlap the filter. A mark nitipan cannot use is listed as
 	// unusable. It is always an array.
 	Marks []Mark `json:"marks"`
+
+	// BrokerLeases are the user and shared leases the broker grants. The array is present only when the
+	// call could reach the node, or when this holder has broker leases on file.
+	BrokerLeases []BrokerLease `json:"broker_leases,omitempty"`
 
 	// SlotConfigPath is where the slot counts are configured. The text output prints it. The JSON
 	// document leaves it out, since a consumer has no use for it.
@@ -270,4 +274,21 @@ func Encode(w io.Writer, out Output) error {
 	}
 
 	return nil
+}
+
+// BrokerLease is one lease the broker grants, as list reports it. State is live, lapsed, or unknown.
+// AtRisk says the holder's node is disconnected from the broker, and Risk says when the lease lapses.
+type BrokerLease struct {
+	ID       string   `json:"id"`
+	Reach    string   `json:"reach"`
+	State    string   `json:"state"`
+	Names    []string `json:"names"`
+	Anchor   string   `json:"anchor"`
+	Holder   string   `json:"holder"`
+	Node     string   `json:"node,omitempty"`
+	Liveness string   `json:"liveness,omitempty"`
+	Expires  string   `json:"expires,omitempty"`
+	Mine     bool     `json:"mine"`
+	AtRisk   bool     `json:"at_risk,omitempty"`
+	Risk     string   `json:"risk,omitempty"`
 }

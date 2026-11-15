@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Created:** 2026-10-18
-**Updated:** 2026-10-24
+**Updated:** 2026-10-29
 
 ## Dependencies
 
@@ -286,9 +286,13 @@ macOS-only, which matches the platforms the user runs.
 - The node takes a flock on a node lock file in the state directory. A second node for the same machine and user fails
   loudly, since two would keep replacing each other's snapshots
 - The node exits when its executable changes, so launchd restarts it on the upgraded binary
-- The broker address and proxy settings come from a node config file in the state directory, beside NIT-002's
-  `slots.json`. A LaunchAgent does not inherit the user's shell environment, and Go's default proxy lookup reads only
-  the environment
+- The broker address and proxy settings come from a node config file at `~/.config/nitipan/node.json`, outside the state
+  directory. The node finds the home directory in the user database, like the state directory, and ignores `HOME` and
+  `XDG_CONFIG_HOME`. A LaunchAgent does not inherit the user's shell environment, and Go's default proxy lookup reads
+  only the environment, so the node sets its own proxy function from the file. The node refuses a file or directory
+  that another user owns or that others can write. That check guards against other users and loose permissions, not
+  against a sandboxed session, which runs as the same user. ADR-07 keeps what the node connects to out of input a
+  sandbox can write. Amended 2026-10-29; see Decision Log
 - The plist also carries the codex path and `CODEX_HOME` that `setup` resolves, for NIT-007's Codex rings. No agent
   sandbox can write the plist, while the state directory is writable from inside them, so anything the node runs comes
   from the plist. Amended 2026-10-24; see Decision Log
@@ -473,16 +477,17 @@ routine reconnect while the broker still held the old stream.
 one person's machines. Which identity scopes a `user` lease before NIT-006 is open.
 
 Decision (autonomous): until NIT-006, each broker is one user scope. Every `user` lease on a broker conflicts with
-every other `user` lease on overlapping names, whatever its `holder.user`.
+every `user` lease of another holder on overlapping names, whatever its `holder.user`. One holder never conflicts with
+its own broker leases. Amended 2026-10-29; see Decision Log.
 
 - No name configures the scope. Nobody has been named who would set one
-- `user` and `shared` leases on overlapping names conflict
+- `user` and `shared` leases of different holders on overlapping names conflict
 - `acting_for` is carried unchanged on every broker lease, and is ignored for scope until NIT-006 defines its meaning.
   NIT-006 M1 then has a defined input
 - When NIT-006 splits the scope by authenticated user, leases only get narrower, which matches what callers asked for.
   Stored `repo:` names and `<handle>@<label>` addresses carry no user, so nothing stored changes meaning
 
-Amended 2026-10-24; see Decision Log. NIT-006 is accepted and scopes `user` leases by authenticated identity. Each
+NIT-006 is accepted and scopes `user` leases by authenticated identity. Each
 bound user is one user scope, named by a lease's `acting_for`, under NIT-006's "Session credential" and "Shared
 agents and acting_for". A `user` lease and another user's `shared` lease on overlapping names still conflict, with
 the refusal detail NIT-006's "`user` and `shared` leases across users" sets. The one-scope rule above holds until a
@@ -538,8 +543,9 @@ Neither kind refuses the other through the broker. Overlaps between them are rep
   without `--force` while the holder is alive or unknown. With `--force`, the broker ends the lease, and the holder's
   node writes it a tombstone-like notice that names the breaker. The anchor stays as an ordinary lease, and the notice
   says so. Under NIT-006's "What auth authorizes", a user may break only their own leases, and the broker owner any.
-  Overlap reports between `user` leases and mirrored `machine` leases go only between leases of one user. Amended
-  2026-10-24; see Decision Log
+  A `taken` or `ended` fact stays until its owner's node acks it, so a `break` from any other node answers that the
+  lease already ended and changes nothing. Overlap reports between `user` leases and mirrored `machine` leases go only
+  between leases of one user. Amended 2026-10-29; see Decision Log
 - The broker never refuses a `user` claim because of a mirrored `machine` lease. No `machine` claim consults the
   broker. Mirrored machine leases carry derived entries in their sidecar, from the CLI or, for a record a V1 binary
   wrote, from the node. A derivation that fails shows as unknown in discovery, never as no overlap
@@ -607,8 +613,10 @@ Nothing says how the broker runs or what survives its restart. Live leases, requ
 seen-label table, and NIT-005's counter must not be lost, or a retried request can grant twice.
 
 Decision (autonomous): the broker is `nitipan broker`, run on a host the user picks under a launchd LaunchAgent that
-`setup` prints. Its listen address and store path are in a broker config file. All broker state lives in one
-versioned JSON file, rewritten whole through a temp file, fsync, and `rename(2)` for each change.
+`setup` prints. Its listen address, certificate, and store path are in a broker config file at
+`~/.config/nitipan/broker.json`, outside the state directory and read like the node config. All broker state lives in
+one versioned JSON file, rewritten whole through a temp file, fsync, and `rename(2)` for each change. Amended
+2026-10-29; see Decision Log.
 
 - The file holds live and lapsed leases with their grants, revisions, tokens, and anchors; the "taken" markers; request
   outcomes; end facts the holder's node has not acked; the seen-label table; and NIT-005's counter
@@ -797,7 +805,7 @@ Amended 2026-10-24; see Decision Log.
 
 ### M1: Node, broker, and mirrors
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `setup` prints a per-user LaunchAgent that runs `nitipan node`, and a second node for the same machine and user fails
   on its flock
@@ -825,9 +833,39 @@ Amended 2026-10-24; see Decision Log.
 - A node refuses to forward a request more than one day old with "request expired"
 - Before a major migration of its store, the broker keeps the previous file, and an older broker starts from it
 
+**As built:**
+
+- The node config moved out of the state directory. See the 2026-10-29 Decision Log entry.
+- Running the printed LaunchAgents under real launchd, with `launchctl bootstrap`, is left to the user. Tests cover
+  the node and broker in-process, the flocks, and the printed plist text.
+- The broker and node tests run over `httptest` with fake clocks. Two OS users on one Mac are tested as two uids
+  against one broker. Two real node processes cannot be tested that way, since the state directory must be owned by the
+  calling user.
+- The node mirrors a record unchanged on disk and in meaning. JSON transport compacts its whitespace.
+- The store keeps a hash of each node key, never the key, and the derivation version beside each label. The kept
+  previous file is named after the store with the major it held, such as `broker.json.v1`.
+- The only request kind the node forwards is `ping`, which echoes the node's label. M2 adds the real kinds. No
+  command calls the "node not running" check yet, and its error exits with status 1.
+- The node reads NIT-008's `recalls/` only when the directory exists, and changes nothing yet.
+- Plain HTTP to a literal public IP is refused when the node starts. A host name is allowed, and the node's dialer
+  checks the address the name resolves to just before it connects, refusing a public one. This also covers a name whose
+  answer changes later. With a proxy configured, the dialer judges the proxy's address. The node warns on any plain
+  HTTP.
+- The broker refuses a store file with a higher minor at start, naming both versions, since it cannot rewrite one and
+  could not register a node against it.
+- The store path check refuses `~/Library/Mobile Documents`, `~/Library/CloudStorage`, which covers iCloud Drive,
+  Dropbox, Google Drive, OneDrive, and Box on current macOS, and the legacy `~/Dropbox`, `~/Google Drive`,
+  `~/OneDrive*`, `~/iCloud Drive`, `~/Box`, and `~/Box Sync` folders. It matches by path only. A sync tool pointed at
+  an arbitrary folder, and iCloud's Desktop and Documents sync, are not detected.
+- A node call other than the stream has a 30-second deadline, so a stalled broker ends the session and the node
+  reconnects. A claimed, answered, or pending handoff file that names no requester is reaped once it is over a day old.
+- The volume check off macOS always fails, since the broker runs as a macOS LaunchAgent.
+- The node follows no broker redirect, since Go would re-send the credential over plain HTTP. A handoff file whose
+  body ID differs from its file name is refused and reaped after a day.
+
 ### M2: Wider-reach leases
 
-**Status:** NOT STARTED
+**Status:** DONE
 
 - `user` claims from checkouts of one repo on two machines derive overlapping root-set names and conflict. Shallow
   clones, an unborn HEAD, a graft file, and an uninitialized submodule are refused with their errors
@@ -847,7 +885,8 @@ Amended 2026-10-24; see Decision Log.
 - Releasing a `user` lease releases an anchor its claim created and left unchanged. It leaves an anchor that was
   already held, widened, merged, or shared with a second `user` lease, and says so, and the second lease survives
 - `break --force` of a `user` lease from another machine ends it, and the holder gets a notice naming the breaker
-- A `user` lease and a `shared` lease on overlapping names conflict
+- A `user` lease and a `shared` lease of different holders on overlapping names conflict. Amended 2026-10-29; see
+  Decision Log
 - A command run while the node is disconnected says the holder's broker leases are at risk and when they lapse, and
   past that time says they lapsed
 - A synchronous renew through the request handoff returns the lease's new expiry
@@ -855,6 +894,47 @@ Amended 2026-10-24; see Decision Log.
 - Old CLI with new node, new CLI with old node, old node with new broker, and new node with old broker each give the
   error "Version skew" states, in tests. A derivation version below the broker's floor is refused. A sidecar or anchor
   file the reader cannot use reads as unknown
+
+**As built:**
+
+- The CLI generates one ID that is both the request ID and the lease ID. A command whose reply the CLI did not see
+  leaves an in-flight record under `broker/inflight/`, so a retry of the same command reuses the ID and the broker
+  replays its outcome. The handoff request version is now 2, so a CLI of this build gets "node too old" from an M1
+  node at once.
+- The node delivers a reply nobody read within 90 seconds as a notice and removes the reply file. Its memory of whom to
+  notify is per process, so a node restart in that window drops the notice. The retry still returns the same answer.
+- Synchronous renew is a `renew` subcommand over a `renew` request kind. Plain `list` also shows the broker leases,
+  through a `list` request kind, and falls back to the holder's own sidecars with an `unknown` state when no live node
+  answers. `list --json` gained `broker_leases`, so its schema moved to 1.4.
+- The store keeps the 1.0 version. The grant, the outcome, and the counter ride in the `leases`, `outcomes`, and
+  `counter` fields M1 reserved. A taken or broken lease stays in `leases` with state `taken` or `ended` until its node
+  acks it in a snapshot. The counter bumps with each grant, and the grant's token is the counter value. Revival keeps
+  it. Whether NIT-005 keeps that meaning is NIT-005's to settle.
+- The snapshot answer carries the node's leases, end facts included, and the snapshot request carries the acks. An
+  older node ignores the answer, and an older broker answers with no body, which a node accepts.
+- A holder never conflicts with its own leases at the broker. See the 2026-10-29 Decision Log entry on M2.
+- A break from a node other than the owner leaves a `taken` or `ended` fact for its owner to ack. See the row review
+  entry in the Decision Log.
+- The node renews at a third of the term, checks anchors and holder liveness in the same pass, and treats a gap
+  between loop ticks larger than 5 seconds as a wake. The broker detects its own wake by comparing the monotonic clock
+  with Go's clock, which stops during sleep.
+- A lapsed lease whose anchor was merged into another lease by `--replace` has an anchor ID the snapshot no longer
+  lists, so the broker removes the lapsed lease. A live one survives, since the node follows `absorbs`.
+- A late refusal leaves an orphan record under `broker/orphans/`, keyed by the claim ID that its notice
+  targets. The next command that delivers the notice releases the anchor under the local lock, by the rules a release
+  uses. A refusal the CLI sees at once, and any definite failure, releases a new anchor on the spot. Only an unknown
+  outcome keeps it.
+- A release the CLI did not see answered keeps the sidecars it asked to remove in its in-flight record. A retry reads
+  them, so it still decides about a created anchor even though the node already removed the sidecar.
+- The node removes a sidecar for a release only when the holder key matches the requester's. A repeat claim that the
+  broker answers with the held lease writes no second sidecar, and an existing sidecar keeps its created flag.
+- A stored outcome is bound to the node that made the request, and another node's retry of the ID is refused. The
+  broker refuses a claim whose derivation is above the highest it knows (1), as "broker too old", and below its floor.
+- A request kind introduced after request version 1 is refused from a version 1 request as "node too old".
+- The "restored" notice fires when the node's own deadline passed with no acked renewal and a later renewal or snapshot
+  shows the lease live.
+- The root-set cache is a JSON file at `broker/rootsets.json`. A submodule entry covers the whole submodule, and a claim
+  inside a submodule emits its own entry first, then each superproject's.
 
 ### M3: Discovery queries
 
@@ -1002,6 +1082,33 @@ Amended 2026-10-24; see Decision Log.
   until NIT-006 is built.
 - 2026-10-24: Scheduled as NIT-004 M1-M2 and NIT-004 M3 in queue.md. The split lets NIT-005 M2 land on the new
   grant path first.
+- 2026-10-29: "Node lifecycle" said the node config file sits in the state directory, beside NIT-002's `slots.json`.
+  ADR-07 forbids that, because an agent sandbox can write the state directory, and the broker address, proxy, and CA
+  decide where the node connects. It now says `~/.config/nitipan/node.json`, outside the state directory, found from
+  the home directory in the user database. The node refuses a file or directory that another user owns or that others
+  can write, which guards against other users and loose permissions and not against a sandbox. "Broker lifecycle and
+  store" now names `~/.config/nitipan/broker.json` for the broker config, which it left unplaced. "Broker protocol"
+  says only "the node config", so its text stands. The user chose `~/.config` during the NIT-004 M1-M2 work-queue plan,
+  per ADR-07.
+- 2026-10-29: ADR candidate (cuts across the system): the node-broker channel never carries plaintext over a public
+  path. Undecided. Found in NIT-004 M1.
+- 2026-10-29 (autonomous): Work-queue run best guess on M2, amending "Which user a user-reach lease belongs to" and
+  M2's check on `user` and `shared` leases: one holder never conflicts with its own broker leases. The text said every `user` lease
+  conflicts with every other `user` lease on overlapping names, and that `user` and `shared` leases on overlapping names
+  conflict, with no word on a holder against itself. As built, the same names again from the same holder return the
+  lease it holds, and overlapping names from the same holder are granted as another lease. A second `user` lease under
+  one anchor, which M2's shared-anchor check needs, cannot exist otherwise. If this is wrong, one comparison in the
+  broker's claim handler changes, and a second overlapping claim from the same holder is refused. The rule trusts the
+  client-supplied holder key, which another session of the same OS user could forge. That is NIT-001's threat model.
+- 2026-10-29 (autonomous): Row review fixes for NIT-004 M1-M2. "Machine leases and user leases on the same path" let `break` from
+  any node delete a `taken` or `ended` fact. The holder then lost the notice that says who took or ended its lease,
+  against "Lease term and renewal", which drops the marker on the owner's ack. A break from any node but the fact's
+  owner now leaves the fact and answers that the lease already ended. The owner's own break still clears it.
+  Separately, the node refuses a request file whose body ID differs from its file name, and refuses to follow a broker
+  redirect, which would re-send the credential. Neither changes proposal text.
+- 2026-10-29: ADR candidate (departs from the past): at `user` and `shared` reach, a lease names a repo's files across
+  every checkout and worktree, unlike the checkout-boundary exemption ADR-03 sets for `machine` reach. Undecided.
+  Found in NIT-004 M2.
 
 ## References
 
