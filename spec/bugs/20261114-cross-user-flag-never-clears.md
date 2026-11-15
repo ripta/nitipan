@@ -1,6 +1,10 @@
 # The plain-HTTP refusal offers `node rekey` as a way out, but nothing clears the flag
 
-**Status:** open
+**Status:** fixed 2026-11-15
+
+**Fixed:** 2026-11-15
+
+**Estimate:** small; no open design decisions
 
 ## Observed
 
@@ -34,3 +38,7 @@ features were on, and will not use plain HTTP to the broker again." `docs/operat
 
 When a deliberate way back to plain HTTP is wanted, it needs its own command from the user's terminal, with agent
 variables refused, like `fence delete`. That is a design choice.
+
+## Fix note
+
+The refusal in `internal/node/client.go` now says: "Use https". It no longer offers `broker forget` or `node rekey`. The record stays permanent. `TestPlainHTTPRefusalOffersNoRekeyRoute` in `internal/node/crossuser_test.go` failed before the change and passes after it. A command that deliberately clears the record is not built. It remains a separate design choice.
