@@ -1,0 +1,20 @@
+# GCB CI for nitipan. Triggers nitipan-pr and nitipan-main, us-central1.
+#
+# - Commands are inline because the repo has no Makefile yet. Move them to `make ci` once it does.
+# - `go vet` exits 1 when a module has no packages, so the step passes until the first one lands.
+
+steps:
+  - id: CI
+    name: 'golang:1.27-trixie'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -e
+        if [[ -z "$$(go list ./...)" ]]; then
+          exit 0
+        fi
+        go vet ./...
+        go test ./...
+
+timeout: 600s
