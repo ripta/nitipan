@@ -9,7 +9,7 @@ remote's fence mode one key, `nitipan.<remote>.fence`, with three states. It cla
 
 ## Run state
 
-- Run: default `next 1`, the row NIT-009 M1-M3. Code and specs share this repository, on `main`. In progress.
+- Run: default `next 1`, the row NIT-009 M1-M3. Code and specs share this repository, on `main`. Row finished; final review next.
 - Run base and row base commit subject: `spec: schedule NIT-009 M1-M3`.
 - Dependencies: none. NIT-005 is implemented. No `live_after` entries. No skipped, held, or blocked rows.
 - Machine-local state tracks commit identifiers outside committed documentation.
@@ -196,3 +196,9 @@ Findings:
   - The `fence=true` refusal table shares one world.
   - The unset-mode fallback table keeps a world per row, since a landed fence would leak into the next row.
 - adr-impact over the row: no conflict and no ADR candidate.
+
+## Row finish
+
+Commit: `spec: mark the fence fallback implemented and move its queue row to history`. NIT-009 is `implemented` in the
+proposal and the index. The row NIT-009 M1-M3 moved from `queue.md` to the end of `history.md`. `proposals.py check`
+is clean.

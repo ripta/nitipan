@@ -1,6 +1,6 @@
 # NIT-009: Fence Fallback for Hosts That Refuse Fence Refs
 
-**Status:** accepted
+**Status:** implemented
 **Created:** 2026-11-14
 **Updated:** 2026-11-14
 
