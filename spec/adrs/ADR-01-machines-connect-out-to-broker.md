@@ -1,6 +1,6 @@
 # ADR-01: Machines Connect Out to the Broker
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-18
 
 ## Context
